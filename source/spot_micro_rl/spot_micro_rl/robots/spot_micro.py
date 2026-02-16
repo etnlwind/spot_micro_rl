@@ -3,6 +3,7 @@
 
 """Configuration for Spot Micro robots."""
 
+import os
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import DCMotorCfg
 from isaaclab.assets.articulation import ArticulationCfg
@@ -11,10 +12,15 @@ from isaaclab.assets.articulation import ArticulationCfg
 # Configuration
 ##
 
+# Get project root directory (4 levels up from this file)
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_CURRENT_DIR, "..", "..", "..", ".."))
+_URDF_PATH = os.path.join(_PROJECT_ROOT, "assets", "robots", "spot_micro", "spotmicroai_realistic_inertia.urdf")
+
 SPOT_MICRO_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UrdfFileCfg(
-        asset_path="D:/project/spot_micro_ai/spotmicroai_realistic_inertia.urdf",
+        asset_path=_URDF_PATH,
         fix_base=False,
         merge_fixed_joints=True,  # Merge toe fixed joints into foot links
         activate_contact_sensors=True,
