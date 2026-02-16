@@ -68,7 +68,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # -- 전진 속도 직접 보상
         self.rewards.forward_velocity = RewTerm(
             func=custom_mdp.forward_velocity_reward,
-            weight=0.0,  # 0: 먼저 서기 학습, 나중에 점진적으로 증가
+            weight=40.0,  # 40: 서기(30) vs 걷기(40) 균형, 100에서 줄임
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
 
@@ -152,7 +152,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # -- 어깨 대칭
         self.rewards.shoulder_symmetry = RewTerm(
             func=custom_mdp.shoulder_stance_symmetry,
-            weight=-10.0,
+            weight=-20.0,  # -10→-20: 좌우 어깨 대칭 강화
             params={
                 "front_shoulder_cfg": SceneEntityCfg("robot", joint_names=["front_left_shoulder", "front_right_shoulder"]),
                 "rear_shoulder_cfg": SceneEntityCfg("robot", joint_names=["rear_left_shoulder", "rear_right_shoulder"]),
@@ -162,7 +162,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # -- 어깨 중립
         self.rewards.shoulder_neutral = RewTerm(
             func=custom_mdp.shoulder_neutral_penalty,
-            weight=-50.0,
+            weight=-100.0,  # -50→-100: 어깨 0도 유지 강화 (거미 자세 방지)
             params={
                 "shoulder_cfg": SceneEntityCfg("robot", joint_names=["front_left_shoulder", "front_right_shoulder", "rear_left_shoulder", "rear_right_shoulder"]),
             }
