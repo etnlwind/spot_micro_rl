@@ -13,11 +13,11 @@ from . import agents
 
 
 gym.register(
-    id="Template-Spot-Micro-Rl-v0",
+    id="Isaac-Velocity-Flat-SpotMicro-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.spot_micro_rl_env_cfg:SpotMicroRlEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.spot_micro_rl_env_cfg:SpotMicroFlatEnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
     },
 )

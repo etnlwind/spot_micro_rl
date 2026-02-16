@@ -4,8 +4,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-Python module serving as a project/extension template.
+SpotMicro RL Project - Quadruped locomotion learning
 """
+
+# Register robot configurations
+from .robots import *
 
 # Register Gym environments.
 from .tasks import *
