@@ -68,7 +68,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # -- 전진 속도 직접 보상
         self.rewards.forward_velocity = RewTerm(
             func=custom_mdp.forward_velocity_reward,
-            weight=100.0,  # 150 → 100: 속도와 안정성 균형
+            weight=0.0,  # 0: 먼저 서기 학습, 나중에 점진적으로 증가
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
 

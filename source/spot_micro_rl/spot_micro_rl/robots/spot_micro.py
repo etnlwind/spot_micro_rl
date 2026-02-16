@@ -24,7 +24,7 @@ SPOT_MICRO_CFG = ArticulationCfg(
         fix_base=False,
         merge_fixed_joints=True,  # Merge toe fixed joints into foot links
         activate_contact_sensors=True,
-        force_usd_conversion=False,  # Reuse existing USD conversion (reduces warnings)
+        force_usd_conversion=False,  # USD conversion complete, reuse cache
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
                 stiffness=0.0,  # PhysX drive PD=0, DCMotor computes torque
