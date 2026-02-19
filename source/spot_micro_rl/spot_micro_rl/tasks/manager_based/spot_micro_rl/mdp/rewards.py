@@ -235,14 +235,243 @@ def all_feet_on_ground(
 def forward_velocity_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_vel: float = 0.3,
 ) -> torch.Tensor:
-    """전진 속도에 비례하는 보상. 빠를수록 보상이 커진다.
+    """안정적 전진 보상. 수평 자세로 전진할 때만 보상.
 
-    로봇의 로컬 x축(전방) 속도를 반환.
-    뒤로 가면 음수 → 양수 weight 사용 시 페널티.
-    서있으면 0 → 걸어야 보상.
+    raw 속도를 target_vel로 정규화 (0~1 범위).
+    orientation_quality를 곱해서 넘어지면서 전진해도 보상 = 0.
+    → "돌진하고 넘어짐" 전략 방지.
+
+    orientation_quality = exp(-7 * gravity_xy²)
+      - 완전 수평: 1.0
+      - 15도 기울임: ~0.5
+      - 30도 기울임: ~0.06
     """
     asset = env.scene[asset_cfg.name]
-    # body +x = 시각적 전진 (base_rotate 이미 처리됨)
     forward_vel = asset.data.root_lin_vel_b[:, 0]
-    return forward_vel
+    normalized_vel = torch.clamp(forward_vel / target_vel, -1.0, 1.0)
+    # 수평일 때만 전진 보상 (기울어지면 보상 감소)
+    gravity_xy = asset.data.projected_gravity_b[:, :2]
+    orientation_quality = torch.exp(-7.0 * torch.sum(torch.square(gravity_xy), dim=1))
+    return normalized_vel * orientation_quality
+
+
+def foot_clearance_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_clearance: float = 0.03,
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """스윙(비접촉) 시 발이 일정 높이 이상 들려야 보상.
+
+    전진 게이팅: 로봇이 앞으로 움직일 때만 보상 (제자리 발 들기 방지).
+    vel_x < min_vel이면 보상 = 0.
+
+    양수 weight와 함께 사용.
+    """
+    # 1) 접촉 감지
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    )  # (num_envs, num_feet), True = 접촉 중
+
+    # 2) 발 높이 (지면 기준)
+    asset = env.scene[foot_cfg.name]
+    foot_z = asset.data.body_pos_w[:, foot_cfg.body_ids, 2]  # (num_envs, num_feet)
+    env_origins_z = env.scene.env_origins[:, 2].unsqueeze(1)  # (num_envs, 1)
+    foot_height = foot_z - env_origins_z  # 지면 기준 높이
+
+    # 3) 스윙 중인 발 (비접촉)에 대해 높이 보상
+    swing_mask = ~contacts  # True = 스윙 중
+    # 높이가 target_clearance 이상이면 보상 (정규화: 0~1 범위)
+    clearance_reward = torch.clamp(foot_height / target_clearance, 0.0, 1.0)
+    # 스윙 중인 발에만 보상 적용
+    swing_reward = clearance_reward * swing_mask.float()
+
+    # 4) 전체 발 평균 (보통 1~2개만 스윙)
+    num_swing = swing_mask.float().sum(dim=1).clamp(min=1.0)
+    base_reward = swing_reward.sum(dim=1) / num_swing
+
+    # 5) 전진 게이팅: 앞으로 움직여야만 보상
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return base_reward * vel_gate
+
+
+def stationary_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    threshold: float = 0.05,
+) -> torch.Tensor:
+    """로봇이 멈춰있을 때 페널티. 속도 < threshold이면 -1.0 반환.
+
+    서있기 local minimum을 깨기 위한 직접적 페널티.
+    XY 평면 속도 크기가 threshold 미만이면 -1.0, 이상이면 0.0.
+    음수 weight와 함께 사용.
+    """
+    asset = env.scene[asset_cfg.name]
+    vel_xy = asset.data.root_lin_vel_b[:, :2]
+    vel_magnitude = torch.norm(vel_xy, dim=1)
+    return torch.where(
+        vel_magnitude < threshold,
+        torch.ones_like(vel_magnitude),
+        torch.zeros_like(vel_magnitude),
+    )
+
+
+def trot_gait_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """엄격한 트로트 걸음걸이 보상: 대각선 페어가 완벽히 교대해야 보상.
+
+    전진 게이팅: 로봇이 앞으로 움직일 때만 보상 (제자리 트롯 방지).
+
+    트로트 패턴:
+      페어 A: FL(0) + RR(3) — 왼앞 + 오른뒤
+      페어 B: FR(1) + RL(2) — 오른앞 + 왼뒤
+
+    완벽한 트로트 = 세 가지 조건 AND:
+      1) 페어 A 내부 동기화 (FL과 RR이 같은 상태)
+      2) 페어 B 내부 동기화 (FR과 RL이 같은 상태)
+      3) 페어 간 반위상 (A 접촉 ↔ B 스윙, 또는 그 반대)
+
+    곱셈(AND)으로 결합 → 세 조건 중 하나라도 불충족이면 보상 ≈ 0.
+
+    body_names 순서: front_left, front_right, rear_left, rear_right
+    반환: 0~1 (완벽한 트로트=1, 불완전=0)
+    양수 weight와 함께 사용.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    # 각 발의 접촉 여부: (num_envs, 4)
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    ).float()
+
+    # 조건 1: 페어 A 내부 동기화 (FL(0)과 RR(3)이 같은 상태면 1, 다르면 0)
+    pair_a_sync = 1.0 - torch.abs(contacts[:, 0] - contacts[:, 3])
+    # 조건 2: 페어 B 내부 동기화 (FR(1)과 RL(2)이 같은 상태면 1, 다르면 0)
+    pair_b_sync = 1.0 - torch.abs(contacts[:, 1] - contacts[:, 2])
+
+    # 조건 3: 페어 간 반위상 (A와 B가 반대 상태면 1, 같으면 0)
+    pair_a_state = (contacts[:, 0] + contacts[:, 3]) / 2.0  # 0=둘다공중, 1=둘다접촉
+    pair_b_state = (contacts[:, 1] + contacts[:, 2]) / 2.0
+    anti_phase = torch.abs(pair_a_state - pair_b_state)
+
+    # 곱셈 결합 (AND): 세 조건 모두 충족해야 보상
+    base_reward = pair_a_sync * pair_b_sync * anti_phase
+
+    # 전진 게이팅: 앞으로 움직여야만 보상
+    asset = env.scene[asset_cfg.name]
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return base_reward * vel_gate
+
+
+def gait_contact_count_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """동시 접촉 발 수 보상: 항상 2개 발이 바닥에 있어야 보상.
+
+    전진 게이팅: 로봇이 앞으로 움직일 때만 보상.
+
+    4개 접촉(서있음) → 0점
+    3개 접촉 → 0.5점
+    2개 접촉(트로트) → 1.0점 (최대 보상)
+    1개 접촉 → 0.5점
+    0개 접촉(점프) → 0점
+
+    양수 weight와 함께 사용.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    ).float()
+
+    num_contacts = contacts.sum(dim=1)  # 0~4
+    # 2개일 때 최대, 0이나 4일 때 0
+    base_reward = 1.0 - torch.abs(num_contacts - 2.0) / 2.0
+    base_reward = torch.clamp(base_reward, 0.0, 1.0)
+
+    # 전진 게이팅: 앞으로 움직여야만 보상
+    asset = env.scene[asset_cfg.name]
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return base_reward * vel_gate
+
+
+def swing_stride_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """스윙 보폭 보상: 발이 공중에서 앞으로 이동한 거리에 비례하여 보상.
+
+    강아지처럼 걸으려면 발을 들어서 앞으로 "뻗어" 내딛어야 함.
+    벌레처럼 기는 걸음은 발이 거의 앞으로 이동하지 않음.
+
+    원리:
+    1. 스윙 중인 발(비접촉)의 로봇 기준 전방 속도를 측정
+    2. 발이 앞으로 빠르게 이동할수록 높은 보상 (reach forward)
+    3. 전진 게이팅: 로봇이 앞으로 움직여야만 보상
+
+    양수 weight와 함께 사용.
+    """
+    # 1) 접촉 감지
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    )  # (num_envs, num_feet), True = 접촉
+
+    # 2) 발의 월드 속도
+    asset = env.scene[foot_cfg.name]
+    foot_vel = asset.data.body_vel_w[:, foot_cfg.body_ids, :3]  # (num_envs, num_feet, 3)
+
+    # 3) 로봇 전방 방향 (heading)
+    robot = env.scene[asset_cfg.name]
+    quat = robot.data.root_quat_w  # (num_envs, 4)
+    # heading vector (2D)
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    heading_x = 1.0 - 2.0 * (y * y + z * z)
+    heading_y = 2.0 * (x * y + w * z)
+
+    # 4) 발의 전방 속도 (heading 방향 성분)
+    foot_forward_vel = (
+        foot_vel[:, :, 0] * heading_x.unsqueeze(1) +
+        foot_vel[:, :, 1] * heading_y.unsqueeze(1)
+    )  # (num_envs, num_feet)
+
+    # 5) 스윙 중인 발만, 전방으로 빠르게 이동하면 보상
+    swing_mask = ~contacts  # True = 스윙
+    forward_component = torch.clamp(foot_forward_vel, min=0.0)
+    # 정규화: 0.5 m/s 이상이면 최대 보상
+    normalized = torch.clamp(forward_component / 0.5, 0.0, 1.0)
+    swing_reward = normalized * swing_mask.float()
+
+    # 6) 평균
+    num_swing = swing_mask.float().sum(dim=1).clamp(min=1.0)
+    base_reward = swing_reward.sum(dim=1) / num_swing
+
+    # 7) 전진 게이팅
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return base_reward * vel_gate
