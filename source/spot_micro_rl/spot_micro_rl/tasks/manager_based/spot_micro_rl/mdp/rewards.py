@@ -332,50 +332,107 @@ def trot_gait_reward(
     contact_threshold: float = 1.0,
     min_vel: float = 0.05,
 ) -> torch.Tensor:
-    """엄격한 트로트 걸음걸이 보상: 대각선 페어가 완벽히 교대해야 보상.
+    """덧셈 방식 트로트 걸음걸이 보상 (V6).
+
+    V4의 곱셈(AND)은 그래디언트가 0인 영역이 넓어 학습 실패.
+    V6: 4개 구성요소를 독립적으로 덧셈 → 부분 진행도 보상.
 
     전진 게이팅: 로봇이 앞으로 움직일 때만 보상 (제자리 트롯 방지).
 
-    트로트 패턴:
-      페어 A: FL(0) + RR(3) — 왼앞 + 오른뒤
-      페어 B: FR(1) + RL(2) — 오른앞 + 왼뒤
+    구성요소 (각 0~1, 균등 가중):
+      1) 대각선 페어A 동기화: FL(0)과 RR(3)이 같은 상태 → 1
+      2) 대각선 페어B 동기화: FR(1)과 RL(2)이 같은 상태 → 1
+      3) 페어 간 반위상: 페어A ≠ 페어B → 1
+      4) 같은쪽 비동기: FL≠FR, RL≠RR → 1 (벌레걸음 방지)
 
-    완벽한 트로트 = 세 가지 조건 AND:
-      1) 페어 A 내부 동기화 (FL과 RR이 같은 상태)
-      2) 페어 B 내부 동기화 (FR과 RL이 같은 상태)
-      3) 페어 간 반위상 (A 접촉 ↔ B 스윙, 또는 그 반대)
-
-    곱셈(AND)으로 결합 → 세 조건 중 하나라도 불충족이면 보상 ≈ 0.
+    덧셈 결합 → 부분 달성도 보상, 4개 모두 만족 = 1.0.
 
     body_names 순서: front_left, front_right, rear_left, rear_right
-    반환: 0~1 (완벽한 트로트=1, 불완전=0)
+    반환: 0~1 (완벽한 트로트=1)
     양수 weight와 함께 사용.
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    # 각 발의 접촉 여부: (num_envs, 4)
+    # 각 발의 접촉 여부: (num_envs, 4) - FL(0), FR(1), RL(2), RR(3)
     contacts = (
         contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
         > contact_threshold
     ).float()
 
-    # 조건 1: 페어 A 내부 동기화 (FL(0)과 RR(3)이 같은 상태면 1, 다르면 0)
-    pair_a_sync = 1.0 - torch.abs(contacts[:, 0] - contacts[:, 3])
-    # 조건 2: 페어 B 내부 동기화 (FR(1)과 RL(2)이 같은 상태면 1, 다르면 0)
-    pair_b_sync = 1.0 - torch.abs(contacts[:, 1] - contacts[:, 2])
+    # 1) 대각선 페어 A 동기화: FL(0)과 RR(3)이 같은 상태면 1
+    diag_a_sync = 1.0 - torch.abs(contacts[:, 0] - contacts[:, 3])
+    # 2) 대각선 페어 B 동기화: FR(1)과 RL(2)이 같은 상태면 1
+    diag_b_sync = 1.0 - torch.abs(contacts[:, 1] - contacts[:, 2])
 
-    # 조건 3: 페어 간 반위상 (A와 B가 반대 상태면 1, 같으면 0)
-    pair_a_state = (contacts[:, 0] + contacts[:, 3]) / 2.0  # 0=둘다공중, 1=둘다접촉
+    # 3) 페어 간 반위상: A와 B가 반대 상태면 1
+    pair_a_state = (contacts[:, 0] + contacts[:, 3]) / 2.0
     pair_b_state = (contacts[:, 1] + contacts[:, 2]) / 2.0
     anti_phase = torch.abs(pair_a_state - pair_b_state)
 
-    # 곱셈 결합 (AND): 세 조건 모두 충족해야 보상
-    base_reward = pair_a_sync * pair_b_sync * anti_phase
+    # 4) 같은쪽 비동기: FL≠FR이고 RL≠RR이면 1 (벌레걸음 직접 방지)
+    front_desync = torch.abs(contacts[:, 0] - contacts[:, 1])  # 다르면 1
+    rear_desync = torch.abs(contacts[:, 2] - contacts[:, 3])   # 다르면 1
+    side_desync = (front_desync + rear_desync) / 2.0
+
+    # 덧셈 결합: 각 성분 독립적으로 보상 (부분 진행도 가능)
+    base_reward = 0.25 * diag_a_sync + 0.25 * diag_b_sync + 0.25 * anti_phase + 0.25 * side_desync
 
     # 전진 게이팅: 앞으로 움직여야만 보상
     asset = env.scene[asset_cfg.name]
     vel_x = asset.data.root_lin_vel_b[:, 0]
     vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
     return base_reward * vel_gate
+
+
+def same_side_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """비-트로트 보행 패턴 페널티 (V8: 바운딩 + 페이싱 모두 감지).
+
+    트로트: FL+RR / FR+RL 대각선 쌍이 교대.
+    바운딩: FL+FR 동시 (앞뒤 동기화) → front_same, rear_same 검사
+    페이싱: FL+RL 동시 (좌우 동기화) → left_same, right_same 검사
+
+    V6~V7.1: 바운딩만 감지 → 페이싱을 놓침 (보상까지 받음!)
+    V8: 바운딩과 페이싱 중 더 큰 위반을 페널티.
+
+    바운딩 = max(front_same, rear_same)  → 0~1
+    페이싱 = max(left_same, right_same)  → 0~1
+    penalty = max(bounding, pacing)      → 0~1
+
+    - 완벽한 트로트: 0.0 (페널티 없음)
+    - 페이싱 또는 바운딩: ~1.0 (최대 페널티)
+
+    전진 게이팅: 서있을 때(4발 접지)는 페널티 없음, 보행 중에만.
+    음수 weight와 함께 사용.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    ).float()  # (num_envs, 4) - FL(0), FR(1), RL(2), RR(3)
+
+    # --- 바운딩 감지: 앞다리끼리 / 뒷다리끼리 동기화 ---
+    front_same = 1.0 - torch.abs(contacts[:, 0] - contacts[:, 1])  # FL==FR → 1
+    rear_same = 1.0 - torch.abs(contacts[:, 2] - contacts[:, 3])   # RL==RR → 1
+    bounding = (front_same + rear_same) / 2.0
+
+    # --- 페이싱 감지: 왼쪽끼리 / 오른쪽끼리 동기화 ---
+    left_same = 1.0 - torch.abs(contacts[:, 0] - contacts[:, 2])   # FL==RL → 1
+    right_same = 1.0 - torch.abs(contacts[:, 1] - contacts[:, 3])  # FR==RR → 1
+    pacing = (left_same + right_same) / 2.0
+
+    # 바운딩과 페이싱 중 더 큰 위반을 페널티
+    penalty = torch.max(bounding, pacing)
+
+    # 전진 게이팅: 보행 중에만 페널티 (서있을 때는 4발 접지 OK)
+    asset = env.scene[asset_cfg.name]
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return penalty * vel_gate
 
 
 def gait_contact_count_reward(
@@ -475,3 +532,51 @@ def swing_stride_reward(
     vel_x = robot.data.root_lin_vel_b[:, 0]
     vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
     return base_reward * vel_gate
+
+
+def rear_swing_bonus(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_clearance: float = 0.08,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """뒷발 스윙 보너스: 뒷발이 들려야 직접 보상.
+
+    문제: 로봇이 뒷발을 바닥에 고정하고 앞발만 움직이는 local minimum.
+    해결: 뒷발(rear_left=2, rear_right=3)이 공중에 있고 높이 들렸을 때 직접 보상.
+
+    body_names 순서: front_left(0), front_right(1), rear_left(2), rear_right(3)
+    양수 weight와 함께 사용.
+    """
+    # 1) 접촉 감지 (4발 모두)
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    )  # (num_envs, 4)
+
+    # 2) 뒷발 높이
+    asset = env.scene[foot_cfg.name]
+    foot_z = asset.data.body_pos_w[:, foot_cfg.body_ids, 2]  # (num_envs, 4)
+    env_origins_z = env.scene.env_origins[:, 2].unsqueeze(1)
+    foot_height = foot_z - env_origins_z
+
+    # 3) 뒷발(인덱스 2,3)에 대해서만 스윙 보상
+    rear_swing = ~contacts[:, 2:]  # (num_envs, 2), True = 뒷발 스윙 중
+    rear_height = foot_height[:, 2:]  # (num_envs, 2)
+    
+    # 높이 보상: target_clearance 이상이면 1.0
+    height_reward = torch.clamp(rear_height / target_clearance, 0.0, 1.0)
+    # 스윙 중인 뒷발만
+    rear_reward = (height_reward * rear_swing.float()).sum(dim=1)
+    # 최소 1개 뒷발이 들려야 의미있는 보상 (0~1 정규화)
+    rear_reward = rear_reward / 2.0  # 최대 2개 뒷발
+
+    # 4) 전진 게이팅
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return rear_reward * vel_gate

@@ -202,8 +202,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # load the checkpoint
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+        # Check if optimizer state exists in checkpoint (for transfer learning)
+        ckpt = torch.load(resume_path, weights_only=False, map_location="cpu")
+        has_optimizer = bool(ckpt.get("optimizer_state_dict", {}))
+        del ckpt
         # load previously trained model
-        runner.load(resume_path)
+        runner.load(resume_path, load_optimizer=has_optimizer)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

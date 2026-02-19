@@ -43,34 +43,29 @@ SPOT_MICRO_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.13),  # 크라우치: 발~어깨 0.127m + 약간 여유
+        pos=(0.0, 0.0, 0.20),  # V7: 서있는 자세로 시작 (0.13→0.20)
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
-            # 크라우치(웅크린) 자세: '>' 모양으로 다리 구부려 앉음
-            # shoulder=0: 옆으로 벌리지 않음
-            # leg=-1.0: upper leg 앞쪽으로 57도 기울임 (아래+앞)
-            # foot=+2.0: 무릎 115도 구부림 (lower leg 뒤+아래로)
-            # → 무릎이 앞쪽으로, 발이 뒤쪽으로 → 자연스러운 '>' 형태
-            # 높이: upper=0.065m + lower=0.062m = 0.127m
-            #
-            # 서기 목표: leg→-0.5, foot→1.2 (높이 0.19m)
-            # delta: leg +0.5 (upper leg 펴기), foot -0.8 (무릎 펴기)
+            # V7: 서있는 자세로 시작 (크라우치 제거)
+            # leg=-0.5: upper leg 약간 기울임 (29도)
+            # foot=+1.2: 무릎 69도 구부림 (자연스러운 서있는 자세)
+            # 높이: ~0.19m (서있는 상태)
             "front_left_shoulder": 0.0,
-            "front_left_leg": -1.0,
-            "front_left_foot": 2.0,
+            "front_left_leg": -0.5,
+            "front_left_foot": 1.2,
             "front_right_shoulder": 0.0,
-            "front_right_leg": -1.0,
-            "front_right_foot": 2.0,
+            "front_right_leg": -0.5,
+            "front_right_foot": 1.2,
             "rear_left_shoulder": 0.0,
-            "rear_left_leg": -1.0,
-            "rear_left_foot": 2.0,
+            "rear_left_leg": -0.5,
+            "rear_left_foot": 1.2,
             "rear_right_shoulder": 0.0,
-            "rear_right_leg": -1.0,
-            "rear_right_foot": 2.0,
+            "rear_right_leg": -0.5,
+            "rear_right_foot": 1.2,
         },
         joint_vel={".*": 0.0},
     ),
-    soft_joint_pos_limit_factor=0.9,
+    soft_joint_pos_limit_factor=0.7,  # V7: 0.9→0.7: foot 관절 최대 접힘 제한 (2.59*0.7=1.81rad)
     actuators={
         "legs": DCMotorCfg(
             # 12 leg joints (shoulder, leg, foot × 4)
