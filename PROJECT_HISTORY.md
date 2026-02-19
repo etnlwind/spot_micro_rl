@@ -470,5 +470,98 @@ python scripts/rsl_rl/train.py --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_env
 
 ---
 
-**Document Version**: 1.1  
-**Generated**: 2026-02-16 23:30  
+## 🚀 Phase 4: 자연스러운 보행 학습 (2026-02-17 ~ 2026-02-19)
+
+### 개요
+서있기만 하는 로봇을 실제 **강아지처럼 트롯 걸음걸이로 걷게** 만드는 과정.
+baseline model_9999에서 시작하여 여러 보상 함수 설계/수정을 거쳐 V4까지 진화.
+
+### 환경 최적화
+- **병렬 환경**: 4,096 → **24,576** (GPU 13.2GB, 68% 활용)
+- **제어 주파수**: 50Hz → **25Hz** (decimation 4→8, 진동 보행 물리적 차단)
+- **학습 속도**: ~4.3s/iteration @ 24,576 envs
+
+### 학습 체인 (Training Chain)
+
+| 버전 | 폴더 | 체크포인트 | 보상 | 특징 |
+|------|------|-----------|------|------|
+| Baseline | `2026-02-17_03-57-39` | model_9999 | +273 | 서있기만 함 |
+| Walking | `2026-02-17_19-39-15` | model_14998 | - | 첫 보행 (다리 떨림) |
+| Smooth | `2026-02-18_12-21-30` | model_19997 | +37 | 떨림 제거 (발 끌기) |
+| Clearance | `2026-02-18_16-40-58` | model_24996 | +248 | 발 높이 들기 (진동) |
+| Trot-inplace | `2026-02-18_19-07-41` | - | - | 제자리 트롯 |
+| Vel-gated | `2026-02-18_23-08-03` | - | - | 속도 게이팅 트롯 (작은 보폭) |
+| Stride | `2026-02-19_00-31-13` | - | - | 보폭 확대 (벌레 기어다님) |
+| **V1** | `2026-02-19_03-33-03` | model_11800 | ~870 | 높이↑, 24576 envs |
+| **V2** | `2026-02-19_05-58-20` | model_12200 | ~986 | feet_air_time 완화 |
+| **V3** | `2026-02-19_09-27-19` | model_12300 | ~1078 | standing_height 강화 |
+| **V4** | `2026-02-19_09-59-53` | 학습 중... | 11→? | 엄격한 트롯 페어 |
+
+### 주요 보상 함수 변경 이력
+
+#### 문제→해결 과정
+1. **서있기만 함** → `forward_velocity_reward` 정규화 + `stationary_penalty` 추가
+2. **다리 떨림** → `action_rate_l2 = -0.5`
+3. **발 끌기(셔플링)** → `foot_clearance_reward` 추가 (target 10cm)
+4. **진동 보행** → `decimation 4→8` (50Hz→25Hz)
+5. **제자리 트롯** → 모든 gait 보상에 `velocity gating` 추가
+6. **작은 보폭** → `action_scale 0.5→1.0`, 관절 제약 완화
+7. **벌레처럼 기어다님** → 높이 목표 0.21→0.24, 높이 페널티 강화
+
+#### V4 핵심 변경 (현재)
+- **`trot_gait_reward` 방식 변경**: 합산(OR) → **곱셈(AND)**
+  - `pair_a_sync × pair_b_sync × anti_phase`
+  - 세 조건 모두 충족해야 보상
+  - 페어 A (왼앞+오른뒤) ↔ 페어 B (오른앞+왼뒤) 완벽 교대
+- **trot_gait weight**: 25 → **50**
+- **contact_count weight**: 10 → **20**
+
+### 현재 보상 항목 (V4, 27개)
+
+| 보상 | 가중치 | 설명 |
+|------|--------|------|
+| track_lin_vel_xy_exp | 25.0 | 속도 추적 |
+| track_ang_vel_z_exp | 5.0 | 각속도 추적 |
+| forward_velocity | 40.0 | 전진 보상 (target 0.5 m/s) |
+| **trot_gait** | **50.0** | 대각 페어 교대 (곱셈 AND) |
+| standing_height | 40.0 | 높이×수평 결합 |
+| shoulder_neutral | -25.0 | 어깨 중립 |
+| foot_clearance | 20.0 | 스윙 시 발 높이 (10cm) |
+| **contact_count** | **20.0** | 2발 접촉 유지 |
+| height_bonus | 20.0 | 높이 비례 보상 |
+| flat_orientation_l2 | -20.0 | 수평 유지 |
+| swing_stride | 15.0 | 보폭 보상 |
+| stationary_penalty | -10.0 | 정지 페널티 |
+| feet_air_time | 10.0 | 발 체공 시간 |
+| shoulder_symmetry | -10.0 | 어깨 대칭 |
+| knee_height | 5.0 | 무릎 높이 |
+| base_height_l2 | -50.0 | 높이 (0.24m) |
+| undesired_contacts | -100.0 | 비정상 접촉 |
+| feet_below_knees | -500.0 | 발-무릎 역전 |
+
+### 커밋 이력
+
+| 커밋 | 해시 | 내용 |
+|------|------|------|
+| V4 | `44b46f0` | 엄격한 트롯 걸음걸이 (대각 페어 곱셈 AND 조건) |
+
+### 현재 상태 (2026-02-19 10:15)
+
+**V4 학습 진행 중**:
+- 폴더: `2026-02-19_09-59-53`
+- 시작: model_12300 (V3) → V4 보상으로 이어학습
+- 초기 보상 하락 (-6.5) → 빠르게 회복 (11.0)
+- GPU: RTX 5080 100%, 15.9GB/16.3GB
+- 24,576 환경, headless 모드
+
+**Resume Command**:
+```bash
+conda activate env_isaaclab
+cd D:\project\spot_micro_rl
+python scripts\rsl_rl\train.py --task Isaac-Velocity-Flat-SpotMicro-v0 --num_envs 24576 --headless --resume --load_run 2026-02-19_09-59-53 --checkpoint <latest_model>.pt --max_iterations 20000
+```
+
+---
+
+**Document Version**: 2.0
+**Generated**: 2026-02-19 10:15
