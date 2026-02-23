@@ -43,13 +43,11 @@ SPOT_MICRO_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.20),  # V7: 서있는 자세로 시작 (0.13→0.20)
+        pos=(0.0, 0.0, 0.20),  # 서있는 자세 높이
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
-            # V7: 서있는 자세로 시작 (크라우치 제거)
-            # leg=-0.5: upper leg 약간 기울임 (29도)
-            # foot=+1.2: 무릎 69도 구부림 (자연스러운 서있는 자세)
-            # 높이: ~0.19m (서있는 상태)
+            # leg=-0.5: upper leg 약간 기울임, foot=+1.2: 무릎 구부림
+            # 높이 약 0.19m의 자연스러운 서있는 자세
             "front_left_shoulder": 0.0,
             "front_left_leg": -0.5,
             "front_left_foot": 1.2,
@@ -65,15 +63,14 @@ SPOT_MICRO_CFG = ArticulationCfg(
         },
         joint_vel={".*": 0.0},
     ),
-    soft_joint_pos_limit_factor=0.7,  # V7: 0.9→0.7: foot 관절 최대 접힘 제한 (2.59*0.7=1.81rad)
+    soft_joint_pos_limit_factor=0.7,  # foot 관절 최대 접힘 제한 (2.59×0.7=1.81rad)
     actuators={
         "legs": DCMotorCfg(
             # 12 leg joints (shoulder, leg, foot × 4)
             joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
-            # SpotMicro is ~5.6kg (1/10 of Anymal-C 50kg)
-            # Scale effort proportionally: 80Nm * (5.6/50) ≈ 9Nm
-            saturation_effort=15.0,   # Anymal 120 * (5.6/50) ≈ 13.4
-            effort_limit=10.0,      # Anymal 80 * (5.6/50) ≈ 9
+            # SpotMicro ~5.6kg, Anymal-C 대비 1/10 비율로 토크 스케일링
+            saturation_effort=15.0,
+            effort_limit=10.0,
             velocity_limit=10.0,
             stiffness={".*": 10.0},   # Moderate: enough to stand, not so much that noise flips robot
             damping={".*": 1.0},     # Moderate damping for stability

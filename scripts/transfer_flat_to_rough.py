@@ -1,15 +1,10 @@
-"""Transfer Learning: V8 Flat → Rough Terrain
+"""Transfer Learning: Flat → Rough Terrain
 
-V8 flat 모델의 가중치를 러프 지형 모델로 전이합니다.
-- Flat 관측: 48차원 (base_lin_vel 3 + base_ang_vel 3 + projected_gravity 3 + 
-              velocity_commands 3 + joint_pos 12 + joint_vel 12 + actions 12)
-- Rough 관측: 102차원 (위 48차원 + height_scan 54차원)
+Flat 모델의 가중치를 러프 지형 모델로 전이합니다.
+Flat 관측(48차원)에 height_scan(54차원)을 추가하여 총 102차원으로 확장.
 
-첫 번째 레이어(actor.0, critic.0)만 확장:
-  - 기존 48차원 가중치 → 그대로 복사
-  - 새 54차원(height_scan) → 작은 값으로 초기화 (Xavier uniform)
-나머지 레이어는 그대로 복사.
-Optimizer state는 리셋 (새 차원에 맞지 않으므로).
+첨 번째 레이어(actor.0, critic.0)만 확장하고 나머지는 그대로 복사.
+새 차원에는 Xavier uniform으로 작은 값 초기화. Optimizer state는 리셋.
 """
 
 import torch
@@ -20,7 +15,7 @@ import argparse
 
 
 def transfer_weights(src_path: str, dst_path: str, old_obs_dim: int = 48, new_obs_dim: int = 102):
-    """Flat 모델 가중치를 Rough 모델로 전이."""
+    """Flat 모델 가중치를 Rough 모델로 전이한다."""
     
     print(f"Loading source model: {src_path}")
     ckpt = torch.load(src_path, map_location="cpu")
@@ -50,7 +45,7 @@ def transfer_weights(src_path: str, dst_path: str, old_obs_dim: int = 48, new_ob
         # 새 차원(height_scan)에 대해 Xavier uniform 초기화
         # 기존 레이어의 fan_in을 new_obs_dim으로 설정
         new_part = torch.empty(out_features, extra_dims)
-        init.xavier_uniform_(new_part, gain=0.1)  # gain=0.1: 작은 값으로 초기화 → 기존 행동 보존
+        init.xavier_uniform_(new_part, gain=0.1)  # 작은 값으로 초기화해서 기존 행동 보존
         new_weight[:, old_obs_dim:] = new_part
         
         model_sd[layer_name] = new_weight
@@ -59,7 +54,7 @@ def transfer_weights(src_path: str, dst_path: str, old_obs_dim: int = 48, new_ob
         print(f"    New part norm: {new_part.norm():.4f}")
         print(f"    Combined norm: {new_weight.norm():.4f}")
     
-    # noise std: 약간 높여서 탐색 허용 (러프 지형 적응을 위해)
+    # noise std를 약간 높여서 러프 지형 탐색 허용
     old_std = model_sd["std"].clone()
     # std를 약간 증가 (현재값의 1.5배, 최대 0.5)
     new_std = torch.clamp(old_std * 1.5, min=0.1, max=0.5)

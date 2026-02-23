@@ -1,8 +1,8 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-02-16 23:30  
-**Project Status**: Training in progress - Ready to continue  
-**Current Iteration**: 28,700 (latest checkpoint)
+**Last Updated**: 2026-02-23 22:00  
+**Project Status**: V12 학습 진행 중 (러프 지형)  
+**Current Iteration**: 27,100 (rough terrain, model_27100.pt)
 
 ---
 
@@ -12,12 +12,12 @@
 Train SpotMicro quadruped robot to perform stable walking from a crouched initial position using reinforcement learning (PPO algorithm via RSL-RL).
 
 ### Technical Stack
-- **Isaac Lab**: v0.48.5 (v2.3.0)
-- **Isaac Sim**: 5.1.0
-- **Python**: 3.11.14
+- **Isaac Lab**: 4.5.0
+- **Isaac Sim**: 4.5.0
+- **Python**: 3.10
 - **Conda Environment**: env_isaaclab
-- **GPU**: NVIDIA RTX 5080 16GB
-- **Algorithm**: PPO (Proximal Policy Optimization)
+- **GPU**: NVIDIA RTX 5080 Laptop 16GB
+- **Algorithm**: PPO (Proximal Policy Optimization) via RSL-RL
 
 ### Project Structure Evolution
 - **Phase 1**: In-tree development (C:\IsaacLab)
@@ -30,20 +30,24 @@ Train SpotMicro quadruped robot to perform stable walking from a crouched initia
 
 ### Key Checkpoints
 
-| Checkpoint | Iteration | Date | Size | Achievement |
-|------------|-----------|------|------|-------------|
-| `2026-02-16_10-54-39` | 22,600 | 2026-02-16 | 300.91 MB | ⭐ **Best standing performance** |
-| `2026-02-16_22-24-07` | 27,100→28,300 | 2026-02-16 | 4.37 MB | Walking transition (config adjusted) |
-| `2026-02-16_22-18-56` | 28,600→28,700 | 2026-02-16 | 4.37 MB | 🔴 **Latest checkpoint** |
+| Checkpoint | Iteration | Date | Achievement |
+|------------|-----------|------|-------------|
+| `2026-02-16_10-54-39` | 22,600 | 2026-02-16 | ⭐ **서기 성공** (Phase 1) |
+| `2026-02-17_03-57-39` | 9,999 | 2026-02-17 | Baseline (서기만 함) |
+| `2026-02-19_09-59-53` | 13,400 | 2026-02-19 | V4: 엄격한 트롯 (Flat) |
+| `2026-02-19_20-40-30` | 900 | 2026-02-19 | V8: Flat 최종 (전이학습 소스) |
+| `transferred_from_v8_flat` | 0 | 2026-02-20 | V8→Rough 가중치 전이 |
+| `2026-02-21_08-43-40` | 1,000→9,900 | 2026-02-21 | V9: 첫 장기 러프 학습 (10K iters) |
+| `2026-02-22_13-11-38` | 11,000→16,500 | 2026-02-22 | V10: rear_alternation 추가 |
+| `2026-02-22_23-19-25` | 16,500→21,200 | 2026-02-22~23 | V11: rear_both_ground 페널티 |
+| `2026-02-23_19-41-20` | 25,800→27,100+ | 2026-02-23 | 🔴 **V12: rear_forward_stride (현재)** |
 
 ### Training Statistics
-- **Total Training Sessions**: 115+
-- **Successful Iterations**: 28,700
-- **Training Environments**: 4,096 parallel environments
-- **Episode Length**: 10 seconds
-
-### Discarded Sessions
-- `2026-02-16_14-20-49` (iter 30,200) - ❌ **Wrong configuration, restarted from iter 27,100**
+- **Total Training Sessions**: 250+
+- **Flat Terrain Iterations**: ~14,300 (Phase 1~4 + V5~V8)
+- **Rough Terrain Iterations**: 27,100+ (V9~V12, 진행 중)
+- **Training Environments**: 24,576 parallel environments
+- **Episode Length**: Flat 10s / Rough 20s
 
 ---
 
@@ -53,91 +57,98 @@ Train SpotMicro quadruped robot to perform stable walking from a crouched initia
 **File**: `source/spot_micro_rl/spot_micro_rl/robots/spot_micro.py`
 
 ```python
-# URDF Model
-urdf_path = "D:/project/spot_micro_ai/spotmicroai_realistic_inertia.urdf"
+# URDF Model (프로젝트 내 assets/ 폴더)
+urdf_path = "assets/robots/spot_micro/spotmicroai_realistic_inertia.urdf"
 
 # DC Motor Configuration
 actuators = {
     "legs": DCMotorCfg(
-        joint_names_expr=[".*"],
+        joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
         effort_limit=10.0,
         saturation_effort=15.0,
         stiffness=10.0,
         damping=1.0,
-        velocity_limit=100.0,
+        velocity_limit=10.0,
     )
 }
 
-# Crouch Initial State
-default_joint_pos = {
-    ".*shoulder.*": 0.0,
-    ".*leg.*": -1.0,
-    ".*foot.*": 2.0,
+# 서있는 초기 자세 (V6+)
+init_state = {
+    pos = (0.0, 0.0, 0.20),  # 높이 0.20m
+    joint_pos = {
+        ".*shoulder": 0.0,
+        ".*leg": -0.5,       # upper leg 약간 기울임
+        ".*foot": 1.2,       # 무릎 구부림
+    }
 }
-
-# Initial Height: 0.13m
+soft_joint_pos_limit_factor = 0.7  # foot 관절 접힘 제한 (2.59×0.7=1.81rad)
 ```
-
-**Critical Fix Applied**: `target_type="position"` (enables PhysX DriveAPI for DC motor control)
 
 ### Environment Configuration
 **File**: `source/spot_micro_rl/spot_micro_rl/tasks/manager_based/spot_micro_rl/spot_micro_rl_env_cfg.py`
 
-#### Reward Weights (Optimized)
+#### 등록된 환경
+- `Isaac-Velocity-Flat-SpotMicro-v0` — 평지 학습/테스트
+- `Isaac-Velocity-Flat-SpotMicro-Play-v0` — 평지 플레이 (계단 지형 포함)
+- `Isaac-Velocity-Rough-SpotMicro-v0` — 러프 지형 학습
+- `Isaac-Velocity-Rough-SpotMicro-Play-v0` — 러프 지형 플레이
+
+#### 현재 보상 항목 (V12, Rough Terrain)
+
+| 보상 | 가중치 | 설명 |
+|------|--------|------|
+| **trot_gait** | **180.0** | 대각 페어 교대 (0.4×mean + 0.6×min) |
+| **rear_forward_stride** | **250.0** | 뒷발 [높이 × 전방속도] 곱 |
+| **same_side_penalty** | **-200.0** | 바운딩/페이싱 억제 |
+| **rear_both_ground** | **-200.0** | 뒷다리 동시 접지 페널티 |
+| **rear_alternation** | **150.0** | 뒷다리 교대 스윙 |
+| rear_swing | 80.0 | 뒷발 스윙 높이 (target 12cm) |
+| leg_lift | 60.0 | 스윙 시 힙 관절 들어올림 |
+| swing_stride | 50.0 | 발의 전방 보폭 |
+| terrain_progress | 50.0 | 지형 난이도 비례 보상 |
+| foot_clearance | 35.0 | 스윙 시 발 높이 (target 10cm) |
+| forward_velocity | 35.0 | 전진 보상 (target 0.5 m/s) |
+| standing_height | 30.0 | 높이 0.22m × 수평 결합 |
+| distance_walked | 30.0 | 원점 대비 이동 거리 |
+| base_height_l2 | -30.0 | 높이 0.22m 기준 L2 |
+| foot_extension | -30.0 | foot 관절 과신전 페널티 |
+| knee_height | 20.0 | 무릎 높이 유지 |
+| feet_air_time | 20.0 | 체공 시간 (150ms 이상) |
+| flat_orientation_l2 | -15.0 | 수평 유지 |
+| track_lin_vel_xy_exp | 10.0 | 속도 추적 |
+| track_ang_vel_z_exp | 5.0 | 각속도 추적 |
+| joint_deviation | -3.0 | 기본 자세 편차 |
+| action_rate_l2 | -1.5 | 동작 부드러움 |
+| undesired_contacts | -300.0 | 비정상 접촉 (base, shoulder, leg) |
+| feet_below_knees | -500.0 | 발-무릎 역전 |
+
+#### Rough Terrain 설정
 ```python
-rewards = {
-    # Primary Objectives
-    "forward_velocity": 150.0,           # Main walking incentive
-    "standing_height": 30.0,             # Maintain upright posture
-    "height_bonus": 30.0,                # Additional height reward
-    
-    # Gait Quality
-    "feet_air_time": 20.0,               # Encourage leg lifting
-    "undesired_contacts": -100.0,        # Prevent leg dragging (knees/shanks)
-    
-    # Stability & Balance
-    "base_height": -10.0,
-    "orientation": -5.0,
-    "ang_vel_xy": -0.05,
-    "lin_vel_z": -2.0,
-    
-    # Energy Efficiency
-    "action_rate": -0.01,
-    "joint_acc": -2.5e-7,
-    "dof_pos_limits": -10.0,
-    "dof_vel_limits": -0.0,
-}
+# 지형 종류: 계단, 역계단, 랜덤 박스, 울퉁불퉁, 경사(상/하)
+terrain_size = (4.0, 4.0)  # 작은 지형 → 승급 기준 2m
+curriculum = True           # 점진적 난이도 증가
+step_height_range = (0.02, 0.08)  # SpotMicro 스케일
+
+# 높이 스캐너: 0.1m 해상도, 0.8×0.5m 그리드
+# 관측: 48차원(flat) + 54차원(height_scan) = 102차원
+
+# 속도 명령
+lin_vel_x = (0.2, 0.6)   # 러프 지형 속도 범위
+episode_length_s = 20.0   # 긴 에피소드
+
+# 외부 교란
+push_robot = True          # 10~15초 간격, ±0.3 m/s
+base_contact_termination = True  # 넘어짐 감지
 ```
 
-#### Velocity Command Ranges
+#### PPO 설정 (Rough)
 ```python
-ranges = CommandsCfg.Ranges(
-    lin_vel_x=(0.0, 0.5),      # Forward: 0 ~ 0.5 m/s
-    lin_vel_y=(0.0, 0.0),      # No lateral movement
-    ang_vel_z=(-0.5, 0.5),     # Rotation: ±0.5 rad/s
-    heading=(0.0, 0.0),        # No heading change
-)
+# 네트워크: [512, 256, 128] (actor = critic)
+entropy_coef = 0.005      # 탐색 줄임 (안정성 우선)
+num_steps_per_env = 24
+learning_rate = 1e-3       # adaptive schedule
+save_interval = 100
 ```
-
-#### Action Configuration
-```python
-action_scale = 0.5          # Scale down actions for stability
-decimation = 4              # Physics steps per control step
-```
-
-### Custom Reward Functions
-**File**: `source/spot_micro_rl/spot_micro_rl/tasks/manager_based/spot_micro_rl/mdp/rewards.py`
-
-#### Implemented Functions
-1. **`standing_height_exp`**: Exponential reward for maintaining target height
-2. **`feet_below_knees`**: Penalizes feet positioned above knee joints
-3. **`body_height_reward`**: Rewards stable body height maintenance
-4. **`forward_velocity_reward`**: Progressive reward for forward motion
-5. **`progressive_height_reward`**: Gradually increases height target
-6. **`all_feet_on_ground`**: Rewards stable four-legged stance
-7. **`shoulder_stance_symmetry`**: Encourages symmetric shoulder positions
-8. **`shoulder_neutral_penalty`**: Penalizes extreme shoulder angles
-9. **`leg_pose_symmetry`**: Rewards symmetric leg configurations
 
 ---
 
@@ -271,86 +282,98 @@ pip install -e source/spot_micro_rl
 
 ## ⚠️ Important Notes & Known Issues
 
-### Environment Registration Conflict
-**Issue**: Extension path changed during Phase 3
-- **Old Path**: `D:\project\spot_micro_rl\spot_micro_rl\source\spot_micro_rl`
-- **New Path**: `D:\project\spot_micro_rl\source\spot_micro_rl`
-- **Status**: Extension re-installed after path change
+### Environment Registration
+**Environment IDs**:
+- `Isaac-Velocity-Flat-SpotMicro-v0` — Flat 학습
+- `Isaac-Velocity-Flat-SpotMicro-Play-v0` — Flat 플레이
+- `Isaac-Velocity-Rough-SpotMicro-v0` — Rough 학습 (현재 사용)
+- `Isaac-Velocity-Rough-SpotMicro-Play-v0` — Rough 플레이
 
-**Action Required**: 
-If encountering import errors, re-install extension:
+**Action Required** (import 문제 시): 
 ```bash
 pip uninstall spot_micro_rl -y
 pip install -e source/spot_micro_rl
 ```
 
-**Environment ID**: `Isaac-Velocity-Flat-SpotMicro-v0`
-
 ### Training Resume Command
-**Next Action**: Resume training from latest checkpoint
+**Next Action**: V12 학습이 완료되면 결과 평가 후 V13 진행
 
 ```bash
+# Rough terrain 학습 재개
+conda activate env_isaaclab
 cd D:\project\spot_micro_rl
 
 python scripts/rsl_rl/train.py \
-  --task=Isaac-Velocity-Flat-SpotMicro-v0 \
-  --num_envs=4096 \
-  --max_iterations=10000 \
+  --task=Isaac-Velocity-Rough-SpotMicro-v0 \
+  --num_envs=24576 \
+  --headless \
+  --max_iterations=40000 \
   --resume \
-  --load_run=2026-02-16_22-18-56
+  --load_run=2026-02-23_19-41-20
 ```
 
 **Parameters**:
-- **Current Iteration**: 28,700
-- **Target**: +10,000 iterations → 38,700 total
-- **Parallel Envs**: 4,096
-- **Resume From**: Latest checkpoint (2026-02-16_22-18-56/model_28700.pt)
+- **Current Iteration**: 27,100+
+- **Parallel Envs**: 24,576
+- **Resume From**: Latest checkpoint in `2026-02-23_19-41-20`
+
+```bash
+# 결과 시각화 (러프 지형)
+python scripts/rsl_rl/play.py \
+  --task=Isaac-Velocity-Rough-SpotMicro-Play-v0 \
+  --num_envs=50 \
+  --load_run=2026-02-23_19-41-20
+```
 
 ---
 
 ## 📊 Training Metrics to Monitor
 
-### Primary Metrics
-1. **`Episode/mean_reward`**: Overall performance indicator
-2. **`Rewards/forward_velocity`**: Walking progress
-3. **`Rewards/standing_height`**: Posture stability
-4. **`Rewards/feet_air_time`**: Gait quality (leg lifting)
-5. **`Rewards/undesired_contacts`**: Leg dragging prevention
+### Primary Metrics (Rough Terrain)
+1. **`Rewards/rear_forward_stride`**: 뒷발 실제 보폭 (V12 핵심)
+2. **`Rewards/trot_gait`**: 트롯 걸음걸이 품질
+3. **`Rewards/rear_alternation`**: 뒷다리 교대 비율
+4. **`Rewards/rear_both_ground`**: 뒷다리 동시접지 (감소 필요)
+5. **`Episode/terrain_levels`**: 커리큘럼 승급 레벨
+6. **`Episode/time_out`**: 에피소드 끝까지 생존 비율
+7. **`Episode/mean_reward`**: 전체 보상
 
 ### Secondary Metrics
-- **`Episode/lin_vel_x_command`**: Forward velocity commands
-- **`Episode/mean_episode_length`**: Episode duration (target: 10s)
-- **`Loss/value_function`**: Critic network loss
-- **`Loss/surrogate`**: PPO policy loss
-- **`Policy/mean_noise_std`**: Exploration level
+- **`Rewards/forward_velocity`**: 전진 속도
+- **`Rewards/distance_walked`**: 이동 거리
+- **`Rewards/terrain_progress`**: 지형 난이도 보상
+- **`Policy/mean_noise_std`**: 탐색 수준
+- **`Loss/value_function`**: Critic 로스
 
 ### Success Criteria
-- ✅ Standing height maintained (~0.23m target)
-- 🔄 Forward velocity approaching 0.3-0.5 m/s
-- 🔄 Feet air time > 0.2s per stride
-- 🔄 Undesired contacts near zero (no knee dragging)
-- 🔄 Stable gait pattern emergence
+- ✅ 서기 높이 유지 (~0.22m)
+- ✅ 앞다리 트롯 교대
+- ✅ 에피소드 생존율 >80%
+- 🔄 뒷다리 실제 보폭 > 3cm
+- 🔄 terrain_levels > 5.0
+- ⬜ 전체 4족 자연스러운 트롯
 
 ---
 
 ## 🔄 Next Steps
 
-### Immediate Actions
-1. **Resume Training**: Execute command above to continue from iter 27,100
-2. **Monitor Metrics**: Watch for walking coordination improvements
-3. **Log Analysis**: Check TensorBoard logs in `logs/rsl_rl/spot_micro_flat/`
+### 현재 진행
+1. **V12 학습 완료 대기**: rear_forward_stride 보상이 안정적으로 올라가는지 모니터
+2. **Play 테스트**: 뒷다리 실제 보폭이 시각적으로 확인되면 성공
 
-### Potential Adjustments (if needed)
-- **Velocity Range**: May need to increase max `lin_vel_x` beyond 0.5 m/s
-- **Contact Penalty**: If too restrictive, reduce `undesired_contacts` weight
-- **Gait Rewards**: Fine-tune `feet_air_time` weight if leg lift insufficient
-- **Action Scale**: Consider increasing from 0.5 if movements too conservative
+### 다음 단계 (V13+)
+- **전체 4족 트롯 완성**: 앞/뒤 다리 모두 대각 교대로 자연스러운 보행
+- **지형 일반화**: terrain_levels 최대치까지 커리큘럼 승급
+- **속도 범위 확대**: lin_vel_x 범위를 (0.0, 1.0)까지 확장
+- **외부 교란 강화**: push velocity 증가, 외력 추가
+- **Sim-to-Real 전이**: 실제 SpotMicro 하드웨어에 배포
 
-### Future Enhancements
-- Implement terrain randomization (rough terrain training)
-- Add height scanning for obstacle avoidance
-- Test on different velocity command ranges
-- Deploy to real hardware (sim-to-real transfer)
+### 보상 설계 교훈
+1. **단계적 접근이 핵심**: 교대(V10) → 동시접지 억제(V11) → 실제 보폭(V12)
+2. **당근+채찍 병행**: 보상(alternation)만으로는 부족, 페널티(both_ground)도 필요
+3. **곱셈 보상이 효과적**: height × velocity 곱으로 "둘 다 해야 보상" 구조
+4. **min-heavy 결합**: 0.4*mean + 0.6*min으로 최악 성분을 견인
+5. **전이학습 효과**: Flat에서 기본기를 배우고 Rough로 넘기면 학습 속도 향상
 
 ---
 
@@ -400,18 +423,24 @@ scripts/rsl_rl/
 
 ### Training Logs
 ```
-logs/rsl_rl/spot_micro_flat/
-├── 2026-02-16_10-54-39/    # Iter 22600 - Best standing
-├── 2026-02-16_22-24-07/    # Iter 27100→28300 - Config adjusted
-└── 2026-02-16_22-18-56/    # Iter 28600→28700 - Latest (RESUME FROM HERE)
-
-# Discarded (wrong config)
-├── 2026-02-16_14-20-49/    # Iter 30200 - ❌ DO NOT USE
-```
-
-### Asset Files
-```
-URDF: D:/project/spot_micro_ai/spotmicroai_realistic_inertia.urdf
+logs/rsl_rl/
+├── spot_micro_flat/          # Flat terrain (Phase 1~5, V1~V8)
+│   ├── 2026-02-15_*/         # 초기 실험들
+│   ├── 2026-02-17_*/         # Phase 4 (V1~V4)
+│   └── 2026-02-19_20-40-30/  # V8 최종 Flat 모델
+│
+├── spot_micro_rough/         # Rough terrain (Phase 6, V9~V12)
+│   ├── transferred_from_v8_flat/  # 전이학습 체크포인트
+│   ├── 2026-02-20_*/         # V8 러프 초기 실험
+│   ├── 2026-02-21_08-43-40/  # V9 장기 학습 (10K iters)
+│   ├── 2026-02-22_13-11-38/  # V10 (rear_alternation)
+│   ├── 2026-02-22_23-19-25/  # V11 (rear_both_ground)
+│   └── 2026-02-23_19-41-20/  # V12 🔴 현재 학습 중
+│
+├── ant/                      # Ant 환경 테스트
+├── anymal_c_flat/            # ANYmal C 참고
+├── anymal_c_rough/           # ANYmal C Rough 참고
+└── cartpole_direct/          # CartPole 테스트
 ```
 
 ---
@@ -419,18 +448,28 @@ URDF: D:/project/spot_micro_ai/spotmicroai_realistic_inertia.urdf
 ## 🎓 Lessons Learned
 
 ### Critical Insights
-1. **PhysX DriveAPI Requirement**: `target_type="position"` is mandatory for DC motor control
-2. **Reward Balance is Key**: Initial standing priority prevented walking behavior
-3. **Gait Quality Matters**: Explicit air time reward prevents lazy/dragging gaits
-4. **Parallel Environments**: 4096 envs enable fast training (~1hr per 1000 iters)
-5. **Checkpoint Management**: Keep multiple milestones for fallback options
+1. **PhysX DriveAPI Requirement**: `target_type="position"` 필수 (DC 모터 제어)
+2. **Reward Balance is Key**: 서기 우선 → 걷기 전환 시 보상 비율 조정 필수
+3. **단계적 보상 추가**: 한번에 많은 보상을 넣으면 학습 불안정 → 순차 투입
+4. **min-heavy 결합 (0.4mean + 0.6min)**: 약한 성분을 견인하는 효과
+5. **곱셈 보상 (height × velocity)**: "둘 다 해야" 조건을 자연스럽게 표현
+6. **전이학습 효과**: Flat→Rough 전이로 기본기를 보존하면서 새 능력 습득
+7. **Local Minimum 탈출**: 보상(당근)만으로는 부족 → 페널티(채찍) 병행
+8. **스케일 중요**: SpotMicro(24cm)는 ANYmal(55cm) 대비 1/2 스케일 — 지형/보상 모두 조정 필요
+9. **Curriculum Learning**: 쉬운 지형부터 시작해서 점진적으로 어려운 지형으로 승급
+
+### 뒷다리 문제 해결 과정 (V10→V12)
+- ❌ V10: rear_alternation만으로는 "토큰 교대" (살짝 들었다 내려놓기)
+- ❌ V11: + rear_both_ground 페널티 → 발을 들지만 제자리 들기
+- 🔄 V12: + rear_forward_stride (높이×속도 곱) → 실제 보폭 학습 중
 
 ### Common Pitfalls Avoided
-- ❌ Using `target_type="none"` with DC motors
-- ❌ Over-weighting stability at expense of movement
-- ❌ Ignoring contact penalties for knees/shanks
-- ❌ Training without sufficient parallel environments
-- ❌ Not testing code changes with small iteration counts
+- ❌ `target_type="none"` with DC motors
+- ❌ 안정성 과도 강조 → 움직임 억제
+- ❌ 무릎/어깨 접촉 페널티 없이 학습
+- ❌ 병렬 환경 부족 (4K→24K로 6배 증가)
+- ❌ 코드 변경 후 대규모 테스트 (소규모 먼저)
+- ❌ 한 커밋에 너무 많은 변경 (V5~V7은 커밋 없이 진행해서 추적 어려움)
 
 ---
 
@@ -443,34 +482,43 @@ URDF: D:/project/spot_micro_ai/spotmicroai_realistic_inertia.urdf
 ### Troubleshooting Checklist
 - [ ] Conda environment activated (`conda activate env_isaaclab`)
 - [ ] Extension installed (`pip list | findstr spot_micro_rl`)
-- [ ] URDF path correct (D:/project/spot_micro_ai/)
+- [ ] URDF path correct (assets/robots/spot_micro/ 내)
 - [ ] GPU available (check `nvidia-smi`)
-- [ ] Sufficient disk space for logs (3.81 GB + growing)
+- [ ] Sufficient disk space for logs (~8.3 GB)
 
 ---
 
 ## 🏁 Current Status Summary
 
-**Training State**: ⏸️ Paused (ready to resume from iter 28,700)  
-**Next Checkpoint Goal**: Iteration 38,700 (+10,000)  
-**Environment**: ✅ Standalone extension (path simplified: D:\project\spot_micro_rl)  
-**Latest Model**: `2026-02-16_22-18-56/model_28700.pt` (4.37 MB)  
-**Training Quality**: Standing stable ✅ | Walking in progress 🔄
+**Training State**: 🟢 V12 학습 진행 중 (rough terrain, iter 27,100+)  
+**Training Folder**: `logs/rsl_rl/spot_micro_rough/2026-02-23_19-41-20`  
+**Environment**: ✅ Standalone extension (D:\project\spot_micro_rl)  
+**Latest Model**: `model_27100.pt`  
+**Terrain**: Rough (6종 지형, 커리큘럼 활성, terrain_levels ~2.6)  
 
-**Configuration Status**: 
-- ✅ Corrected after day training issue
-- ❌ Discarded: session 2026-02-16_14-20-49 (iter 30,200)
-- ✅ Resumed from: iter 27,100 with fixed config
+**핵심 지표**:
+- time_out 비율: ~0.90 (에피소드 끝까지 생존)
+- rear_forward_stride: ~166 (뒷발 실제 보폭 신호)
+- 24,576 환경, headless 모드, ~6.8s/iteration
 
-**Resume Command Ready**:
+**Resume Command**:
 ```bash
+conda activate env_isaaclab
 cd D:\project\spot_micro_rl
-python scripts/rsl_rl/train.py --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=4096 --max_iterations=10000 --resume --load_run=2026-02-16_22-18-56
+python scripts\rsl_rl\train.py --task Isaac-Velocity-Rough-SpotMicro-v0 --num_envs 24576 --headless --resume --load_run 2026-02-23_19-41-20 --max_iterations 40000
 ```
+
+**뒷다리 문제 해결 진행도**:
+- ✅ V9: 러프 지형 기본 보행
+- ✅ V10: 뒷다리 교대 시작 (rear_alternation)
+- ✅ V11: 뒷다리 동시접지 억제 (rear_both_ground)
+- 🔄 V12: 뒷다리 실제 보폭 학습 중 (rear_forward_stride)
+- ⬜ V13+: 전체 4족 트롯 완성, 지형 일반화
 
 ---
 
-## 🚀 Phase 4: 자연스러운 보행 학습 (2026-02-17 ~ 2026-02-19)
+**Document Version**: 3.0  
+**Generated**: 2026-02-23 22:00
 
 ### 개요
 서있기만 하는 로봇을 실제 **강아지처럼 트롯 걸음걸이로 걷게** 만드는 과정.
@@ -545,23 +593,218 @@ baseline model_9999에서 시작하여 여러 보상 함수 설계/수정을 거
 |------|------|------|
 | V4 | `44b46f0` | 엄격한 트롯 걸음걸이 (대각 페어 곱셈 AND 조건) |
 
-### 현재 상태 (2026-02-19 10:15)
+---
 
-**V4 학습 진행 중**:
-- 폴더: `2026-02-19_09-59-53`
-- 시작: model_12300 (V3) → V4 보상으로 이어학습
-- 초기 보상 하락 (-6.5) → 빠르게 회복 (11.0)
-- GPU: RTX 5080 100%, 15.9GB/16.3GB
-- 24,576 환경, headless 모드
+## 🚀 Phase 5: Flat 지형 마무리 + 전이학습 준비 (2026-02-19 ~ 2026-02-20)
 
-**Resume Command**:
-```bash
-conda activate env_isaaclab
-cd D:\project\spot_micro_rl
-python scripts\rsl_rl\train.py --task Isaac-Velocity-Flat-SpotMicro-v0 --num_envs 24576 --headless --resume --load_run 2026-02-19_09-59-53 --checkpoint <latest_model>.pt --max_iterations 20000
-```
+### 개요
+V4까지 만든 트롯 걸음걸이를 **안정적으로 학습**시키고, Rough 지형으로의 **전이학습(Transfer Learning)** 준비.
+V4의 곱셈 AND 방식 trot_gait가 너무 엄격해서 학습이 막히는 문제를 해결하고,
+최종 Flat 모델을 만들어 Rough로 넘김.
+
+### V5-V7: Flat 지형 보상 미세 조정
+
+V4 이후 커밋 없이 다양한 보상 가중치를 시도하며 Flat에서 최적 걸음걸이를 찾는 과정.
+
+#### 주요 변경점
+- **trot_gait 방식**: 곱셈(AND) → **0.4×mean + 0.6×min** (min-heavy 결합)
+  - 너무 엄격한 AND 조건이 학습을 막아서, 전체 평균은 유지하되 최악 성분을 더 중시하는 방식으로 변경
+  - 4가지 성분: 대각A 동기화, 대각B 동기화, 반위상, 같은쪽 비동기
+- **same_side_penalty** 신설: 바운딩(앞뒤 동기화) + 페이싱(좌우 동기화) 감지
+- **trot_gait weight**: 50 → **150** (Flat 기준)
+- **same_side_penalty weight**: **-80** (Flat 기준)
+- **contact_count**: 통합 후 비활성화 (weight=0)
+- **stationary_penalty**: 비활성화 (weight=0)
+
+#### Flat 학습 체인 (post-V4)
+
+| 폴더 | 이터레이션 범위 | 비고 |
+|------|----------------|------|
+| `2026-02-19_12-31-47` | 13,100→13,400 | V4 이어학습, 트롯 미세 조정 |
+| `2026-02-19_13-49-17` | 0→600 | 새 시작, 보상 리밸런싱 |
+| `2026-02-19_17-10-11` | 0→600 | 보상 재조정 |
+| `2026-02-19_18-42-50` | 1,000→900 | 실험 |
+| `2026-02-19_19-31-44` | 1,000→900 | 실험 |
+| `2026-02-19_20-01-30` | 0→300 | 실험 |
+| **`2026-02-19_20-40-30`** | **0→900** | **V8 최종 Flat 모델 (15 checkpoints)** |
+| `2026-02-21_00-42-16` | 0→400 | 추가 Flat 실험 |
+
+### V8: Flat→Rough 전이학습 (2026-02-20)
+
+**커밋**: `c96d6d8` — "V8 flat + rough terrain transfer learning"
+
+#### 전이학습 과정
+1. **소스 모델**: `spot_micro_flat/2026-02-19_20-40-30/model_900.pt` (48차원 관측)
+2. **전이 스크립트**: `scripts/transfer_flat_to_rough.py`
+   - Flat 모델의 actor/critic 가중치 중 공통 48차원 부분을 유지
+   - height_scan 54차원에 해당하는 가중치는 Xavier 초기화
+   - 결과: Rough 모델(102차원) 생성
+3. **전이된 체크포인트**: `spot_micro_rough/transferred_from_v8_flat/model_0.pt`
+
+#### 주요 코드 변경 (V8 커밋)
+- `SpotMicroRoughEnvCfg` 클래스 신설 (SpotMicroFlatEnvCfg 상속)
+- Height scanner 추가 (RayCaster, 0.1m 해상도, 0.8×0.5m 그리드)
+- 커리큘럼 활성화 (지형 난이도 점진적 증가)
+- 러프 지형 생성기: 6종 (계단, 역계단, 랜덤 박스, 울퉁불퉁, 경사 상/하)
+- 스케일: SpotMicro(24cm) 맞춤 — step_height 2~8cm, grid_height 2~6cm
+- `PPORoughRunnerCfg` 신설 (entropy_coef=0.005, 탐색 줄임)
+- 초기 자세 변경: 쪼그려앉기(0.13m) → **서있기(0.20m)** — leg=-0.5, foot=1.2
+- `soft_joint_pos_limit_factor = 0.7` — foot 관절 과접힘 방지
+
+#### Rough 지형 초기 실험 (V8 커밋 직후)
+
+| 폴더 | 이터레이션 | 비고 |
+|------|-----------|------|
+| `2026-02-20_06-00-57` | 0→300 | 전이 모델 첫 러프 학습 (4 pts) |
+| `2026-02-20_06-58-14` | 0→300 | 보상 조정 |
+| `2026-02-20_08-54-38` | 300→900 | 이어학습 (7 pts) |
+| `2026-02-20_10-47-37~12-38-23` | 500~600 | 보상 미세 조정 반복 (1~2 pts씩) |
+| `2026-02-20_13-06-59` | 600→700 | |
+| `2026-02-20_13-56-20` | 1,000→900 | 커리큘럼 실험 |
+| `2026-02-20_14-58-25~22-39-59` | 1,000→3,500 | 점진적 이어학습 (여러 세션) |
+
+이 시기에 러프 지형에서 서있기는 되지만 걸음걸이가 나오지 않는 문제가 있었음.
+앞다리만 움직이고 뒷다리는 바닥에 고정하는 local minimum에 빠짐.
 
 ---
 
-**Document Version**: 2.0
-**Generated**: 2026-02-19 10:15
+## 🚀 Phase 6: 러프 지형 마스터리 (2026-02-21 ~ 현재)
+
+### 개요
+러프 지형에서 **뒷다리까지 제대로 움직이는 트롯 걸음걸이**를 학습시키는 과정.
+핵심 문제는 뒷다리가 앞다리의 안정적 지지대 역할만 하고 스윙을 안 하는 것.
+V9에서 거리/난이도 보상을 추가하고, V10~V12에서 뒷다리 전용 보상 3종을 순차 투입.
+
+### V9: 거리 보상 + 지형 난이도 보상 (2026-02-21)
+
+#### 새로운 보상 함수
+- **`terrain_progress_reward`**: 커리큘럼 레벨이 높을수록 보상 → 어려운 지형에서 생존 동기 강화
+- **`distance_walked_reward`**: 원점에서 멀리 걸을수록 보상 (target 2.5m) → 커리큘럼 승급 유도
+
+#### V9 학습 체인
+
+| 폴더 | 이터레이션 | 특징 |
+|------|-----------|------|
+| `2026-02-21_05-36-45` | 0 | 새 시작 (1 pt) |
+| **`2026-02-21_05-48-21`** | **0→900** | **핵심 seed 모델 (11 pts)** |
+| `2026-02-21_08-08-10` | 0→100 | 실험 |
+| `2026-02-21_08-29-55` | 0 | 실험 |
+| **`2026-02-21_08-43-40`** | **1,000→9,900** | **V9 장기 학습 (101 pts, ~10K iters)** |
+
+`2026-02-21_05-48-21`에서 900 이터까지 학습한 모델이 러프 지형에서 처음으로
+제대로 걸었고, 이것을 seed로 `2026-02-21_08-43-40`에서 10K 이터까지 장기 학습.
+
+이 런이 V9의 핵심 모델이 됨 — 이후 V10~V12 모두 이 체인에서 이어학습.
+
+### V10: rear_alternation 추가 (2026-02-22)
+
+#### 문제
+V9 모델이 걷기는 하지만 **뒷다리 두 개가 동시에 바닥에 붙어 있는 시간이 80% 이상**.
+앞다리가 교대하면서 뒷다리는 안정적 받침대 역할만 함 → 진정한 4족 트롯이 아님.
+
+#### 해결: `rear_alternation_reward` 신설
+- 뒷다리(RL, RR)의 접촉 상태가 다르면(하나는 접지, 하나는 스윙) 보상
+- weight = **150.0**
+- 전진 게이팅 적용 (서있을 때는 4발 접지 OK)
+
+#### V10 학습 체인
+
+| 폴더 | 이터레이션 | 특징 |
+|------|-----------|------|
+| **`2026-02-22_13-11-38`** | **11,000→16,500** | **V10 (56 pts, ~5.5K iters)** |
+
+V9의 model_9900에서 이어학습. 뒷다리가 교대하기 시작하지만,
+여전히 **토큰 교대 문제** 발생 — 뒷발을 살짝 들었다 내려놓기만 함.
+
+### V11: rear_both_ground 페널티 (2026-02-22~23)
+
+#### 문제
+rear_alternation만으로는 뒷다리가 "최소한으로만" 교대함.
+살짝 들었다 내려놓으면 보상은 받으면서 실제로는 보폭이 거의 0.
+
+#### 해결: `rear_both_ground_penalty` 신설
+- 두 뒷다리가 **동시에 접지**하면 직접 페널티
+- rear_alternation의 보완재: 보상(당근) + 페널티(채찍) 동시 적용
+- weight = **-200.0**
+
+#### V11 학습 체인
+
+| 폴더 | 이터레이션 | 특징 |
+|------|-----------|------|
+| **`2026-02-22_23-19-25`** | **16,500→21,200** | **V11 (48 pts, ~4.7K iters)** |
+
+V10의 model_16500에서 이어학습. 뒷다리 동시 접지가 감소하지만
+여전히 공중에서 제자리 들기만 하고 전방 보폭이 나오지 않음.
+
+### V12: rear_forward_stride — 핵심 돌파구 (2026-02-23)
+
+**커밋**: `cfd29a1` — "V12: rear_forward_stride reward + weight rebalance for actual rear leg stride"
+
+#### 문제
+V10(교대 보상)과 V11(동시접지 페널티)로 뒷다리가 교대는 하지만,
+**발을 들어서 앞으로 내딛는 실제 보폭이 전무**. 센서상 접촉/비접촉만 교대하고
+실제 이동이 없는 "토큰 교대" 상태.
+
+#### 해결: `rear_forward_stride_reward` 신설
+- **높이 × 전방속도** 곱으로 보상
+  - 높이 점수: `clamp(rear_height / target_clearance, 0, 1)` (target 6cm)
+  - 전방속도 점수: `clamp(rear_fwd_vel / 0.3, 0, 1)`
+- 둘 다 있어야 보상이 나옴 → 제자리 들기(높이만 있음)나 바닥 끌기(속도만 있음)는 0점
+- weight = **250.0** (전체 보상 중 최대)
+
+#### 추가 변경
+- **foot_extension_penalty** 신설: foot 관절이 1.5rad 초과 시 2차 페널티 (weight=-30)
+  - 발바닥이 앞을 향하는 비자연스러운 과신전 자세 방지
+- **전체 가중치 재밸런싱**: top5 보상 비중을 뒷다리 관련으로 집중
+
+#### V12 학습 체인
+
+| 폴더 | 이터레이션 | 특징 |
+|------|-----------|------|
+| `2026-02-23_08-56-41` | 21,200→22,200 | V12 초기 (보상 하락→회복) |
+| `2026-02-23_10-54-50` | 22,200→24,500 | 이어학습 |
+| `2026-02-23_15-05-53` | 24,500→25,300 | 이어학습 |
+| `2026-02-23_16-52-22` | 25,300→25,800 | 이어학습 |
+| **`2026-02-23_19-41-20`** | **25,800→27,100+** | 🔴 **현재 학습 중 (14+ pts)** |
+
+#### V12 관찰 (iter 27,100 시점)
+- terrain_levels: ~2.6 (커리큘럼 승급 진행 중)
+- time_out 비율: ~0.90 (에피소드 끝까지 생존)
+- rear_forward_stride: ~166 (뒷발의 실제 전방 보폭 신호 증가 중)
+- 전체 보상: V12 전환 직후 하락 → 점진적 회복
+- 이전 V11 대비 뒷다리 스트라이드가 실제로 나타나기 시작
+
+### 전체 학습 체인 요약 (Flat → Rough)
+
+```
+[Flat 지형]
+Phase 1~3: 서기 학습 (iter 0 → 22,600)
+Phase 4, V1~V4: 트롯 걸음걸이 (iter 22,600 → 13,400)
+Phase 5, V5~V8: Flat 최적화 (새 시작 → model_900)
+    ↓
+  전이학습 (transfer_flat_to_rough.py)
+  48차원 → 102차원 (height_scan 54차원 Xavier 초기화)
+    ↓
+[Rough 지형]
+V8 초기: 러프 실험 (iter 0 → 3,500, 여러 세션)
+V9: 장기 학습 (iter 0 → 9,900) ← 핵심 seed 모델
+V10: rear_alternation (iter 11,000 → 16,500)
+V11: rear_both_ground (iter 16,500 → 21,200)
+V12: rear_forward_stride (iter 21,200 → 27,100+) ← 현재
+```
+
+### 커밋 이력 (전체)
+
+| 날짜 | 해시 | 내용 |
+|------|------|------|
+| 2026-02-16 21:45 | `3a9dee1` | Initial commit |
+| 2026-02-16 23:55 | `ca5d6b1` | Add SpotMicro RL training project |
+| 2026-02-17 00:07 | `37310ab` | Add URDF asset to project |
+| 2026-02-17 00:24 | `c1eb35c` | Add mesh files, adjust training for stable standing |
+| 2026-02-17 01:10 | `34c57c5` | Increase shoulder penalties |
+| 2026-02-17 03:47 | `91a42e4` | Revert to successful configuration |
+| 2026-02-19 09:58 | `44b46f0` | V4: 엄격한 트롯 걸음걸이 |
+| 2026-02-19 10:39 | `fa5903b` | docs: PROJECT_HISTORY.md Phase 4 업데이트 |
+| 2026-02-19 12:24 | `f28e6f4` | add joint limits check script |
+| 2026-02-20 08:53 | `c96d6d8` | V8: flat + rough terrain transfer learning |
+| 2026-02-23 17:55 | `cfd29a1` | V12: rear_forward_stride + weight rebalance |
