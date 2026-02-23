@@ -26,7 +26,7 @@ from . import mdp as custom_mdp
 # ANYmal C (~55cm) 대비 약 0.44배
 # ============================================================
 SPOT_MICRO_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
-    size=(8.0, 8.0),
+    size=(4.0, 4.0),  # 8→4: 승급 기준 4m→2m (SpotMicro 체형에 맞게)
     border_width=20.0,
     num_rows=10,
     num_cols=20,
@@ -138,21 +138,21 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # 웅크린 자세(크라우치)에서 걷기 학습
         # ============================================================
 
-        # -- 속도 추적 보상: 걷기 학습 강화
-        self.rewards.track_lin_vel_xy_exp.weight = 25.0  # 15→25: 속도 추적 보상 대폭 증가
+        # -- 속도 추적 보상: 제자리 트롯 드릴에서는 축소
+        self.rewards.track_lin_vel_xy_exp.weight = 10.0  # 25→10: 전진보다 다리 들기 우선
         self.rewards.track_ang_vel_z_exp.weight = 5.0
 
-        # -- 전진 속도 직접 보상 (정규화 + 자세 연동)
+        # -- 전진 속도 직접 보상 (제자리 트롯 드릴에서는 축소)
         self.rewards.forward_velocity = RewTerm(
             func=custom_mdp.forward_velocity_reward,
-            weight=30.0,  # V6: 40→30: 트롯 보상이 1위가 되도록 감소
+            weight=5.0,  # 30→5: 제자리 트롯 드릴 — 전진보다 다리 들기 우선
             params={"asset_cfg": SceneEntityCfg("robot"), "target_vel": 0.5},
         )
 
-        # -- 정지 페널티: 멈춰있으면 페널티 (완화)
+        # -- 정지 페널티: 제자리 트롯이므로 비활성화
         self.rewards.stationary_penalty = RewTerm(
             func=custom_mdp.stationary_penalty,
-            weight=-10.0,  # -5→-10: 정지 페널티 강화 (제자리 트롯 방지)
+            weight=0.0,  # -10→0: 제자리 트롯 허용
             params={"asset_cfg": SceneEntityCfg("robot"), "threshold": 0.05},
         )
 
@@ -161,7 +161,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.ang_vel_xy_l2.weight = -0.5
         self.rewards.dof_torques_l2.weight = -1e-4  # 토크 억제 강화
         self.rewards.dof_acc_l2.weight = -2.5e-7  # 기본값 복원
-        self.rewards.action_rate_l2.weight = -0.5  # 25Hz에서는 -0.5로 충분
+        self.rewards.action_rate_l2.weight = -0.3  # -0.5→-0.3: 큰 다리 동작 허용
         self.rewards.feet_air_time.weight = 10.0  # V3: 40→10: 시그널 과다 방지, 가중치 재배분
         self.rewards.feet_air_time.params["threshold"] = 0.01  # V3: 0.06→0.01: 1스텝(0.04s) > 0.01s → 드디어 보상 가능
 
@@ -204,10 +204,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             }
         )
 
-        # -- 관절 한계 접근 페널티 (V7 신규): 다리 과도하게 구부리는 것 방지
+        # -- 관절 한계 접근 페널티: 다리 과도하게 구부리는 것 방지 (완화)
         self.rewards.dof_pos_limits = RewTerm(
             func=isaaclab_mdp.joint_pos_limits,
-            weight=-50.0,  # V7: -20→-50: 관절 한계 접근 페널티 강화
+            weight=-20.0,  # -50→-20: leg 관절 자유 움직임 위해 완화
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
 
@@ -279,16 +279,16 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
 
         # -- 발 높이 보상 (스윙 시 발을 높이 들어야 보상)
-        # V6: 35→15 축소 (트롯 보상이 자연스럽게 발 들기 유도)
+        # 제자리 트롯 드릴: 높이 들기 핵심 보상, 속도 게이팅 제거
         self.rewards.foot_clearance = RewTerm(
             func=custom_mdp.foot_clearance_reward,
-            weight=15.0,  # V6: 35→15: 트롯이 주도하도록 축소
+            weight=50.0,  # 15→50: 발 높이 들기 핵심 보상
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
                 "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
                 "asset_cfg": SceneEntityCfg("robot"),
-                "target_clearance": 0.06,
-                "min_vel": 0.05,
+                "target_clearance": 0.12,  # 0.06→0.12: 12cm까지 들어야 만점
+                "min_vel": 0.001,  # 0.05→0.001: 제자리에서도 보상 (속도 게이팅 사실상 제거)
             },
         )
 
@@ -298,11 +298,11 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # 덧셈 → 부분 진행도 보상 = 학습 가능한 그래디언트
         self.rewards.trot_gait = RewTerm(
             func=custom_mdp.trot_gait_reward,
-            weight=100.0,  # V6: 50→100: 압도적 1위 보상 (트롯이 왕)
+            weight=150.0,  # 100→150: 제자리 트롯 드릴의 핵심 보상
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
                 "asset_cfg": SceneEntityCfg("robot"),
-                "min_vel": 0.05,
+                "min_vel": 0.001,  # 0.05→0.001: 제자리에서도 트롯 보상
             },
         )
 
@@ -310,11 +310,11 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V6~V7.1: 바운딩만 감지해서 페이싱을 놓침 → V8: max(bounding, pacing)
         self.rewards.same_side_penalty = RewTerm(
             func=custom_mdp.same_side_penalty,
-            weight=-50.0,  # V8: -100→-50 복원 (이제 페이싱도 감지하므로 충분)
+            weight=-80.0,  # -50→-80: 깨끗한 트롯 강제
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
                 "asset_cfg": SceneEntityCfg("robot"),
-                "min_vel": 0.05,
+                "min_vel": 0.001,  # 0.05→0.001: 제자리에서도 페널티
             },
         )
 
@@ -332,12 +332,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # -- 스윙 보폭 보상: 발이 공중에서 앞으로 이동한 거리 보상
         self.rewards.swing_stride = RewTerm(
             func=custom_mdp.swing_stride_reward,
-            weight=10.0,  # V6: 30→10: 트롯 보상이 주도하도록 축소
+            weight=5.0,  # 10→5: 제자리 트롯에서는 보폭보다 높이 우선
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
                 "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
                 "asset_cfg": SceneEntityCfg("robot"),
-                "min_vel": 0.05,
+                "min_vel": 0.001,  # 0.05→0.001: 제자리에서도 보상
             },
         )
 
@@ -354,11 +354,24 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # -- 기본 자세에서 벧어나면 페널티 (V7 신규): 다리 접힘 방지
+        # -- 기본 자세에서 벗어나면 페널티: 제자리 트롯 드릴에서는 극소화
         self.rewards.joint_deviation = RewTerm(
             func=isaaclab_mdp.joint_deviation_l1,
-            weight=-15.0,  # V7: -5→-15: 기본 자세 유지 강화 (다리 접힘 방지)
+            weight=-1.0,  # -15→-1: leg 관절 자유 움직임 허용 (핵심 변경)
             params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+
+        # -- ★ NEW: leg 관절 들어올리기 보상 (제자리 트롯 드릴 핵심)
+        # 스윙 중 leg(hip) 관절이 수평에 가깝게 회전할수록 보상
+        # 속도 게이팅 없음 → 제자리에서도 작동
+        self.rewards.leg_lift = RewTerm(
+            func=custom_mdp.leg_lift_reward,
+            weight=60.0,  # 높은 가중치: 다리 높이 들기의 핵심 보상
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "leg_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_leg", "front_right_leg", "rear_left_leg", "rear_right_leg"]),
+                "target_angle": 0.6,  # ~34도: 이 각도에서 만점
+            },
         )
 
         # -- Action scale
@@ -371,10 +384,67 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.commands.base_velocity.rel_standing_envs = 0.0  # 정지 명령 없앰 (모든 로봇이 항상 움직임)
         self.commands.base_velocity.rel_heading_envs = 1.0   # 방향 명령 활성화
         
-        # -- 속도 명령: 더 빠른 보행 유도
-        self.commands.base_velocity.ranges.lin_vel_x = (0.3, 0.8)  # (0.2,0.5)→(0.3,0.8): 속도 범위 확대
+        # -- 속도 명령: 제자리 트롯 드릴 (거의 정지~극저속)
+        self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.15)  # (0.3,0.8)→(0.0,0.15): 제자리~극저속
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (-0.5, 0.5)
+
+
+# ============================================================
+# SpotMicro Flat Play (계단 지형 포함, height scanner 없음)
+# - observation 48차원 유지 (flat 학습 모델과 호환)
+# - 지형만 계단형으로 변경하여 시각적 확인용
+# ============================================================
+@configclass
+class SpotMicroFlatEnvCfg_PLAY(SpotMicroFlatEnvCfg):
+    """Flat 학습 모델을 계단 지형에서 테스트하기 위한 Play 설정."""
+    def __post_init__(self):
+        super().__post_init__()
+
+        # 작은 씬
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+
+        # 지형: 평지 → 계단 지형 (height scanner 없이, observation 호환 유지)
+        self.scene.terrain.terrain_type = "generator"
+        self.scene.terrain.terrain_generator = TerrainGeneratorCfg(
+            size=(8.0, 8.0),
+            border_width=20.0,
+            num_rows=5,
+            num_cols=5,
+            horizontal_scale=0.1,
+            vertical_scale=0.005,
+            slope_threshold=0.75,
+            use_cache=False,
+            curriculum=False,
+            sub_terrains={
+                "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
+                    proportion=0.4,
+                    step_height_range=(0.02, 0.06),
+                    step_width=0.2,
+                    platform_width=3.0,
+                    border_width=1.0,
+                    holes=False,
+                ),
+                "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
+                    proportion=0.3,
+                    step_height_range=(0.02, 0.06),
+                    step_width=0.2,
+                    platform_width=3.0,
+                    border_width=1.0,
+                    holes=False,
+                ),
+                "flat": terrain_gen.MeshPlaneTerrainCfg(
+                    proportion=0.3,
+                    size=(8.0, 8.0),
+                ),
+            },
+        )
+
+        # 노이즈 비활성화
+        self.observations.policy.enable_corruption = False
+        # 외부 힘 비활성화
+        self.events.base_external_force_torque = None
 
 
 # ============================================================
@@ -397,7 +467,7 @@ class SpotMicroRoughEnvCfg(SpotMicroFlatEnvCfg):
         # ============================================================
         self.scene.terrain.terrain_type = "generator"
         self.scene.terrain.terrain_generator = SPOT_MICRO_ROUGH_TERRAINS_CFG
-        self.scene.terrain.max_init_terrain_level = 5
+        self.scene.terrain.max_init_terrain_level = 5  # 점진적 커리큘럼
 
         # ============================================================
         # 2. 높이 스캐너: 러프 지형에서 지형 인식 필수
@@ -433,7 +503,7 @@ class SpotMicroRoughEnvCfg(SpotMicroFlatEnvCfg):
         self.curriculum = CurriculumCfg()
 
         # ============================================================
-        # 5. 러프 지형용 보상 조정
+        # 5. 러프 지형용 보상 조정 (V3: 힘찬 걸음걸이)
         # ============================================================
         # 높이 보상: 울퉁불퉁한 지형에서는 목표 높이에 약간의 여유
         self.rewards.base_height_l2.weight = -30.0  # -50→-30: 지형 높낮이에 따른 변동 허용
@@ -448,11 +518,129 @@ class SpotMicroRoughEnvCfg(SpotMicroFlatEnvCfg):
         # 높이 비례 보상: 최소 높이 약간 낮춤
         self.rewards.height_bonus.params["min_height"] = 0.13  # 0.15→0.13: 지형 특성상 약간 낮을 수 있음
 
-        # 에피소드 길이: 러프 지형에서 20초 (더 많은 시간 필요)
+        # ★ joint_deviation: -15→-3 (러프 지형에서 관절 편차 허용 대폭 완화)
+        self.rewards.joint_deviation.weight = -3.0
+
+        # ★ V12: forward_velocity: 60→35 (앞다리만으로 전진 불가하게 → 뒷다리 기여 강제)
+        self.rewards.forward_velocity.weight = 35.0
+
+        # ★ trot_gait: 120→180 (V7 min-heavy + 가중치 대폭 강화 → 트롯 필수)
+        self.rewards.trot_gait.weight = 180.0
+
+        # ★ V6: foot_clearance 25→35 (발을 확실히 높이 들기)
+        self.rewards.foot_clearance.weight = 35.0
+        self.rewards.foot_clearance.params["target_clearance"] = 0.10  # V6: 0.08→0.10 (목표 높이 10cm)
+
+        # ★ V12: rear_swing 50→80 (뒷발 높이 들기 강화), target_clearance 0.08→0.12
+        self.rewards.rear_swing.weight = 80.0
+        self.rewards.rear_swing.params["min_vel"] = 0.05
+        self.rewards.rear_swing.params["target_clearance"] = 0.12  # V12: 0.08→0.12 (더 높이 들어야)
+        self.rewards.knee_height.weight = 20.0  # V8: 55→20 (비현실적 높이 페널티 완화)
+        self.rewards.knee_height.params["target_height"] = 0.12  # V8: 0.17→0.12 (SpotMicro 체형에 현실적)
+        self.rewards.knee_height.params["penalty_below"] = 0.06  # V8: 0.08→0.06
+
+        # ★ V12: swing_stride 25→50 (전체 보폭 품질 강화)
+        self.rewards.swing_stride.weight = 50.0
+
+        # ★ V10: same_side_penalty -150→-200 (뒷다리 동기화 강력 억제)
+        self.rewards.same_side_penalty.weight = -200.0
+
+        # ★ V6: feet_air_time 강화 (긴 스윙 유도, 자잘한 걸음 방지)
+        self.rewards.feet_air_time.weight = 20.0  # 10→20
+        self.rewards.feet_air_time.params["threshold"] = 0.15  # 0.01→0.15: 150ms 이상 공중 유지해야 보상
+
+        # ★ V6: action_rate 페널티 강화 (부드럽고 큰 동작 유도, 자잘한 진동 억제)
+        self.rewards.action_rate_l2.weight = -1.5  # -0.5→-1.5
+
+        # ★ V7: 오르막 등반 보너스 (terrain_levels 향상 목표)
+        #   월드 Z 속도 > 0이면 오르막 등반 중 → 보상
+        #   전진 게이팅 + 수평 보정으로 안정적 등반만 보상
+        self.rewards.uphill_bonus = RewTerm(
+            func=custom_mdp.uphill_bonus,
+            weight=0.0,  # V8: 60→0 (평지 Z노이즈 공짜보상 제거, terrain_levels 집중)
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "min_vel": 0.05,
+                "max_climb_rate": 0.03,
+            },
+        )
+
+        # ★ 지형 난이도 비례 보상 — 어려운 지형에서 살아남을수록 큰 보상
+        self.rewards.terrain_progress = RewTerm(
+            func=custom_mdp.terrain_progress_reward,
+            weight=50.0,
+            params={},
+        )
+
+        # ★ NEW: 거리 보상 — 원점에서 멀리 걸을수록 보상 (커리큘럼 승급 직접 유도)
+        #   terrain_size=4 → 승급 기준 2m. target_distance=2.5로 설정.
+        self.rewards.distance_walked = RewTerm(
+            func=custom_mdp.distance_walked_reward,
+            weight=30.0,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "target_distance": 2.5,
+            },
+        )
+
+        # ★ NEW V10: 뒷다리 교대 보상 — 뒷다리가 번갈아 움직이도록 직접 유도
+        #   RL과 RR이 서로 다른 접촉 상태일 때 보상 (하나 접지 + 하나 스윙)
+        #   뒷다리가 둘 다 땅에 붙는 local minimum 탈출 핵심
+        self.rewards.rear_alternation = RewTerm(
+            func=custom_mdp.rear_alternation_reward,
+            weight=150.0,  # V12: 300→150 (접촉 교대 달성됨, 예산을 stride로 이동)
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "min_vel": 0.05,
+            },
+        )
+
+        # ★ NEW V11: 뒷다리 동시 접지 페널티 — 두 뒷다리가 동시에 땅에 있으면 직접 페널티
+        #   rear_alternation의 보완 (채찍). 당근만으로 local minimum 탈출 불가하여 추가.
+        self.rewards.rear_both_ground = RewTerm(
+            func=custom_mdp.rear_both_ground_penalty,
+            weight=-200.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "min_vel": 0.05,
+            },
+        )
+
+        # ★ NEW V12: 뒷발 전방 보폭 보상 — 뒷발이 들려서 앞으로 이동해야 보상
+        #   높이 × 전방 속도의 곱: 둘 다 있어야 높은 보상 (토큰 교대 방지)
+        self.rewards.rear_forward_stride = RewTerm(
+            func=custom_mdp.rear_forward_stride_reward,
+            weight=250.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "target_clearance": 0.06,
+                "min_vel": 0.05,
+            },
+        )
+
+        # ★ NEW V9: foot 관절 과신전 페널티 — 발바닥이 앞을 향하는 비자연스러운 자세 방지
+        # foot joint 범위: -0.1~2.59 rad. max_angle=1.5 rad 초과 시 2차 페널티.
+        self.rewards.foot_extension = RewTerm(
+            func=custom_mdp.foot_extension_penalty,
+            weight=-30.0,
+            params={
+                "foot_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_foot", "front_right_foot", "rear_left_foot", "rear_right_foot"]),
+                "max_angle": 1.5,
+            },
+        )
+
+        # 에피소드 길이: 러프 지형에서 20초
         self.episode_length_s = 20.0
 
-        # 속도 범위: 러프 지형에서는 약간 느리게 시작
-        self.commands.base_velocity.ranges.lin_vel_x = (0.2, 0.6)  # (0.3,0.8)→(0.2,0.6): 러프에서 속도 낮춤
+        # 속도 범위: 러프 지형에서 약간 느리게 시작
+        self.commands.base_velocity.ranges.lin_vel_x = (0.2, 0.6)
 
         # base_contact 종료 조건 복원 (러프 지형에서는 넘어짐 감지 중요)
         self.terminations.base_contact = DoneTerm(

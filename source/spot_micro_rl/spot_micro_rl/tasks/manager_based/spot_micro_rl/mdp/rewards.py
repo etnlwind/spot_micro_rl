@@ -332,20 +332,22 @@ def trot_gait_reward(
     contact_threshold: float = 1.0,
     min_vel: float = 0.05,
 ) -> torch.Tensor:
-    """덧셈 방식 트로트 걸음걸이 보상 (V6).
+    """min-heavy 트로트 걸음걸이 보상 (V7).
 
-    V4의 곱셈(AND)은 그래디언트가 0인 영역이 넓어 학습 실패.
-    V6: 4개 구성요소를 독립적으로 덧셈 → 부분 진행도 보상.
+    V6: 4개 구성요소를 균등하게(0.25씩) 덧셈 → 일부만 충족해도 0.5+ 가능 → 불완전 트롯 허용.
+    V7: 0.4*mean + 0.6*min → 가장 약한 성분이 전체를 끌어내림.
+      - 4개 모두 1.0 → 1.0
+      - 3개 1.0, 1개 0.0 → 0.4*0.75 + 0.6*0.0 = 0.30 (V6: 0.75)
+      - 2개 1.0, 2개 0.0 → 0.4*0.50 + 0.6*0.0 = 0.20 (V6: 0.50)
+    → 모든 성분이 높아야 높은 보상 (부분 진행도는 여전히 보상하면서도 엄격)
 
     전진 게이팅: 로봇이 앞으로 움직일 때만 보상 (제자리 트롯 방지).
 
-    구성요소 (각 0~1, 균등 가중):
+    구성요소 (각 0~1):
       1) 대각선 페어A 동기화: FL(0)과 RR(3)이 같은 상태 → 1
       2) 대각선 페어B 동기화: FR(1)과 RL(2)이 같은 상태 → 1
       3) 페어 간 반위상: 페어A ≠ 페어B → 1
       4) 같은쪽 비동기: FL≠FR, RL≠RR → 1 (벌레걸음 방지)
-
-    덧셈 결합 → 부분 달성도 보상, 4개 모두 만족 = 1.0.
 
     body_names 순서: front_left, front_right, rear_left, rear_right
     반환: 0~1 (완벽한 트로트=1)
@@ -373,8 +375,11 @@ def trot_gait_reward(
     rear_desync = torch.abs(contacts[:, 2] - contacts[:, 3])   # 다르면 1
     side_desync = (front_desync + rear_desync) / 2.0
 
-    # 덧셈 결합: 각 성분 독립적으로 보상 (부분 진행도 가능)
-    base_reward = 0.25 * diag_a_sync + 0.25 * diag_b_sync + 0.25 * anti_phase + 0.25 * side_desync
+    # V7: min-heavy 결합 — 가장 약한 성분이 전체를 끌어내림
+    components = torch.stack([diag_a_sync, diag_b_sync, anti_phase, side_desync], dim=1)
+    mean_val = components.mean(dim=1)
+    min_val = components.min(dim=1)[0]
+    base_reward = 0.4 * mean_val + 0.6 * min_val
 
     # 전진 게이팅: 앞으로 움직여야만 보상
     asset = env.scene[asset_cfg.name]
@@ -390,20 +395,20 @@ def same_side_penalty(
     contact_threshold: float = 1.0,
     min_vel: float = 0.05,
 ) -> torch.Tensor:
-    """비-트로트 보행 패턴 페널티 (V8: 바운딩 + 페이싱 모두 감지).
+    """비-트로트 보행 패턴 페널티 (V9: max 기반, 개별 쌍 감지).
+
+    V8: bounding = avg(front_same, rear_same) → 뒷다리만 동시 움직여도 0.5로 희석.
+    V9: bounding = max(front_same, rear_same) → 한 쌍이라도 동기화되면 전체 페널티.
+         pacing  = max(left_same, right_same)  → 마찬가지.
 
     트로트: FL+RR / FR+RL 대각선 쌍이 교대.
     바운딩: FL+FR 동시 (앞뒤 동기화) → front_same, rear_same 검사
     페이싱: FL+RL 동시 (좌우 동기화) → left_same, right_same 검사
 
-    V6~V7.1: 바운딩만 감지 → 페이싱을 놓침 (보상까지 받음!)
-    V8: 바운딩과 페이싱 중 더 큰 위반을 페널티.
-
-    바운딩 = max(front_same, rear_same)  → 0~1
-    페이싱 = max(left_same, right_same)  → 0~1
-    penalty = max(bounding, pacing)      → 0~1
+    penalty = max(bounding, pacing)
 
     - 완벽한 트로트: 0.0 (페널티 없음)
+    - 뒷다리만 동시: ~1.0 (V8: 0.5, V9: 1.0)
     - 페이싱 또는 바운딩: ~1.0 (최대 페널티)
 
     전진 게이팅: 서있을 때(4발 접지)는 페널티 없음, 보행 중에만.
@@ -418,12 +423,12 @@ def same_side_penalty(
     # --- 바운딩 감지: 앞다리끼리 / 뒷다리끼리 동기화 ---
     front_same = 1.0 - torch.abs(contacts[:, 0] - contacts[:, 1])  # FL==FR → 1
     rear_same = 1.0 - torch.abs(contacts[:, 2] - contacts[:, 3])   # RL==RR → 1
-    bounding = (front_same + rear_same) / 2.0
+    bounding = torch.max(front_same, rear_same)  # V9: avg→max (한 쌍이라도 동기화면 전체 페널티)
 
     # --- 페이싱 감지: 왼쪽끼리 / 오른쪽끼리 동기화 ---
     left_same = 1.0 - torch.abs(contacts[:, 0] - contacts[:, 2])   # FL==RL → 1
     right_same = 1.0 - torch.abs(contacts[:, 1] - contacts[:, 3])  # FR==RR → 1
-    pacing = (left_same + right_same) / 2.0
+    pacing = torch.max(left_same, right_same)  # V9: avg→max
 
     # 바운딩과 페이싱 중 더 큰 위반을 페널티
     penalty = torch.max(bounding, pacing)
@@ -580,3 +585,315 @@ def rear_swing_bonus(
     vel_x = robot.data.root_lin_vel_b[:, 0]
     vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
     return rear_reward * vel_gate
+
+
+def uphill_bonus(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    min_vel: float = 0.05,
+    max_climb_rate: float = 0.1,
+) -> torch.Tensor:
+    """오르막 등반 보너스: 전진하면서 높이가 올라가면 보상.
+
+    원리:
+    1. 월드 프레임 Z 속도 (root_lin_vel_w[:, 2])로 높이 변화 감지
+    2. Z 속도 > 0 = 오르막 등반 중
+    3. 전진 게이팅: 앞으로 움직여야만 보상 (제자리 점프 방지)
+    4. 수평 보정: 넘어지면서 높이 증가하는 경우 방지
+
+    Args:
+        env: The environment.
+        asset_cfg: Robot asset configuration.
+        min_vel: 최소 전진 속도 (이하면 보상 0).
+        max_climb_rate: 최대 등반 속도 (m/s). 이 속도에서 보상 = 1.0.
+            SpotMicro 크기 고려: 0.1 m/s 정도면 상당한 등반.
+
+    반환: 0~1 (완벽한 오르막 등반 = 1)
+    양수 weight와 함께 사용.
+    """
+    asset = env.scene[asset_cfg.name]
+
+    # 1) 월드 프레임 Z 속도 (양수 = 위로 이동 = 오르막)
+    vel_z = asset.data.root_lin_vel_w[:, 2]
+    climb_rate = torch.clamp(vel_z, min=0.0)
+    # 정규화: max_climb_rate에서 1.0
+    normalized_climb = torch.clamp(climb_rate / max_climb_rate, 0.0, 1.0)
+
+    # 2) 전진 게이팅: 앞으로 움직여야만 보상 (제자리 점프 방지)
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    # 3) 수평 보정: 넘어지면서 높이 올라가는 것 방지
+    #    orientation_quality: 수평이면 1.0, 기울면 급감
+    gravity_xy = asset.data.projected_gravity_b[:, :2]
+    orientation_quality = torch.exp(-7.0 * torch.sum(torch.square(gravity_xy), dim=1))
+
+    return normalized_climb * vel_gate * orientation_quality
+
+
+def leg_lift_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    leg_joint_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_angle: float = 0.6,
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """스윙 중 leg 관절(hip) 각도 보상: 다리를 높이 들어올리도록 유도.
+
+    SpotMicro의 leg 관절은 hip flexion/extension을 제어.
+    중립(0도)에서는 다리가 수직으로 늘어져 있음.
+    관절이 회전하면 leg_link가 수평에 가까워지며 발이 높이 들림.
+
+    스윙 중(발이 지면에서 떨어진 상태)인 다리에 대해서만 보상.
+    속도 게이팅 없음 — 제자리 트롯에서도 작동.
+
+    sensor_cfg body_ids → foot contact (FL=0, FR=1, RL=2, RR=3)
+    leg_joint_cfg joint_ids → leg joints (FL=0, FR=1, RL=2, RR=3)
+    순서가 대응되어야 함.
+
+    Args:
+        env: The environment.
+        sensor_cfg: Contact sensor config for foot links.
+        leg_joint_cfg: Robot config with joint_ids for leg (hip) joints.
+        target_angle: Target joint angle (radians) for full reward. ~0.6 rad ≈ 34°.
+        contact_threshold: Force threshold for contact detection.
+
+    반환: 0~1 (모든 스윙 다리가 target_angle만큼 회전 = 1)
+    양수 weight와 함께 사용.
+    """
+    # 1) 접촉 감지 → 스윙 마스크
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    )  # (num_envs, 4)
+    swing_mask = ~contacts  # True = 스윙 중
+
+    # 2) leg 관절 각도
+    asset: Articulation = env.scene[leg_joint_cfg.name]
+    leg_angles = asset.data.joint_pos[:, leg_joint_cfg.joint_ids]  # (num_envs, 4)
+
+    # 3) 중립 대비 절대 각도가 클수록 보상 (전방/후방 모두)
+    displacement = torch.abs(leg_angles)
+    normalized = torch.clamp(displacement / target_angle, 0.0, 1.0)
+
+    # 4) 스윙 중인 다리만 보상
+    swing_reward = normalized * swing_mask.float()
+
+    # 5) 스윙 다리 평균
+    num_swing = swing_mask.float().sum(dim=1).clamp(min=1.0)
+    return swing_reward.sum(dim=1) / num_swing
+
+
+def terrain_progress_reward(
+    env: ManagerBasedRLEnv,
+) -> torch.Tensor:
+    """지형 난이도 비례 보상: 어려운 지형에 있을수록 큰 보상.
+
+    커리큘럼에 의해 로봇이 쉬운 지형(level 0)에서 어려운 지형(level N)으로
+    진행할 때, 높은 레벨에 있다는 것 자체를 보상한다.
+    이를 통해 에이전트가 어려운 지형에서 살아남으려는 동기를 강화한다.
+
+    terrain_level / max_terrain_level → 0~1 정규화.
+    level 0 = 0 보상, 최고 레벨 = 1.0 보상.
+
+    반환: (num_envs,) 텐서, 0~1 범위.
+    양수 weight와 함께 사용.
+    """
+    terrain = env.scene.terrain
+    levels = terrain.terrain_levels  # (num_envs,), int
+    max_level = terrain.max_terrain_level  # = num_rows
+    return levels.float() / max_level  # 선형: 0~1
+
+
+def distance_walked_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_distance: float = 2.0,
+) -> torch.Tensor:
+    """원점에서 멀리 걸을수록 보상. 커리큘럼 승급 유도.
+
+    terrain_levels_vel 커리큘럼은 terrain_size/2 이상 걸으면 승급시킨다.
+    이 보상은 로봇이 원점에서 멀리 걸어가도록 직접적으로 유도하여
+    커리큘럼 승급을 촉진한다.
+
+    distance / target_distance로 정규화, 1.0에서 saturate.
+
+    Args:
+        asset_cfg: 로봇 엔티티
+        target_distance: 포화 거리 (m). terrain_size/2와 같거나 약간 크게.
+
+    Returns:
+        (num_envs,) 0~1 범위
+    """
+    asset = env.scene[asset_cfg.name]
+    # 현재 위치에서 환경 원점까지 XY 거리
+    distance = torch.norm(
+        asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2], dim=1
+    )
+    return torch.clamp(distance / target_distance, 0.0, 1.0)
+
+
+def rear_alternation_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """뒷다리 교대 보상 (V10): 뒷다리가 번갈아 움직이도록 직접 유도.
+
+    문제: 뒷다리가 둘 다 땅에 붙어서 안정적 지지대 역할만 함 (local minimum).
+    해결: RL과 RR이 서로 '다른' 접촉 상태에 있을 때 직접 보상.
+      - RL=접지, RR=스윙 (또는 반대) → reward = 1.0 (교대 중)
+      - RL=접지, RR=접지 → reward = 0.0 (둘 다 땅에 → 트롯 아님)
+      - RL=스윙, RR=스윙 → reward = 0.0 (둘 다 공중 → 점프)
+
+    전진 게이팅: 서있을 때는 보상 없음, 보행 중에만.
+
+    body_names 순서: FL(0), FR(1), RL(2), RR(3)
+    양수 weight와 함께 사용.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    ).float()  # (num_envs, 4)
+
+    # 뒷다리 접촉 상태 차이: RL(2) vs RR(3)
+    # 다르면 1.0 (하나는 접지, 하나는 스윙 = 교대 중)
+    rear_diff = torch.abs(contacts[:, 2] - contacts[:, 3])
+
+    # 전진 게이팅
+    asset = env.scene[asset_cfg.name]
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return rear_diff * vel_gate
+
+
+def rear_both_ground_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """뒷다리 동시 접지 페널티 (V11): 두 뒷다리가 동시에 땅에 있으면 직접 페널티.
+
+    rear_alternation_reward의 보완 (채찍 역할).
+    교대에 보상만 주는 것으로 local minimum 탈출이 안 되어,
+    동시 접지 자체에 직접 페널티를 가해 탈출을 강제.
+
+    penalty = RL접지 * RR접지 (둘 다 접지일 때만 1.0, 아니면 0.0)
+
+    전진 게이팅: 서있을 때는 페널티 없음, 보행 중에만.
+
+    body_names 순서: FL(0), FR(1), RL(2), RR(3)
+    음수 weight와 함께 사용.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    ).float()  # (num_envs, 4)
+
+    # 뒷다리 둘 다 접지: RL(2) * RR(3) → 둘 다 1이면 1.0, 아니면 0.0
+    rear_both = contacts[:, 2] * contacts[:, 3]
+
+    # 전진 게이팅
+    asset = env.scene[asset_cfg.name]
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return rear_both * vel_gate
+
+
+def rear_forward_stride_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_clearance: float = 0.06,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """뒷발 전방 보폭 보상 (V12): 뒷발이 들려서 앞으로 이동해야 보상.
+
+    V10/V11 문제: 뒷발이 접촉 센서상 교대는 하지만 실제 보폭이 없음.
+    살짝 들어올렸다가 제자리에 내려놓는 "토큰 교대" — 전진에 기여하지 않음.
+
+    해결: 뒷발이 스윙 중일 때 [높이 × 전방 속도] 곱으로 보상.
+      - 높이만 있고 전방 속도 없음 → 보상 = 0 (제자리 들기)
+      - 전방 속도만 있고 높이 없음 → 보상 = 0 (바닥 끌기)
+      - 높이 + 전방 속도 → 보상 = 1.0 (실제 보폭!)
+
+    body_names 순서: FL(0), FR(1), RL(2), RR(3)
+    양수 weight와 함께 사용.
+    """
+    # 1) 접촉 감지
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    )  # (num_envs, 4)
+
+    # 2) 뒷발 스윙 마스크 (인덱스 2, 3)
+    rear_swing = ~contacts[:, 2:]  # (num_envs, 2), True = 스윙 중
+
+    # 3) 뒷발 높이
+    asset = env.scene[foot_cfg.name]
+    foot_z = asset.data.body_pos_w[:, foot_cfg.body_ids, 2]  # (num_envs, 4)
+    env_origins_z = env.scene.env_origins[:, 2].unsqueeze(1)
+    foot_height = foot_z - env_origins_z
+    rear_height = foot_height[:, 2:]  # (num_envs, 2)
+    # 높이 점수: target_clearance 이상이면 1.0
+    height_score = torch.clamp(rear_height / target_clearance, 0.0, 1.0)
+
+    # 4) 뒷발의 전방 속도 (로봇 heading 방향)
+    foot_vel = asset.data.body_vel_w[:, foot_cfg.body_ids, :3]  # (num_envs, 4, 3)
+    robot = env.scene[asset_cfg.name]
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    heading_x = 1.0 - 2.0 * (y * y + z * z)
+    heading_y = 2.0 * (x * y + w * z)
+    # 뒷발(인덱스 2, 3)의 heading 방향 속도
+    rear_fwd_vel = (
+        foot_vel[:, 2:, 0] * heading_x.unsqueeze(1) +
+        foot_vel[:, 2:, 1] * heading_y.unsqueeze(1)
+    )  # (num_envs, 2)
+    # 전방 속도 점수: 0.3 m/s 이상이면 1.0 (뒤로 가면 0)
+    fwd_score = torch.clamp(rear_fwd_vel / 0.3, 0.0, 1.0)
+
+    # 5) 높이 × 전방속도 (곱): 둘 다 있어야 높은 보상
+    stride_quality = height_score * fwd_score  # (num_envs, 2)
+    # 스윙 중인 뒷발만
+    rear_reward = (stride_quality * rear_swing.float()).sum(dim=1) / 2.0  # 0~1 정규화
+
+    # 6) 전진 게이팅
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return rear_reward * vel_gate
+
+
+def foot_extension_penalty(
+    env: ManagerBasedRLEnv,
+    foot_joint_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_angle: float = 1.5,
+) -> torch.Tensor:
+    """foot 관절 과신전 페널티: 발바닥이 앞을 향하지 않도록.
+
+    SpotMicro foot joint 범위: -0.1 ~ 2.59 rad.
+    자연스러운 서기/걷기에서 foot joint 각도는 보통 0.3 ~ 1.2 rad.
+    max_angle(기본 1.5 rad ≈ 86°)을 초과하면 발바닥이 앞을 향하는
+    비자연스러운 자세 → 2차 페널티.
+
+    penalty = sum(max(0, angle - max_angle)^2)
+
+    음수 weight와 함께 사용.
+    """
+    asset: Articulation = env.scene[foot_joint_cfg.name]
+    foot_angles = asset.data.joint_pos[:, foot_joint_cfg.joint_ids]  # (num_envs, 4)
+    # max_angle 초과분만 페널티 (2차, 초과할수록 비례 증가)
+    excess = torch.clamp(foot_angles - max_angle, min=0.0)
+    return torch.sum(torch.square(excess), dim=1)
