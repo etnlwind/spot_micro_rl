@@ -137,10 +137,22 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.track_lin_vel_xy_exp.weight = 10.0
         self.rewards.track_ang_vel_z_exp.weight = 5.0
 
-        # 전진 속도 보상
+        # V15: 전진 속도 (뒷다리 게이팅 메인 + 부트스트랩 보조)
+        # 뒷다리 활동 게이팅: 뒷다리가 움직여야 전진 보상
         self.rewards.forward_velocity = RewTerm(
+            func=custom_mdp.forward_velocity_rear_gated,
+            weight=8.0,
+            params={
+                "rear_joint_cfg": SceneEntityCfg("robot", joint_names=["rear_left_shoulder", "rear_right_shoulder", "rear_left_leg", "rear_right_leg", "rear_left_foot", "rear_right_foot"]),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "target_vel": 0.5,
+                "rear_gate_threshold": 0.5,
+            },
+        )
+        # 부트스트랩: 뒷다리 없이도 소량의 전진 보상 (초기 학습용)
+        self.rewards.forward_velocity_bootstrap = RewTerm(
             func=custom_mdp.forward_velocity_reward,
-            weight=5.0,
+            weight=3.0,
             params={"asset_cfg": SceneEntityCfg("robot"), "target_vel": 0.5},
         )
 
@@ -156,7 +168,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.ang_vel_xy_l2.weight = -0.5
         self.rewards.dof_torques_l2.weight = -1e-4
         self.rewards.dof_acc_l2.weight = -2.5e-7
-        self.rewards.action_rate_l2.weight = -0.3
+        # 액션 변화율 페널티 (클램핑 적용 — 발산 방지)
+        self.rewards.action_rate_l2 = RewTerm(
+            func=custom_mdp.action_rate_l2_clamped,
+            weight=-0.3,
+            params={"max_value": 50.0},
+        )
         self.rewards.feet_air_time.weight = 10.0
         self.rewards.feet_air_time.params["threshold"] = 0.01
 
@@ -272,10 +289,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             params={"limit_angle": 1.5}  # ~86도
         )
 
-        # 발 높이 보상 (스윙 시 발을 높이 들어야 보상)
+        # V15: 발 높이 보상 (뒷다리 보상에 비중 분배로 약간 낮춤)
         self.rewards.foot_clearance = RewTerm(
             func=custom_mdp.foot_clearance_reward,
-            weight=50.0,
+            weight=35.0,  # V15: 50→35 (뒷다리 보상에 비중 분배)
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
                 "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
@@ -285,10 +302,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # 트로트 걸음걸이 보상
+        # V15: 트로트 걸음걸이 (뒷다리 보상에 비중 분배로 약간 낮춤)
         self.rewards.trot_gait = RewTerm(
             func=custom_mdp.trot_gait_reward,
-            weight=150.0,
+            weight=100.0,  # V15: 150→100 (뒷다리 보상에 비중 분배)
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -296,10 +313,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # 비트로트 페널티
+        # V15: 비트로트 페널티 (뒷다리 페널티와 분배)
         self.rewards.same_side_penalty = RewTerm(
             func=custom_mdp.same_side_penalty,
-            weight=-80.0,
+            weight=-60.0,  # V15: -80→-60 (뒷다리 페널티에 비중 분배)
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -330,15 +347,15 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # 뒷발 스윙 보너스 (비활성화)
+        # V15: 뒷발 스윙 보너스 (활성화 — 뒷다리 들기 유도)
         self.rewards.rear_swing = RewTerm(
             func=custom_mdp.rear_swing_bonus,
-            weight=0.0,
+            weight=20.0,  # V15: 0→20 (뒷다리 스윙 유도)
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
                 "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
                 "asset_cfg": SceneEntityCfg("robot"),
-                "target_clearance": 0.06,
+                "target_clearance": 0.08,  # V15: 8cm 목표
                 "min_vel": 0.05,
             },
         )
@@ -361,6 +378,83 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
+        # ============================================================
+        # V15: 뒷다리 활성화 보상 (from-scratch 학습에 맞는 보수적 가중치)
+        # ============================================================
+
+        # V15: 뒷다리 관절 속도 보상 (접촉 독립)
+        self.rewards.rear_joint_velocity = RewTerm(
+            func=custom_mdp.rear_joint_velocity_reward,
+            weight=15.0,
+            params={
+                "rear_joint_cfg": SceneEntityCfg("robot", joint_names=["rear_left_shoulder", "rear_right_shoulder", "rear_left_leg", "rear_right_leg", "rear_left_foot", "rear_right_foot"]),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "vel_threshold": 0.5,
+                "min_vel": 0.05,
+            },
+        )
+
+        # V15: 뒷다리 관절 동결 페널티
+        self.rewards.rear_joint_frozen = RewTerm(
+            func=custom_mdp.rear_joint_frozen_penalty,
+            weight=-30.0,
+            params={
+                "rear_joint_cfg": SceneEntityCfg("robot", joint_names=["rear_left_shoulder", "rear_right_shoulder", "rear_left_leg", "rear_right_leg", "rear_left_foot", "rear_right_foot"]),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "frozen_threshold": 0.3,
+                "min_vel": 0.05,
+            },
+        )
+
+        # V15: 뒷다리 교대 보상
+        self.rewards.rear_alternation = RewTerm(
+            func=custom_mdp.rear_alternation_reward,
+            weight=30.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "min_vel": 0.05,
+            },
+        )
+
+        # V15: 뒷다리 동시 접지 페널티
+        self.rewards.rear_both_ground = RewTerm(
+            func=custom_mdp.rear_both_ground_penalty,
+            weight=-50.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "min_vel": 0.05,
+            },
+        )
+
+        # V15: 뒷발 전방 보폭 보상
+        self.rewards.rear_forward_stride = RewTerm(
+            func=custom_mdp.rear_forward_stride_reward,
+            weight=30.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "target_clearance": 0.06,
+                "target_fwd_vel": 0.3,
+                "min_vel": 0.05,
+            },
+        )
+
+        # V15: foot 관절 과신전 페널티
+        self.rewards.foot_extension = RewTerm(
+            func=custom_mdp.foot_extension_penalty,
+            weight=-30.0,
+            params={
+                "foot_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_foot", "front_right_foot", "rear_left_foot", "rear_right_foot"]),
+                "max_angle": 1.5,
+            },
+        )
+
         # Action scale
         self.actions.joint_pos.scale = 1.0
 
@@ -371,8 +465,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.commands.base_velocity.rel_standing_envs = 0.0
         self.commands.base_velocity.rel_heading_envs = 1.0
         
-        # 제자리~극저속
-        self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.15)
+        # V15: 속도 범위 확대 (뒷다리 보상 활성화를 위해 전진 필요)
+        self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.3)
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (-0.5, 0.5)
 
@@ -469,7 +563,7 @@ class SpotMicroRoughEnvCfg(SpotMicroFlatEnvCfg):
         from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import CurriculumCfg
         self.curriculum = CurriculumCfg()
 
-        # 러프 지형용 보상 조정
+        # 러프 지형용 보상 조정 (Flat→Rough 가중치 오버라이드)
         # ============================================================
         # 높이: 지형 높낮이에 따른 변동 허용
         self.rewards.base_height_l2.weight = -30.0
@@ -484,39 +578,60 @@ class SpotMicroRoughEnvCfg(SpotMicroFlatEnvCfg):
         # 높이 비례 보상: 최소 높이 약간 낮춤
         self.rewards.height_bonus.params["min_height"] = 0.13
 
-        # 관절 편차 허용 대폭 완화
-        self.rewards.joint_deviation.weight = -3.0
+        # 관절 편차: 뒷다리 관절 움직임 허용을 위해 완화
+        self.rewards.joint_deviation.weight = -1.5
 
-        # 전진 속도: 앞다리만으로는 전진 불가 → 뒷다리 기여 강제
+        # 전진 속도: 러프 지형에서 더 큰 가중치
         self.rewards.forward_velocity.weight = 35.0
+        # 부트스트랩 비활성화 (러프 전이 시점에는 이미 걷기 학습 완료)
+        self.rewards.forward_velocity_bootstrap.weight = 0.0
 
         # 트로트 가중치 강화
         self.rewards.trot_gait.weight = 180.0
 
-        # 발 높이 들기 강화
+        # 발 높이 들기: target_clearance 조정
         self.rewards.foot_clearance.weight = 35.0
         self.rewards.foot_clearance.params["target_clearance"] = 0.10
 
         # 뒷발 스윙 강화
         self.rewards.rear_swing.weight = 80.0
-        self.rewards.rear_swing.params["min_vel"] = 0.05
-        self.rewards.rear_swing.params["target_clearance"] = 0.12
-        self.rewards.knee_height.weight = 20.0
-        self.rewards.knee_height.params["target_height"] = 0.12
-        self.rewards.knee_height.params["penalty_below"] = 0.06
+        self.rewards.rear_swing.params["target_clearance"] = 0.10
+
+        # 뒷다리 관절 속도/동결: 러프에서 더 강한 가중치
+        self.rewards.rear_joint_velocity.weight = 60.0
+        self.rewards.rear_joint_frozen.weight = -150.0
 
         # 스윙 보폭 강화
         self.rewards.swing_stride.weight = 50.0
 
-        # 동일측 동기화 억제
-        self.rewards.same_side_penalty.weight = -200.0
+        # 동일측 동기화 억제 강화
+        self.rewards.same_side_penalty.weight = -120.0
 
         # 공중 시간 보상 (150ms 이상 유지해야 보상)
         self.rewards.feet_air_time.weight = 20.0
         self.rewards.feet_air_time.params["threshold"] = 0.15
 
-        # 동작 부드러움 페널티
-        self.rewards.action_rate_l2.weight = -1.5
+        # 동작 부드러움 페널티: 러프에서 강화
+        self.rewards.action_rate_l2 = RewTerm(
+            func=custom_mdp.action_rate_l2_clamped,
+            weight=-1.2,
+            params={"max_value": 50.0},
+        )
+
+        # 뒷다리 교대/동시접지: 러프에서 강화 + 민감한 contact_threshold
+        self.rewards.rear_alternation.weight = 150.0
+        self.rewards.rear_alternation.params["contact_threshold"] = 0.1
+        self.rewards.rear_both_ground.weight = -250.0
+        self.rewards.rear_both_ground.params["contact_threshold"] = 0.1
+
+        # 뒷발 전방 보폭: 러프에서 강화 + 파라미터 조정
+        self.rewards.rear_forward_stride.weight = 120.0
+        self.rewards.rear_forward_stride.params["contact_threshold"] = 0.1
+        self.rewards.rear_forward_stride.params["target_clearance"] = 0.08
+        self.rewards.rear_forward_stride.params["target_fwd_vel"] = 0.3
+
+        # 러프 지형 전용 보상
+        # ============================================================
 
         # 오르막 등반 보너스 (비활성화)
         self.rewards.uphill_bonus = RewTerm(
@@ -543,54 +658,6 @@ class SpotMicroRoughEnvCfg(SpotMicroFlatEnvCfg):
             params={
                 "asset_cfg": SceneEntityCfg("robot"),
                 "target_distance": 2.5,
-            },
-        )
-
-        # 뒷다리 교대 보상
-        self.rewards.rear_alternation = RewTerm(
-            func=custom_mdp.rear_alternation_reward,
-            weight=150.0,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
-                "asset_cfg": SceneEntityCfg("robot"),
-                "contact_threshold": 1.0,
-                "min_vel": 0.05,
-            },
-        )
-
-        # 뒷다리 동시 접지 페널티
-        self.rewards.rear_both_ground = RewTerm(
-            func=custom_mdp.rear_both_ground_penalty,
-            weight=-200.0,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
-                "asset_cfg": SceneEntityCfg("robot"),
-                "contact_threshold": 1.0,
-                "min_vel": 0.05,
-            },
-        )
-
-        # 뒷발 전방 보폭 보상 (높이 × 전방속도 곱)
-        self.rewards.rear_forward_stride = RewTerm(
-            func=custom_mdp.rear_forward_stride_reward,
-            weight=250.0,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
-                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
-                "asset_cfg": SceneEntityCfg("robot"),
-                "contact_threshold": 1.0,
-                "target_clearance": 0.06,
-                "min_vel": 0.05,
-            },
-        )
-
-        # foot 관절 과신전 페널티
-        self.rewards.foot_extension = RewTerm(
-            func=custom_mdp.foot_extension_penalty,
-            weight=-30.0,
-            params={
-                "foot_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_foot", "front_right_foot", "rear_left_foot", "rear_right_foot"]),
-                "max_angle": 1.5,
             },
         )
 

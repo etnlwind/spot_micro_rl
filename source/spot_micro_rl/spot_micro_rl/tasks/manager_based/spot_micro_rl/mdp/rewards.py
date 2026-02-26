@@ -663,6 +663,7 @@ def rear_forward_stride_reward(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     contact_threshold: float = 1.0,
     target_clearance: float = 0.06,
+    target_fwd_vel: float = 0.3,
     min_vel: float = 0.05,
 ) -> torch.Tensor:
     """뒷발 전방 보폭 보상: 뒷발이 들려서 앞으로 실제로 이동해야 보상.
@@ -702,8 +703,8 @@ def rear_forward_stride_reward(
         foot_vel[:, 2:, 0] * heading_x.unsqueeze(1) +
         foot_vel[:, 2:, 1] * heading_y.unsqueeze(1)
     )
-    # 전방 속도 점수
-    fwd_score = torch.clamp(rear_fwd_vel / 0.3, 0.0, 1.0)
+    # 전방 속도 점수 (target_fwd_vel 기준)
+    fwd_score = torch.clamp(rear_fwd_vel / target_fwd_vel, 0.0, 1.0)
 
     # 높이 × 전방속도: 둘 다 있어야 보상
     stride_quality = height_score * fwd_score
@@ -730,3 +731,125 @@ def foot_extension_penalty(
     # max_angle 초과분만 2차 페널티
     excess = torch.clamp(foot_angles - max_angle, min=0.0)
     return torch.sum(torch.square(excess), dim=1)
+
+
+def action_rate_l2_clamped(env: ManagerBasedRLEnv, max_value: float = 50.0) -> torch.Tensor:
+    """액션 변화율 L2 페널티 (클램핑 적용).
+
+    연속 스텝 간 액션 차이의 L2 노름을 계산하되, max_value로 클램핑하여
+    극단적 액션 변화에 의한 보상 폭발을 방지.
+
+    12 관절 기준 정상 범위: 0.1~10, 비정상: 10^15+
+    max_value=50은 충분한 페널티를 허용하면서 발산을 방지.
+    """
+    raw = torch.sum(
+        torch.square(env.action_manager.action - env.action_manager.prev_action), dim=-1
+    )
+    return torch.clamp(raw, max=max_value)
+
+
+# ============================================================
+# V14: 접촉 독립 뒷다리 보상 (Contact-independent rear leg rewards)
+# ============================================================
+
+def rear_joint_velocity_reward(
+    env: ManagerBasedRLEnv,
+    rear_joint_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    vel_threshold: float = 0.5,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """뒷다리 관절 속도 보상: 뒷다리 관절이 실제로 움직여야 보상.
+
+    접촉 센서에 의존하지 않고, 뒷다리 관절(어깨, 레그, 풋)의 절대 속도를
+    직접 측정. 관절이 움직이지 않는 '고정' 상태를 방지.
+
+    vel_threshold는 6개 뒷다리 관절의 절대 속도 합이 이 값 이상이면
+    보상 1.0. 정상 보행 시 관절 속도 합 = 3~12 rad/s.
+
+    Args:
+        rear_joint_cfg: 뒷다리 관절 설정 (6개: 2 shoulder + 2 leg + 2 foot)
+        vel_threshold: 관절 속도 합 정규화 기준값 (rad/s)
+        min_vel: 전진 속도 게이팅 문턱값
+    """
+    asset: Articulation = env.scene[rear_joint_cfg.name]
+    # 뒷다리 관절 속도 절대값 합
+    joint_vel = torch.abs(asset.data.joint_vel[:, rear_joint_cfg.joint_ids])
+    vel_sum = torch.sum(joint_vel, dim=1)
+    # 정규화: vel_threshold에서 보상 1.0
+    reward = torch.clamp(vel_sum / vel_threshold, 0.0, 1.0)
+
+    # 전진 게이팅
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return reward * vel_gate
+
+
+def rear_joint_frozen_penalty(
+    env: ManagerBasedRLEnv,
+    rear_joint_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    frozen_threshold: float = 0.3,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """뒷다리 관절 동결 페널티: 뒷다리가 움직이지 않으면 페널티.
+
+    전진 보행 중 뒷다리 관절의 속도 합이 frozen_threshold 미만이면
+    페널티 1.0. 이 위이면 0.0.
+
+    rear_joint_velocity_reward의 보완재: 보상으로 유도 + 페널티로 직접 처벌.
+
+    Args:
+        rear_joint_cfg: 뒷다리 관절 설정
+        frozen_threshold: 이 속도 합 이하면 '동결'로 판정 (rad/s)
+        min_vel: 전진 속도 게이팅 문턱값
+    """
+    asset: Articulation = env.scene[rear_joint_cfg.name]
+    joint_vel = torch.abs(asset.data.joint_vel[:, rear_joint_cfg.joint_ids])
+    vel_sum = torch.sum(joint_vel, dim=1)
+    # frozen_threshold 미만 = 동결 = 페널티 1.0
+    is_frozen = (vel_sum < frozen_threshold).float()
+
+    # 전진 게이팅
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return is_frozen * vel_gate
+
+
+def forward_velocity_rear_gated(
+    env: ManagerBasedRLEnv,
+    rear_joint_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_vel: float = 0.5,
+    rear_gate_threshold: float = 0.5,
+) -> torch.Tensor:
+    """뒷다리 활동 게이팅 전진 보상: 뒷다리가 움직여야 전진 보상을 받을 수 있음.
+
+    forward_velocity_reward와 동일하지만, 뒷다리 관절 속도에 비례하는
+    게이트를 곱한다. 뒷다리 고정 상태에서는 전진해도 보상이 0.
+
+    이것이 V14의 핵심: '뒷다리 없이 전진 불가' 원칙.
+
+    Args:
+        rear_joint_cfg: 뒷다리 관절 설정
+        asset_cfg: 로봇 설정
+        target_vel: 목표 전진 속도
+        rear_gate_threshold: 뒷다리 관절 속도 합이 이 값 이상이면 게이트=1.0
+    """
+    asset = env.scene[asset_cfg.name]
+    forward_vel = asset.data.root_lin_vel_b[:, 0]
+    normalized_vel = torch.clamp(forward_vel / target_vel, -1.0, 1.0)
+
+    # 수평 게이팅 (기존과 동일)
+    gravity_xy = asset.data.projected_gravity_b[:, :2]
+    orientation_quality = torch.exp(-7.0 * torch.sum(torch.square(gravity_xy), dim=1))
+
+    # 뒷다리 활동 게이팅 (V14 핵심)
+    rear_asset: Articulation = env.scene[rear_joint_cfg.name]
+    rear_vel = torch.abs(rear_asset.data.joint_vel[:, rear_joint_cfg.joint_ids])
+    rear_vel_sum = torch.sum(rear_vel, dim=1)
+    rear_gate = torch.clamp(rear_vel_sum / rear_gate_threshold, 0.0, 1.0)
+
+    return normalized_vel * orientation_quality * rear_gate

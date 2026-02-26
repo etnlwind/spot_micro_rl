@@ -1,8 +1,8 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-02-23 22:00  
-**Project Status**: V12 학습 진행 중 (러프 지형)  
-**Current Iteration**: 27,100 (rough terrain, model_27100.pt)
+**Last Updated**: 2026-02-26 10:10  
+**Project Status**: V15 학습 진행 중 (Flat from-scratch, 뒷다리 보상 내장)  
+**Current Iteration**: 78+ (flat terrain, from-scratch)
 
 ---
 
@@ -12,8 +12,8 @@
 Train SpotMicro quadruped robot to perform stable walking from a crouched initial position using reinforcement learning (PPO algorithm via RSL-RL).
 
 ### Technical Stack
-- **Isaac Lab**: 4.5.0
-- **Isaac Sim**: 4.5.0
+- **Isaac Lab**: v2.3.0
+- **Isaac Sim**: 5.1.0.0
 - **Python**: 3.10
 - **Conda Environment**: env_isaaclab
 - **GPU**: NVIDIA RTX 5080 Laptop 16GB
@@ -40,12 +40,17 @@ Train SpotMicro quadruped robot to perform stable walking from a crouched initia
 | `2026-02-21_08-43-40` | 1,000→9,900 | 2026-02-21 | V9: 첫 장기 러프 학습 (10K iters) |
 | `2026-02-22_13-11-38` | 11,000→16,500 | 2026-02-22 | V10: rear_alternation 추가 |
 | `2026-02-22_23-19-25` | 16,500→21,200 | 2026-02-22~23 | V11: rear_both_ground 페널티 |
-| `2026-02-23_19-41-20` | 25,800→27,100+ | 2026-02-23 | 🔴 **V12: rear_forward_stride (현재)** |
+| `2026-02-23_19-41-20` | 25,800→30,400 | 2026-02-23 | V12: rear_forward_stride (뒷다리 고정 발견) |
+| `2026-02-24_08-54-15` | 30,400→47,360 | 2026-02-24 | V13: critic reset (발산) |
+| `2026-02-25_16-34-32` | 35,000→35,005 | 2026-02-25 | V14: 접촉 독립 보상 (즉시 발산) |
+| `2026-02-25_17-09-37` | 35,000→35,365 | 2026-02-25 | V14b: 축소 가중치 (발산) |
+| `2026-02-26_??-??-??` | **0→???** | 2026-02-26 | 🔴 **V15: from-scratch Flat (현재)** |
 
 ### Training Statistics
-- **Total Training Sessions**: 250+
-- **Flat Terrain Iterations**: ~14,300 (Phase 1~4 + V5~V8)
-- **Rough Terrain Iterations**: 27,100+ (V9~V12, 진행 중)
+- **Total Training Sessions**: 260+
+- **Flat Terrain Iterations**: ~14,300 (Phase 1~4 + V5~V8) + V15 진행 중
+- **Rough Terrain Iterations**: ~47,360 (V9~V13, V12 model_30400 기준)
+- **Failed Fine-tune Attempts**: 4 (V13×2, V14, V14b — critic reset 발산)
 - **Training Environments**: 24,576 parallel environments
 - **Episode Length**: Flat 10s / Rough 20s
 
@@ -141,13 +146,16 @@ push_robot = True          # 10~15초 간격, ±0.3 m/s
 base_contact_termination = True  # 넘어짐 감지
 ```
 
-#### PPO 설정 (Rough)
+#### PPO 설정 (Rough / V15 Flat)
 ```python
 # 네트워크: [512, 256, 128] (actor = critic)
-entropy_coef = 0.005      # 탐색 줄임 (안정성 우선)
-num_steps_per_env = 24
-learning_rate = 1e-3       # adaptive schedule
-save_interval = 100
+# V15 Flat:
+learning_rate = 5e-4       # fixed schedule
+entropy_coef = 0.01        # from-scratch 탐색
+# V12 Rough (참고):
+# learning_rate = 1e-3     # adaptive schedule
+# entropy_coef = 0.005     # 안정성 우선
+save_interval = 200        # V15: 세밀한 체크포인트
 ```
 
 ---
@@ -807,4 +815,174 @@ V12: rear_forward_stride (iter 21,200 → 27,100+) ← 현재
 | 2026-02-19 10:39 | `fa5903b` | docs: PROJECT_HISTORY.md Phase 4 업데이트 |
 | 2026-02-19 12:24 | `f28e6f4` | add joint limits check script |
 | 2026-02-20 08:53 | `c96d6d8` | V8: flat + rough terrain transfer learning |
+| 2026-02-23 17:55 | `cfd29a1` | V12: rear_forward_stride + weight rebalance || 2026-02-25 22:00 | `0e6b826` | docs: PROJECT_HISTORY.md Phase 5-6 update |
+
+---
+
+### Phase 7: V13~V14b — Critic Reset 발산 3연속 실패 (iter 30,400 → 47,360)
+
+#### 핵심 문제
+V12(model_30400)에서 **뒷다리가 바닥에 고정/끌림** 현상 발견. Flat 지형 Play 테스트에서 앞다리만 트로트하고 뒷다리는 미끄러지듯 끌림. V12의 aggressive 뒷다리 보상(rear_forward_stride=250, rear_alternation=150, rear_both_ground=-200)에도 불구하고 local minimum에 빠진 상태.
+
+---
+
+#### V13: Critic Reset + 기존 보상 재학습
+
+**전략**: V12 model_30400에서 critic만 리셋하고 actor는 유지. 새 critic이 기존 보상 구조를 재학습.
+
+**첫 시도** (2026-02-24_08-54-15):
+- Critic reset from model_30400 (init_std=0.5)
+- Iter 30,501→30,981에서 `action_rate_l2`가 10^15으로 폭발 → 발산
+
+**해결**: `action_rate_l2_clamped()` 함수 신설 (max_value=50.0으로 클램핑)
+
+**두번째 시도** (같은 폴더, 이어학습):
+- Critic reset from model_30700 (init_std=0.5)
+- Iter ~47,360에서 발산. value_loss → 3.48×10^17
+- **원인**: adaptive LR schedule이 noise std를 0.5→1.33으로 끌어올림 → 정책 불안정
+
+**Play 테스트 (model_35000)**: 뒷다리 여전히 끌림. 근본 문제 미해결.
+
+---
+
+#### V14: 접촉 독립 뒷다리 보상 + 고정 LR
+
+**핵심 아이디어**: 접촉 센서에 의존하지 않고 뒷다리 관절 속도를 직접 측정하는 **3가지 새 보상 함수** 도입.
+
+**신규 보상 함수** (rewards.py에 추가):
+1. `rear_joint_velocity_reward` — 뒷다리 6개 관절의 절대 속도 합 보상
+2. `rear_joint_frozen_penalty` — 관절 속도 합 < threshold이면 페널티 1.0
+3. `forward_velocity_rear_gated` — 뒷다리 활동에 비례하는 전진 보상 게이트 **(V14 핵심)**
+
+**PPO 변경**:
+- `schedule`: adaptive → **fixed** (noise std 폭발 방지)
+- `entropy_coef`: 0.005 유지
+
+**V14 첫 시도** (2026-02-25_16-34-32):
+- Critic reset from model_35000 (init_std=0.3)
+- 가중치: rear_joint_velocity=200, rear_joint_frozen=-400, rear_both_ground=-800 등
+- **5 iteration만에 발산** (35005→35009). value_loss → inf
+- 원인: 총 보상 스케일이 fresh critic에 비해 너무 큼
+
+---
+
+#### V14b: 가중치 축소
+
+**변경**: 모든 대형 가중치를 1/3~1/2로 축소
+- rear_joint_velocity: 200→60, rear_joint_frozen: -400→-150
+- rear_both_ground: -800→-250, same_side_penalty: -250→-120
+- LR: 5e-4→1e-4
+
+**V14b 시도** (2026-02-25_17-09-37):
+- Critic reset, init_std=0.3
+- 초기 5 iter 안정: value_loss=7,652, reward=656, noise_std=0.30
+- **Iter ~35,365에서 발산**: value_loss → 7.8×10^18, reward → -1,243
+
+---
+
+#### V13~V14b 실패 분석
+
+| 버전 | 원인 | 발산 이터 |
+|------|------|-----------|
+| V13-1 | action_rate_l2 폭발 | 30,981 |
+| V13-2 | adaptive LR → noise std 1.33 | ~47,360 |
+| V14 | 보상 스케일 과대 | 5 iter |
+| V14b | 축소해도 critic reset 불안정 | ~35,365 |
+
+**근본 원인**: Critic reset + pre-trained actor = 가치 추정 불일치. 
+Fresh critic은 pre-trained actor의 행동 분포에 대한 가치를 전혀 모르고, 
+새 보상 구조에서의 실제 리턴과 critic 예측 간 괴리가 기하급수적으로 확대.
+
+---
+
+### Phase 8: V15 — From-Scratch 학습 (2026-02-26~)
+
+#### 전략 전환
+3연속 fine-tune 실패 후, **처음부터 뒷다리 보상을 포함해 학습**으로 전환.
+- Local minimum 탈출 불필요 (처음부터 뒷다리 보상 학습)
+- Critic reset 불안정 없음 (critic이 V14 보상을 처음부터 학습)
+- Flat → Rough 전이학습 경로 재사용 (V8에서 검증됨)
+
+#### V15 보상 설계 (SpotMicroFlatEnvCfg)
+
+**기존 Flat 보상 유지** + **V14 뒷다리 보상 추가 (보수적 가중치)**:
+
+| 보상 | 가중치 | 변경 내용 |
+|------|--------|----------|
+| forward_velocity (rear_gated) | 8.0 | **신규**: 뒷다리 활동 게이팅 전진 (메인) |
+| forward_velocity_bootstrap | 3.0 | **신규**: 기존 전진 보상 (초기 학습 보조) |
+| rear_joint_velocity | 15.0 | **신규**: 뒷다리 관절 속도 보상 |
+| rear_joint_frozen | -30.0 | **신규**: 뒷다리 동결 페널티 |
+| rear_alternation | 30.0 | **신규**: 뒷다리 교대 보상 |
+| rear_both_ground | -50.0 | **신규**: 뒷다리 동시 접지 페널티 |
+| rear_forward_stride | 30.0 | **신규**: 뒷발 전방 보폭 |
+| rear_swing | 20.0 | 0→20 (활성화) |
+| foot_extension | -30.0 | **신규**: 과신전 페널티 |
+| trot_gait | 100.0 | 150→100 (뒷다리 보상에 비중 분배) |
+| same_side_penalty | -60.0 | -80→-60 |
+| foot_clearance | 35.0 | 50→35 |
+| lin_vel_x range | (0.0, 0.3) | (0.0, 0.15)→(0.0, 0.3) 확대 |
+
+#### PPO 설정 (V15 Flat)
+```python
+learning_rate = 5e-4      # V12: 1e-3 → V15: 5e-4 (안정적)
+schedule = "fixed"         # V12: adaptive → V15: fixed (noise std 제어)
+max_iterations = 15000     # from-scratch 장기 학습
+save_interval = 200        # 세밀한 체크포인트
+entropy_coef = 0.01        # 충분한 탐색 (from-scratch)
+```
+
+#### V15 학습 경과 (진행 중)
+- Iter 78: reward=366, value_loss=182, noise_std=0.64
+- **안정적** — V14b 대비 value_loss가 10^18가 아닌 ~182로 안정
+- ETA: ~19시간 (15K iter)
+
+#### V15 다음 단계
+1. Flat 학습 완료 후 Play 테스트 (뒷다리 활성 여부 확인)
+2. `transfer_flat_to_rough.py`로 Rough 전이학습
+3. Rough 지형에서 fine-tune
+
+### 전체 학습 체인 요약 (Flat → Rough)
+
+```
+[Flat 지형]
+Phase 1~3: 서기 학습 (iter 0 → 22,600)
+Phase 4, V1~V4: 트롯 걸음걸이 (iter 22,600 → 13,400)
+Phase 5, V5~V8: Flat 최적화 (새 시작 → model_900)
+    ↓
+  전이학습 (transfer_flat_to_rough.py)
+  48차원 → 102차원 (height_scan 54차원 Xavier 초기화)
+    ↓
+[Rough 지형]
+V8 초기: 러프 실험 (iter 0 → 3,500, 여러 세션)
+V9: 장기 학습 (iter 0 → 9,900) ← 핵심 seed 모델
+V10: rear_alternation (iter 11,000 → 16,500)
+V11: rear_both_ground (iter 16,500 → 21,200)
+V12: rear_forward_stride (iter 21,200 → 30,400) ← 뒷다리 고정 발견
+V13: critic reset + 기존 보상 (iter 30,400 → 47,360) ← 발산
+V14/V14b: 접촉 독립 보상 + critic reset (iter 35,000 → 35,365) ← 발산
+    ↓
+  전략 전환: from-scratch
+    ↓
+[Flat 지형, V15]
+V15: from-scratch + V14 뒷다리 보상 (iter 0 → ???) ← 현재 진행 중
+  → Flat 완료 후 Rough 전이학습 예정
+```
+
+### 커밋 이력 (전체)
+
+| 날짜 | 해시 | 내용 |
+|------|------|------|
+| 2026-02-16 21:45 | `3a9dee1` | Initial commit |
+| 2026-02-16 23:55 | `ca5d6b1` | Add SpotMicro RL training project |
+| 2026-02-17 00:07 | `37310ab` | Add URDF asset to project |
+| 2026-02-17 00:24 | `c1eb35c` | Add mesh files, adjust training for stable standing |
+| 2026-02-17 01:10 | `34c57c5` | Increase shoulder penalties |
+| 2026-02-17 03:47 | `91a42e4` | Revert to successful configuration |
+| 2026-02-19 09:58 | `44b46f0` | V4: 엄격한 트롯 걸음걸이 |
+| 2026-02-19 10:39 | `fa5903b` | docs: PROJECT_HISTORY.md Phase 4 업데이트 |
+| 2026-02-19 12:24 | `f28e6f4` | add joint limits check script |
+| 2026-02-20 08:53 | `c96d6d8` | V8: flat + rough terrain transfer learning |
 | 2026-02-23 17:55 | `cfd29a1` | V12: rear_forward_stride + weight rebalance |
+| 2026-02-25 22:00 | `0e6b826` | docs: PROJECT_HISTORY.md Phase 5-6 update |
+| 2026-02-26 10:10 | — | V15: from-scratch + V14 rear-leg rewards (pending) |
