@@ -29,15 +29,15 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
+        value_loss_coef=0.5,
         use_clipped_value_loss=True,
-        clip_param=0.2,
+        clip_param=0.1,  # V15d: 0.2→0.1 (보수적 업데이트)
         entropy_coef=0.01,
-        num_learning_epochs=5,
+        num_learning_epochs=3,  # V15d: 5→3 (배치당 과적합 방지)
         num_mini_batches=4,
-        learning_rate=5.0e-4,  # V15: 1e-3→5e-4 (안정적 학습)
-        schedule="fixed",  # V15: adaptive→fixed (noise std 폭발 방지)
-        gamma=0.99,
+        learning_rate=1.0e-4,  # V15d: 3e-4→1e-4 (안정성 극대화)
+        schedule="fixed",
+        gamma=0.97,  # V15d: 0.99→0.97 (return 크기 3x 축소)
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,

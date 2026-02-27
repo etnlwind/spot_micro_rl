@@ -853,3 +853,59 @@ def forward_velocity_rear_gated(
     rear_gate = torch.clamp(rear_vel_sum / rear_gate_threshold, 0.0, 1.0)
 
     return normalized_vel * orientation_quality * rear_gate
+
+
+def diagonal_joint_coupling_reward(
+    env: ManagerBasedRLEnv,
+    pair_a_front_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    pair_a_rear_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    pair_b_front_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    pair_b_rear_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    vel_deadzone: float = 0.1,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """대각선 쌍 관절 커플링 보상: trot의 핵심 구조를 직접 강제.
+
+    대각선 다리 쌍(FL↔RR, FR↔RL)의 leg+foot 관절 속도가
+    같은 방향이면 보상. 접촉 센서에 의존하지 않고 직접 관절 운동학을
+    비교하므로 뒷다리가 끌리는 local minimum을 방지.
+
+    tanh(v1*v2/deadzone^2) 방식으로 부드러운 상관 측정.
+    양의 상관(같은 방향)만 보상하고, 음의 상관(반대 방향)이나
+    한쪽이 정지(0 상관)일 때는 보상 0.
+
+    Args:
+        pair_a_front_cfg: FL leg+foot 관절 (front_left_leg, front_left_foot)
+        pair_a_rear_cfg: RR leg+foot 관절 (rear_right_leg, rear_right_foot)
+        pair_b_front_cfg: FR leg+foot 관절 (front_right_leg, front_right_foot)
+        pair_b_rear_cfg: RL leg+foot 관절 (rear_left_leg, rear_left_foot)
+        vel_deadzone: 이 속도 이하의 관절은 상관 기여가 작음 (rad/s)
+        min_vel: 전진 속도 게이팅 문턱값
+    """
+    asset: Articulation = env.scene[pair_a_front_cfg.name]
+
+    # 대각선 페어 A: FL vs RR (leg+foot 속도)
+    fl_vel = asset.data.joint_vel[:, pair_a_front_cfg.joint_ids]  # (N, 2)
+    rr_vel = asset.data.joint_vel[:, pair_a_rear_cfg.joint_ids]   # (N, 2)
+
+    # 대각선 페어 B: FR vs RL (leg+foot 속도)
+    fr_vel = asset.data.joint_vel[:, pair_b_front_cfg.joint_ids]  # (N, 2)
+    rl_vel = asset.data.joint_vel[:, pair_b_rear_cfg.joint_ids]   # (N, 2)
+
+    # 속도 상관: tanh(v1*v2 / deadzone^2) → [-1, 1]
+    dz_sq = vel_deadzone ** 2
+    pair_a_corr = torch.tanh(fl_vel * rr_vel / dz_sq)  # (N, 2)
+    pair_b_corr = torch.tanh(fr_vel * rl_vel / dz_sq)  # (N, 2)
+
+    # 양의 상관만 보상 (같은 방향), 음의 상관이나 0은 보상 없음
+    pair_a_reward = torch.clamp(pair_a_corr, 0.0, 1.0).mean(dim=1)
+    pair_b_reward = torch.clamp(pair_b_corr, 0.0, 1.0).mean(dim=1)
+    reward = (pair_a_reward + pair_b_reward) / 2.0
+
+    # 전진 게이팅
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return reward * vel_gate
