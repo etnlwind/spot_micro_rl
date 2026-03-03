@@ -909,3 +909,207 @@ def diagonal_joint_coupling_reward(
     vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
 
     return reward * vel_gate
+
+
+# ============================================================
+# V17: 걸음걸이 주기 보상 & 보폭 길이 보상
+# ============================================================
+
+def gait_cycle_period_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_period_min: float = 0.3,
+    target_period_max: float = 0.5,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """걸음걸이 주기(cycle period) 보상: 각 발의 접지→접지 간격이 목표 범위 내이면 보상.
+
+    벌레 걷기의 핵심 문제는 접지 간격이 10ms 수준으로 매우 짧다는 것.
+    이 보상은 같은 발이 접지한 뒤 다음 접지까지의 시간을 추적하고,
+    그 간격이 target_period_min ~ target_period_max 사이이면 보상을 준다.
+
+    env._gait_cycle_last_contact에 각 발의 마지막 접지 시각을 저장하고,
+    접지 전환 시점에 측정한 주기로 보상을 계산한다.
+
+    Args:
+        sensor_cfg: 발 접촉 센서 설정
+        asset_cfg: 로봇 설정
+        target_period_min: 최소 목표 주기 (초)
+        target_period_max: 최대 목표 주기 (초)
+        min_vel: 전진 속도 게이팅 문턱값
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    # 접촉 힘 크기 (num_envs, 4)
+    net_forces = contact_sensor.data.net_forces_w_history[:, 0, sensor_cfg.body_ids]
+    contact_force = torch.norm(net_forces, dim=-1)  # (num_envs, 4)
+    is_contact = (contact_force > 1.0).float()  # 1N 이상이면 접촉
+
+    num_envs = is_contact.shape[0]
+    num_feet = is_contact.shape[1]
+    current_time = env.episode_length_buf.float() * env.step_dt  # (num_envs,)
+
+    # 상태 초기화 (에피소드 시작 시)
+    if not hasattr(env, "_gait_cycle_last_contact"):
+        env._gait_cycle_last_contact = torch.zeros(num_envs, num_feet, device=is_contact.device)
+        env._gait_cycle_prev_contact = torch.zeros(num_envs, num_feet, device=is_contact.device)
+        env._gait_cycle_measured_period = torch.zeros(num_envs, num_feet, device=is_contact.device)
+
+    # 디바이스 체크 및 크기 맞춤
+    if env._gait_cycle_last_contact.shape[0] != num_envs:
+        env._gait_cycle_last_contact = torch.zeros(num_envs, num_feet, device=is_contact.device)
+        env._gait_cycle_prev_contact = torch.zeros(num_envs, num_feet, device=is_contact.device)
+        env._gait_cycle_measured_period = torch.zeros(num_envs, num_feet, device=is_contact.device)
+
+    # 에피소드 리셋 처리
+    reset_mask = (env.episode_length_buf <= 1).unsqueeze(1).expand_as(is_contact).float()
+    env._gait_cycle_last_contact = env._gait_cycle_last_contact * (1.0 - reset_mask)
+    env._gait_cycle_prev_contact = env._gait_cycle_prev_contact * (1.0 - reset_mask)
+    env._gait_cycle_measured_period = env._gait_cycle_measured_period * (1.0 - reset_mask)
+
+    # 접촉 전환 감지: 이전에 비접촉 → 현재 접촉 (touchdown)
+    touchdown = (is_contact > 0.5) & (env._gait_cycle_prev_contact < 0.5)
+
+    # touchdown 시점에 주기 측정
+    time_expanded = current_time.unsqueeze(1).expand_as(is_contact)
+    time_since_last = time_expanded - env._gait_cycle_last_contact
+    # touchdown인 발만 주기 업데이트 (last_contact > 0인 경우만)
+    valid_touchdown = touchdown & (env._gait_cycle_last_contact > 0.0)
+    env._gait_cycle_measured_period = torch.where(
+        valid_touchdown,
+        time_since_last,
+        env._gait_cycle_measured_period,
+    )
+    # touchdown 시점의 시각 저장
+    env._gait_cycle_last_contact = torch.where(
+        touchdown,
+        time_expanded,
+        env._gait_cycle_last_contact,
+    )
+
+    # 이전 접촉 상태 업데이트
+    env._gait_cycle_prev_contact = is_contact.clone()
+
+    # 보상 계산: 측정된 주기가 목표 범위 내이면 보상
+    period = env._gait_cycle_measured_period
+    # 범위 내: 1.0, 범위 밖: exp(-distance^2)
+    in_range = (period >= target_period_min) & (period <= target_period_max)
+    target_mid = (target_period_min + target_period_max) / 2.0
+    target_sigma = (target_period_max - target_period_min) / 2.0
+    distance = (period - target_mid) / (target_sigma + 1e-6)
+    period_reward = torch.where(
+        in_range,
+        torch.ones_like(period),
+        torch.exp(-torch.square(distance)),
+    )
+    # 아직 측정되지 않은 발(period=0)은 보상 0
+    period_reward = period_reward * (period > 0.0).float()
+
+    # 4발 평균
+    reward = period_reward.mean(dim=1)
+
+    # 전진 게이팅
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return reward * vel_gate
+
+
+def stride_length_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_stride: float = 0.06,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """보폭 길이 보상: 스윙 시작~착지까지 발의 XY 평면 이동 거리를 측정.
+
+    벌레 걷기의 문제 중 하나는 발이 거의 이동하지 않고 제자리에서
+    빠르게 올렸다 내린다는 것. 이 보상은 실제 발의 이동 거리를
+    추적하여 target_stride 이상이면 보상을 준다.
+
+    발이 지면을 떠날 때(liftoff) XY 위치를 기록하고,
+    착지(touchdown) 시 이동 거리를 계산한다.
+
+    Args:
+        sensor_cfg: 발 접촉 센서 설정
+        foot_cfg: 발 바디 설정 (위치 추적용)
+        asset_cfg: 로봇 설정 (게이팅용)
+        target_stride: 목표 보폭 길이 (m)
+        min_vel: 전진 속도 게이팅 문턱값
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    net_forces = contact_sensor.data.net_forces_w_history[:, 0, sensor_cfg.body_ids]
+    contact_force = torch.norm(net_forces, dim=-1)  # (num_envs, 4)
+    is_contact = (contact_force > 1.0).float()
+
+    asset: Articulation = env.scene[foot_cfg.name]
+    foot_pos_xy = asset.data.body_pos_w[:, foot_cfg.body_ids, :2]  # (num_envs, 4, 2)
+
+    num_envs = is_contact.shape[0]
+    num_feet = is_contact.shape[1]
+
+    # 상태 초기화
+    if not hasattr(env, "_stride_liftoff_pos"):
+        env._stride_liftoff_pos = torch.zeros(num_envs, num_feet, 2, device=is_contact.device)
+        env._stride_prev_contact = torch.ones(num_envs, num_feet, device=is_contact.device)
+        env._stride_measured = torch.zeros(num_envs, num_feet, device=is_contact.device)
+
+    if env._stride_liftoff_pos.shape[0] != num_envs:
+        env._stride_liftoff_pos = torch.zeros(num_envs, num_feet, 2, device=is_contact.device)
+        env._stride_prev_contact = torch.ones(num_envs, num_feet, device=is_contact.device)
+        env._stride_measured = torch.zeros(num_envs, num_feet, device=is_contact.device)
+
+    # 에피소드 리셋 처리
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        env._stride_liftoff_pos[reset_mask] = 0.0
+        env._stride_prev_contact[reset_mask] = 1.0
+        env._stride_measured[reset_mask] = 0.0
+
+    # 이벤트 감지
+    liftoff = (is_contact < 0.5) & (env._stride_prev_contact > 0.5)  # 접지→비접지
+    touchdown = (is_contact > 0.5) & (env._stride_prev_contact < 0.5)  # 비접지→접지
+
+    # liftoff 시 XY 위치 기록
+    for f in range(num_feet):
+        mask = liftoff[:, f]
+        if mask.any():
+            env._stride_liftoff_pos[mask, f, :] = foot_pos_xy[mask, f, :]
+
+    # touchdown 시 보폭 측정
+    for f in range(num_feet):
+        mask = touchdown[:, f]
+        if mask.any():
+            displacement = foot_pos_xy[mask, f, :] - env._stride_liftoff_pos[mask, f, :]
+            distance = torch.norm(displacement, dim=-1)  # (count,)
+            env._stride_measured[mask, f] = distance
+
+    # 이전 접촉 상태 업데이트
+    env._stride_prev_contact = is_contact.clone()
+
+    # 보상 계산: 보폭이 target_stride에 가까울수록 보상
+    stride = env._stride_measured
+    # target 이상이면 보상 1.0, 미만이면 비례
+    normalized = torch.clamp(stride / (target_stride + 1e-6), 0.0, 2.0)
+    # 1.0에서 최대, 0이면 최소, 2.0 이상이면 약간 감소
+    stride_reward = torch.where(
+        normalized <= 1.0,
+        normalized,  # 0~target: 선형 증가
+        2.0 - normalized,  # target~2*target: 감소 (너무 큰 보폭 억제)
+    )
+    stride_reward = torch.clamp(stride_reward, 0.0, 1.0)
+    # 아직 측정 안 된 발(stride=0)은 보상 0
+    stride_reward = stride_reward * (stride > 0.001).float()
+
+    # 4발 평균
+    reward = stride_reward.mean(dim=1)
+
+    # 전진 게이팅
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return reward * vel_gate

@@ -213,20 +213,21 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.lin_vel_z_l2.weight = -0.7
         self.rewards.ang_vel_xy_l2.weight = -0.2
         self.rewards.dof_torques_l2.weight = -3e-5
-        self.rewards.dof_acc_l2.weight = -8e-8
-        # 액션 변화율 페널티 (클램핑 적용 — 발산 방지)
+        self.rewards.dof_acc_l2.weight = -5e-6  # V17: -8e-8→-5e-6 (가속도 페널티 강화)
+        # V17: 액션 변화율 페널티 대폭 강화 (빠른 떨림 물리적 차단)
         self.rewards.action_rate_l2 = RewTerm(
             func=custom_mdp.action_rate_l2_clamped,
-            weight=-0.1,
+            weight=-3.0,  # V17: -0.1→-3.0 (빠른 떨림 억제)
             params={"max_value": 50.0},
         )
-        self.rewards.feet_air_time.weight = 3.0
-        self.rewards.feet_air_time.params["threshold"] = 0.01
+        # V17: feet_air_time 문턴값 0.01→0.25s (실제 스윙 시간 강제)
+        self.rewards.feet_air_time.weight = 8.0   # V17: 3→8
+        self.rewards.feet_air_time.params["threshold"] = 0.25  # V17: 0.01→0.25s (CRITICAL)
 
-        # 관절 속도 억제
+        # V17: 관절 속도 억제 대폭 강화 (빠른 진동 차단)
         self.rewards.joint_vel_l2 = RewTerm(
             func=isaaclab_mdp.joint_vel_l2,
-            weight=-0.02,
+            weight=-0.5,  # V17: -0.02→-0.5 (관절 속도 억제 강화)
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
 
@@ -335,16 +336,16 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             params={"limit_angle": 1.5}  # ~86도
         )
 
-        # V16: 발 높이 보상 (대각 커플링에 비중 분배)
+        # V17: 발 높이 보상 (target_clearance 낮춤 — 6cm 보폭)
         self.rewards.foot_clearance = RewTerm(
             func=custom_mdp.foot_clearance_reward,
-            weight=8.0,  # V16: 12→8 (diagonal coupling이 보완)
+            weight=8.0,
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
                 "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
                 "asset_cfg": SceneEntityCfg("robot"),
-                "target_clearance": 0.12,
-                "min_vel": 0.001,  # 제자리에서도 보상
+                "target_clearance": 0.06,  # V17: 0.12→0.06 (작은 로봇 현실적 보폭)
+                "min_vel": 0.001,
             },
         )
 
@@ -519,6 +520,38 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
+        # ============================================================
+        # V17: 걸음걸이 주기 보상 — 0.3~0.5초 사이클 유도
+        # 같은 발이 연속 접지하는 간격을 측정, 목표 범위에 있으면 보상
+        # ============================================================
+        self.rewards.gait_cycle_period = RewTerm(
+            func=custom_mdp.gait_cycle_period_reward,
+            weight=15.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "target_period_min": 0.3,
+                "target_period_max": 0.5,
+                "min_vel": 0.05,
+            },
+        )
+
+        # ============================================================
+        # V17: 보폭 길이 보상 — 발 XY 변위 ≥6cm 유도
+        # 스윙 중 발의 전방 이동 거리를 측정, 큰 보폭일수록 보상
+        # ============================================================
+        self.rewards.stride_length = RewTerm(
+            func=custom_mdp.stride_length_reward,
+            weight=12.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "target_stride": 0.06,
+                "min_vel": 0.05,
+            },
+        )
+
         # Action scale
         self.actions.joint_pos.scale = 1.0
 
@@ -529,8 +562,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.commands.base_velocity.rel_standing_envs = 0.0
         self.commands.base_velocity.rel_heading_envs = 1.0
         
-        # V15: 속도 범위 확대 (뒷다리 보상 활성화를 위해 전진 필요)
-        self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.3)
+        # V17: 속도 범위 확대 + 최소속도 도입 (정지 방지)
+        self.commands.base_velocity.ranges.lin_vel_x = (0.1, 0.5)  # V17: (0,0.3)→(0.1,0.5)
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (-0.5, 0.5)
 
