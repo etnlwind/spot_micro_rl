@@ -68,12 +68,12 @@ SPOT_MICRO_CFG = ArticulationCfg(
         "legs": DCMotorCfg(
             # 12 leg joints (shoulder, leg, foot × 4)
             joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
-            # V17: 더 강한 액추에이터 → 크고 느린 보폭 가능
-            saturation_effort=20.0,  # V17: 15→20 (더 큰 토크 한계)
-            effort_limit=15.0,       # V17: 10→15 (큰 다리 스윙 가능)
-            velocity_limit=8.0,      # V17: 10→8 (빠른 떨림 물리적 차단)
-            stiffness={".*": 25.0},  # V17: 10→25 (큰 다리 스윙 구동)
-            damping={".*": 2.0},     # V17: 1→2 (진동 감쇠, 부드러운 동작)
+            # V17.1: 과도한 토크/강성 완화 → 솟구침/곤두박질 방지
+            saturation_effort=15.0,  # V17.1: 20→15 (원래 값 복원)
+            effort_limit=15.0,       # V17 유지
+            velocity_limit=10.0,     # V17.1: 8→10 (원래 값 복원, 느린 동작은 보상으로)
+            stiffness={".*": 15.0},  # V17.1: 25→15 (10과 25의 중간)
+            damping={".*": 1.5},     # V17.1: 2→1.5 (약간의 감쇠 유지)
         ),
     },
 )

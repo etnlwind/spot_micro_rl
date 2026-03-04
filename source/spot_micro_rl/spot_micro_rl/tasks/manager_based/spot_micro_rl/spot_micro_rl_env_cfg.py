@@ -220,9 +220,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             weight=-3.0,  # V17: -0.1→-3.0 (빠른 떨림 억제)
             params={"max_value": 50.0},
         )
-        # V17: feet_air_time 문턴값 0.01→0.25s (실제 스윙 시간 강제)
-        self.rewards.feet_air_time.weight = 8.0   # V17: 3→8
-        self.rewards.feet_air_time.params["threshold"] = 0.25  # V17: 0.01→0.25s (CRITICAL)
+        # V17.1: feet_air_time 문턱값 완화 (0.25s는 점프 유발)
+        self.rewards.feet_air_time.weight = 8.0   # V17 유지
+        self.rewards.feet_air_time.params["threshold"] = 0.1  # V17.1: 0.25→0.1s (솟구침 방지)
 
         # V17: 관절 속도 억제 대폭 강화 (빠른 진동 차단)
         self.rewards.joint_vel_l2 = RewTerm(
