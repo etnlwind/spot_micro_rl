@@ -12,22 +12,25 @@
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\auto_monitor.ps1
 
 param(
-    [int]$IntervalMinutes = 180,
-    [int]$VideoLength = 250,
-    [int]$PlayEnvs = 50,
-    [int]$TrainEnvs = 24576,
-    [int]$MaxIterations = 15000,
-    [string]$Task = "Isaac-Velocity-Flat-SpotMicro-v0",
-    [string]$IsaacLab = "C:\IsaacLab\isaaclab.bat",
-    [string]$ProjectRoot = "D:\project\spot_micro_rl"
+    [int]$IntervalMinutes = 0,
+    [int]$VideoLength = 0,
+    [int]$PlayEnvs = 0,
+    [int]$TrainEnvs = 0,
+    [int]$MaxIterations = 0,
+    [string]$Task = "",
+    [string]$IsaacLab = "",
+    [string]$ProjectRoot = ""
 )
 
-$ErrorActionPreference = "Continue"
-$logBase = "$ProjectRoot\logs\rsl_rl\spot_micro_flat"
-$monitorLog = "$ProjectRoot\logs\monitor_log.txt"
-$analyzeScript = "$ProjectRoot\scripts\analyze_training.py"
+# ============================================================
+# .ENV CONFIG — 모든 설정은 .env에서 읽기 (param은 override용)
+# ============================================================
 
-# TELEGRAM CONFIG — read from .env file
+# ProjectRoot 먼저 결정 (param > 스크립트 위치 기준)
+if (-not $ProjectRoot) { $ProjectRoot = (Get-Item $PSScriptRoot).Parent.FullName }
+
+$ErrorActionPreference = "Continue"
+
 $envFile = Join-Path $ProjectRoot ".env"
 if (-not (Test-Path $envFile)) {
     Write-Host "ERROR: .env file not found at $envFile" -ForegroundColor Red
@@ -39,6 +42,8 @@ foreach ($line in $envContent) {
     $parts = $line -split '=', 2
     $envMap[$parts[0].Trim()] = $parts[1].Trim()
 }
+
+# Telegram
 $tgToken  = $envMap['TELEGRAM_TOKEN']
 $tgChatId = $envMap['TELEGRAM_CHAT_ID']
 if (-not $tgToken -or -not $tgChatId) {
@@ -46,10 +51,30 @@ if (-not $tgToken -or -not $tgChatId) {
     exit 1
 }
 $tgBaseUrl = "https://api.telegram.org/bot$tgToken"
+
+# Paths (param override > .env > defaults)
+if (-not $IsaacLab)  { $IsaacLab  = if ($envMap['ISAAC_LAB_PATH']) { $envMap['ISAAC_LAB_PATH'] } else { "C:\IsaacLab\isaaclab.bat" } }
+if (-not $Task)      { $Task      = if ($envMap['TASK'])           { $envMap['TASK'] }           else { "Isaac-Velocity-Flat-SpotMicro-v0" } }
+$LogSubdir = if ($envMap['LOG_SUBDIR']) { $envMap['LOG_SUBDIR'] } else { "spot_micro_flat" }
+
+# Numeric config (param > .env > defaults)
+if ($IntervalMinutes -le 0) { $IntervalMinutes = if ($envMap['INTERVAL_MINUTES']) { [int]$envMap['INTERVAL_MINUTES'] } else { 180 } }
+if ($VideoLength     -le 0) { $VideoLength     = if ($envMap['VIDEO_LENGTH'])     { [int]$envMap['VIDEO_LENGTH'] }     else { 250 } }
+if ($PlayEnvs        -le 0) { $PlayEnvs        = if ($envMap['PLAY_ENVS'])        { [int]$envMap['PLAY_ENVS'] }        else { 50 } }
+if ($TrainEnvs       -le 0) { $TrainEnvs       = if ($envMap['TRAIN_ENVS'])       { [int]$envMap['TRAIN_ENVS'] }       else { 24576 } }
+if ($MaxIterations   -le 0) { $MaxIterations   = if ($envMap['MAX_ITERATIONS'])   { [int]$envMap['MAX_ITERATIONS'] }   else { 15000 } }
+
+$VideoFps = if ($envMap['VIDEO_FPS']) { [int]$envMap['VIDEO_FPS'] } else { 15 }
+$DecisionTimeoutSec = if ($envMap['DECISION_TIMEOUT_SEC']) { [int]$envMap['DECISION_TIMEOUT_SEC'] } else { 600 }
+
+# Derived paths
+$logBase = "$ProjectRoot\logs\rsl_rl\$LogSubdir"
+$monitorLog = "$ProjectRoot\logs\monitor_log.txt"
+$analyzeScript = "$ProjectRoot\scripts\analyze_training.py"
+
 $script:tgOffset = 0
 $script:lastAnalysisText = ""
 $script:prevScore = -1
-$DecisionTimeoutSec = 600  # 10분
 
 # ============================================================
 # UTILITY
@@ -69,6 +94,56 @@ function Send-Telegram($msg) {
         $preview = $msg.Substring(0, [Math]::Min(60, $msg.Length)) -replace "`n", " "
         Write-Log "[TG] Sent: $preview..."
     } catch { Write-Log "[TG] Send failed: $_" }
+}
+
+function Send-TelegramVideo($videoPath, $caption) {
+    if (-not $videoPath -or -not (Test-Path $videoPath)) {
+        Write-Log "[TG] Video not found: $videoPath (skip)"
+        return
+    }
+    try {
+        $fileSizeMB = [math]::Round((Get-Item $videoPath).Length / 1MB, 2)
+        if ($fileSizeMB -gt 50) {
+            Write-Log "[TG] Video too large: ${fileSizeMB}MB > 50MB limit (skip)"
+            Send-Telegram "⚠️ 영상 파일 크기 초과: ${fileSizeMB}MB (50MB 제한)"
+            return
+        }
+        Write-Log "[TG] Sending video: $videoPath (${fileSizeMB}MB)..."
+        $uri = "$tgBaseUrl/sendVideo"
+        $boundary = [System.Guid]::NewGuid().ToString()
+        $LF = "`r`n"
+        $videoBytes = [System.IO.File]::ReadAllBytes($videoPath)
+        $fileName = [System.IO.Path]::GetFileName($videoPath)
+
+        # Build multipart body
+        $bodyLines = (
+            "--$boundary",
+            "Content-Disposition: form-data; name=`"chat_id`"$LF",
+            $tgChatId,
+            "--$boundary",
+            "Content-Disposition: form-data; name=`"caption`"$LF",
+            $(if ($caption) { $caption } else { "" }),
+            "--$boundary",
+            "Content-Disposition: form-data; name=`"video`"; filename=`"$fileName`"",
+            "Content-Type: video/mp4$LF",
+            ""
+        ) -join $LF
+        $trailer = "$LF--$boundary--$LF"
+
+        $headerBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyLines)
+        $trailerBytes = [System.Text.Encoding]::UTF8.GetBytes($trailer)
+        $totalBytes = New-Object byte[] ($headerBytes.Length + $videoBytes.Length + $trailerBytes.Length)
+        [System.Buffer]::BlockCopy($headerBytes, 0, $totalBytes, 0, $headerBytes.Length)
+        [System.Buffer]::BlockCopy($videoBytes, 0, $totalBytes, $headerBytes.Length, $videoBytes.Length)
+        [System.Buffer]::BlockCopy($trailerBytes, 0, $totalBytes, $headerBytes.Length + $videoBytes.Length, $trailerBytes.Length)
+
+        $contentType = "multipart/form-data; boundary=$boundary"
+        Invoke-RestMethod -Uri $uri -Method Post -Body $totalBytes -ContentType $contentType -TimeoutSec 120 -ErrorAction Stop | Out-Null
+        Write-Log "[TG] Video sent OK: $fileName (${fileSizeMB}MB)"
+    } catch {
+        Write-Log "[TG] Video send FAILED: $_ (skip)"
+        Send-Telegram "⚠️ 영상 전송 실패: $($_.Exception.Message)"
+    }
 }
 
 function Flush-TelegramUpdates {
@@ -249,10 +324,85 @@ function Record-Video($checkpointPath, $runDir, $clipNum) {
         Copy-Item $latestVideo.FullName $destPath -ErrorAction SilentlyContinue
         $sizeMB = [math]::Round($latestVideo.Length / 1MB, 1)
         Write-Log "Video saved: $newName (${sizeMB}MB)"
+
+        # 느린 재생 속도로 재인코딩 (VIDEO_FPS 설정 사용)
+        $reencoded = Reencode-Video $destPath $VideoFps
+        if ($reencoded) { $destPath = $reencoded }
+
         return $destPath
     }
     Write-Log "WARNING: No video file found!"
     return $null
+}
+
+function Reencode-Video($srcPath, $targetFps) {
+    <#
+    .SYNOPSIS
+    영상을 targetFps로 재인코딩하여 재생 속도를 조절합니다.
+    원본 25fps → 15fps = 약 0.6배속 (느린 재생)
+    #>
+    if (-not $srcPath -or -not (Test-Path $srcPath)) { return $null }
+    if ($targetFps -le 0 -or $targetFps -ge 25) {
+        Write-Log "VideoFps=$targetFps, skip re-encode (원본 25fps 유지)"
+        return $null
+    }
+    $outPath = $srcPath -replace '\.mp4$', "_${targetFps}fps.mp4"
+    Write-Log "Re-encoding video: ${targetFps}fps (slowdown $('{0:N1}' -f (25/$targetFps))x)..."
+    try {
+        $pyCmd = @"
+import av, sys
+from fractions import Fraction
+
+src = r'$srcPath'
+dst = r'$outPath'
+TARGET_FPS = $targetFps
+
+inp = av.open(src)
+in_stream = inp.streams.video[0]
+
+out = av.open(dst, mode='w')
+out_stream = out.add_stream('h264', rate=TARGET_FPS)
+out_stream.width = in_stream.width
+out_stream.height = in_stream.height
+out_stream.pix_fmt = 'yuv420p'
+out_stream.time_base = Fraction(1, TARGET_FPS)
+out_stream.options = {'crf': '18', 'preset': 'medium'}
+
+count = 0
+for frame in inp.decode(video=0):
+    new_frame = frame.reformat(format='yuv420p')
+    new_frame.pts = count
+    new_frame.time_base = Fraction(1, TARGET_FPS)
+    for packet in out_stream.encode(new_frame):
+        out.mux(packet)
+    count += 1
+
+for packet in out_stream.encode():
+    out.mux(packet)
+
+out.close()
+inp.close()
+print(f'OK: {count} frames @ {TARGET_FPS}fps H.264 -> {dst}')
+"@
+        $pyFile = "$ProjectRoot\logs\_reencode_tmp.py"
+        $pyCmd | Out-File -FilePath $pyFile -Encoding UTF8
+        $proc = Start-Process powershell -ArgumentList "-Command", "conda activate env_isaaclab; python `"$pyFile`"" -PassThru -NoNewWindow -Wait
+        Remove-Item $pyFile -ErrorAction SilentlyContinue
+        if (Test-Path $outPath) {
+            $sizeMB = [math]::Round((Get-Item $outPath).Length / 1MB, 1)
+            Write-Log "Re-encoded OK: $(Split-Path $outPath -Leaf) (${sizeMB}MB, ${targetFps}fps)"
+            # 원본 제거, 재인코딩본을 원본 이름으로 교체
+            Remove-Item $srcPath -ErrorAction SilentlyContinue
+            Move-Item $outPath $srcPath -ErrorAction SilentlyContinue
+            return $srcPath
+        } else {
+            Write-Log "Re-encode failed: output not created"
+            return $null
+        }
+    } catch {
+        Write-Log "Re-encode error: $_ (using original)"
+        return $null
+    }
 }
 
 # ============================================================
@@ -409,7 +559,12 @@ while ($true) {
             Write-Log "===== TRAINING COMPLETE (iter $iterNum) ====="
             Send-Telegram "🏆 훈련 완료! (iter $iterNum/$MaxIterations)`n최종 분석 진행합니다..."
             try { Ensure-GpuClean -reason "complete" } catch {}
-            try { $videoPath = Record-Video $checkpoint $runDir $clipNum } catch { Write-Log "Video err: $_" }
+            try {
+                $videoPath = Record-Video $checkpoint $runDir $clipNum
+                if ($videoPath -and (Test-Path $videoPath)) {
+                    Send-TelegramVideo $videoPath "🏆 최종 영상 | Iter $iterNum / $MaxIterations"
+                }
+            } catch { Write-Log "Video err: $_" }
             $script:lastAnalysisText = ""
             try { Run-DetailedAnalysis $runDir $checkpoint $clipNum $videoPath } catch { Write-Log "Analysis err: $_" }
             try { Ensure-GpuClean -reason "final" } catch {}
@@ -429,7 +584,12 @@ while ($true) {
         # Phase 2: 영상 녹화
         Write-Log "--- Phase 2/5: Record Video ---"
         Send-Telegram "🎥 P2/5: 영상 녹화 중... (${VideoLength} steps)"
-        try { $videoPath = Record-Video $checkpoint $runDir $clipNum }
+        try {
+            $videoPath = Record-Video $checkpoint $runDir $clipNum
+            if ($videoPath -and (Test-Path $videoPath)) {
+                Send-TelegramVideo $videoPath "🎬 Clip #$clipNum | Iter $iterNum / $MaxIterations ($progressPctMain%)"
+            }
+        }
         catch { Write-Log "P2 err: $_ (skip)"; Kill-AllPython -reason "p2-fb"; Wait-GpuFree -maxWaitSec 30 | Out-Null }
 
         # Phase 3: 상세 분석

@@ -115,6 +115,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
+    # set viewer resolution for video recording (from .env or default 1080p)
+    if args_cli.video:
+        _res_str = os.environ.get("VIDEO_RESOLUTION", "1920x1080")
+        _w, _h = (int(x) for x in _res_str.split("x"))
+        env_cfg.viewer.resolution = (_w, _h)
+        print(f"[INFO] Video resolution: {_w}x{_h}")
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 

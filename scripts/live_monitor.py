@@ -53,8 +53,11 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     print("ERROR: TELEGRAM_TOKEN / TELEGRAM_CHAT_ID not found in .env or environment")
     sys.exit(1)
 
-LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", "spot_micro_flat")
+# Paths & config from .env
+_log_subdir = _env.get("LOG_SUBDIR", "spot_micro_flat")
+LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", _log_subdir)
 PID_FILE = os.path.join(PROJECT_ROOT, "logs", "live_monitor.pid")
+MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
 
 
 def send_telegram(text):
@@ -238,7 +241,7 @@ def format_report(data, run_name, cycle_num):
     current_reward = reward_vals[-1][1]
     current_ep_len = ep_len_vals[-1][1] if ep_len_vals else 0
 
-    max_iter = 15600  # 600 resumed + 15000
+    max_iter = MAX_ITERATIONS
     progress_pct = current_iter / max_iter * 100
 
     # 보상 추세
