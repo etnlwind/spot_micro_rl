@@ -1,8 +1,16 @@
 ﻿# test_telegram.ps1 — Telegram 양방향 통신 테스트
 # Send, Receive, Decision 기능을 검증합니다.
 
-$tgToken   = "***REDACTED_TOKEN***"
-$tgChatId  = "***REDACTED_ID***"
+# Read credentials from .env
+$envFile = Join-Path (Split-Path $PSScriptRoot) ".env"
+if (-not (Test-Path $envFile)) {
+    Write-Host "ERROR: .env file not found at $envFile" -ForegroundColor Red; exit 1
+}
+$envContent = Get-Content $envFile | Where-Object { $_ -match '=' -and $_ -notmatch '^\s*#' }
+$envMap = @{}
+foreach ($line in $envContent) { $p = $line -split '=', 2; $envMap[$p[0].Trim()] = $p[1].Trim() }
+$tgToken  = $envMap['TELEGRAM_TOKEN']
+$tgChatId = $envMap['TELEGRAM_CHAT_ID']
 $tgBaseUrl = "https://api.telegram.org/bot$tgToken"
 $script:tgOffset = 0
 $pass = 0; $fail = 0; $total = 0

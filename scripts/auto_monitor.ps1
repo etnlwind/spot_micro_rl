@@ -27,9 +27,24 @@ $logBase = "$ProjectRoot\logs\rsl_rl\spot_micro_flat"
 $monitorLog = "$ProjectRoot\logs\monitor_log.txt"
 $analyzeScript = "$ProjectRoot\scripts\analyze_training.py"
 
-# TELEGRAM CONFIG
-$tgToken   = "***REDACTED_TOKEN***"
-$tgChatId  = "***REDACTED_ID***"
+# TELEGRAM CONFIG — read from .env file
+$envFile = Join-Path $ProjectRoot ".env"
+if (-not (Test-Path $envFile)) {
+    Write-Host "ERROR: .env file not found at $envFile" -ForegroundColor Red
+    exit 1
+}
+$envContent = Get-Content $envFile | Where-Object { $_ -match '=' -and $_ -notmatch '^\s*#' }
+$envMap = @{}
+foreach ($line in $envContent) {
+    $parts = $line -split '=', 2
+    $envMap[$parts[0].Trim()] = $parts[1].Trim()
+}
+$tgToken  = $envMap['TELEGRAM_TOKEN']
+$tgChatId = $envMap['TELEGRAM_CHAT_ID']
+if (-not $tgToken -or -not $tgChatId) {
+    Write-Host "ERROR: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID missing in .env" -ForegroundColor Red
+    exit 1
+}
 $tgBaseUrl = "https://api.telegram.org/bot$tgToken"
 $script:tgOffset = 0
 $script:lastAnalysisText = ""

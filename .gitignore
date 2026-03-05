@@ -67,5 +67,8 @@ _build
 # Tests
 tests/
 
+# Secrets
+.env
+
 # Docker history
 .isaac-lab-docker-history
