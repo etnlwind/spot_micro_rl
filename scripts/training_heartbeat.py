@@ -690,20 +690,73 @@ def check_training_alive():
 
 
 def check_supervisor_alive():
-    """Training Supervisor (powershell) 프로세스가 살아있는지 확인."""
-    import subprocess
+    """Training Supervisor (python) 프로세스가 살아있는지 확인."""
     try:
-        result = subprocess.run(
-            ["powershell", "-Command",
-             "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Select-Object CommandLine | Format-List"],
-            capture_output=True, text=True, timeout=15
-        )
-        for line in result.stdout.split("\n"):
-            if "training_supervisor" in line.lower():
-                return True
+        import psutil
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if proc.info["name"] and "python" in proc.info["name"].lower():
+                    cmdline = " ".join(proc.info["cmdline"] or [])
+                    if "training_supervisor" in cmdline.lower():
+                        return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
         return False
+    except ImportError:
+        # psutil 없으면 보수적으로 alive 간주
+        return True
     except Exception:
         return True  # 오류 시 보수적으로 alive 간주
+
+
+def restart_supervisor():
+    """training_supervisor.py 자동 재시작. 성공 여부를 반환."""
+    import subprocess as _sp
+    supervisor_script = os.path.join(PROJECT_ROOT, "scripts", "training_supervisor.py")
+    supervisor_pid_file = os.path.join(PROJECT_ROOT, "logs", "training_supervisor.pid")
+
+    # 기존 PID 파일 제거
+    try:
+        os.remove(supervisor_pid_file)
+    except OSError:
+        pass
+
+    sv_cmd = (
+        f'conda activate env_isaaclab && '
+        f'set PYTHONIOENCODING=utf-8 && '
+        f'python "{supervisor_script}"'
+    )
+    _sp.Popen(
+        ["cmd", "/c", sv_cmd],
+        creationflags=_sp.CREATE_NEW_PROCESS_GROUP,
+    )
+    time.sleep(15)  # supervisor 초기화 대기 (heartbeat보다 느림)
+
+    if check_supervisor_alive():
+        new_pid = 0
+        try:
+            new_pid = int(open(supervisor_pid_file, "r").read().strip())
+        except Exception:
+            # PID 파일 없어도 프로세스가 살아있으면 OK
+            try:
+                import psutil
+                for proc in psutil.process_iter(["pid", "cmdline"]):
+                    try:
+                        cmdline = " ".join(proc.info["cmdline"] or [])
+                        if "training_supervisor" in cmdline.lower():
+                            new_pid = proc.info["pid"]
+                            break
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+            except Exception:
+                pass
+        print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Supervisor restarted OK (PID {new_pid})")
+        send_telegram(f"✅ Training Supervisor 자동 재시작 완료 (PID {new_pid})")
+        return True
+    else:
+        print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] WARNING: Supervisor restart FAILED")
+        send_telegram("⚠️ Training Supervisor 재시작 실패! 수동 확인 필요\npython scripts/training_supervisor.py")
+        return False
 
 
 # ─── MAIN LOOP ──────────────────────────────────────────────────
@@ -732,12 +785,15 @@ def main():
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             try:
-                # ── Supervisor 워치독 ──
+                # ── Supervisor 워치독 (자동 재시작) ──
                 if not check_supervisor_alive():
                     if not supervisor_alert_sent:
-                        send_telegram("⚠️ <b>Training Supervisor 감지 불가!</b>\nSupervisor(PS1)가 종료되었거나 크래시 발생\n수동 재시작 필요: powershell -ExecutionPolicy Bypass -File scripts/training_supervisor.ps1")
-                        print(f"[{now}] WARNING: Supervisor not alive!")
-                        supervisor_alert_sent = True
+                        print(f"[{now}] WARNING: Supervisor not alive! Attempting auto-restart...")
+                        send_telegram("⚠️ <b>Training Supervisor 감지 불가!</b>\n자동 재시작 시도 중...")
+                        if restart_supervisor():
+                            supervisor_alert_sent = False  # 재시작 성공 — 다음 사이클 정상 감시
+                        else:
+                            supervisor_alert_sent = True   # 재시작 실패 — 반복 알림 방지
                 else:
                     if supervisor_alert_sent:
                         send_telegram("✅ <b>Training Supervisor 복구 확인</b>")
