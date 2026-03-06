@@ -1,13 +1,13 @@
 # MEMORY.md — AI Session Handoff Document
 > **목적**: 새 세션에서 AI가 이 파일만 읽으면 프로젝트 컨텍스트를 즉시 복원할 수 있도록 작성.  
 > **갱신 시점**: 매 세션 종료 시, 또는 중요 의사결정 발생 시.  
-> **마지막 갱신**: 2026-03-03 15:00
+> **마지막 갱신**: 2026-03-06 (V18 3-Phase Curriculum 설계 및 구현)
 
 ---
 
 ## 1. 프로젝트 한 줄 요약
 
-SpotMicro 4족 로봇이 **trot 걸음걸이**(대각 교대보행)로 걷도록 강화학습(PPO)으로 훈련. 현재 **V16 Flat 훈련 중** — 뒷다리 끌림 문제 해결을 위해 `diagonal_joint_coupling_reward` 도입.
+SpotMicro 4족 로봇이 **trot 걸음걸이**(대각 교대보행)로 걷도록 강화학습(PPO)으로 훈련. 현재 **V18 3-Phase Curriculum 구현 완료** — V17.1 "정지 함정" 문제 해결을 위해 STAND→WALK→TROT 단계적 커리큘럼 도입.
 
 ---
 
@@ -61,72 +61,83 @@ pip install -e source/spot_micro_rl --quiet
 
 ---
 
-## 5. 현재 상태 (V16)
+## 5. 현재 상태 (V18 — 3-Phase Curriculum)
 
-### 5.1 V16 설계 의도
-**문제**: V15d까지 뒷다리가 끌림 — 접촉 센서 기반 리워드로는 "미세 진동"으로 속임  
-**해결**: **kinematic-based `diagonal_joint_coupling_reward`** 도입
-- FL↔RR, FR↔RL 관절 속도 상관관계를 `tanh(v1*v2/deadzone²)`로 직접 측정
-- 접촉 센서 없이 joint velocity 상관만으로 trot 강제
-- weight=25.0
+### 5.0 V17.1 훈련 분석 결과 (2026-03-06)
 
-### 5.2 V16 리워드 가중치 변경 (vs V15d)
+V17.1은 iter 5,104/15,000에서 **"정지 함정(stillness trap)"** 에 빠짐:
 
-| 리워드 | V15d | V16 | 변화 이유 |
-|--------|------|-----|----------|
-| `standing_height` | 12 | **10** | diagonal coupling이 보완 |
-| `foot_clearance` | 12 | **8** | diagonal coupling이 보완 |
-| `trot_gait` | 30 | **40** | trot 패턴 강화 |
-| `same_side_penalty` | -20 | **-30** | 비트로트 강력 억제 |
-| `rear_swing` | 7 | **15** | 뒷발 리프트 강화 |
-| `leg_lift` | 20 | **15** | 축소 (diagonal coupling 보완) |
-| `rear_joint_velocity` | 15 | **20** | 뒷다리 활성화 강화 |
-| `rear_joint_frozen` | -40 | **-60** | 뒷다리 동결 강력 처벌 |
-| `rear_alternation` | 20 | **30** | 뒷다리 교대 강화 |
-| `rear_both_ground` | -50 | **-80** | 뒷다리 고정 강력 처벌 |
-| **`diagonal_coupling`** | - | **25** | **신규** (핵심) |
+| 지표 | 값 | 판정 |
+|------|-----|------|
+| Mean Reward | -99.6 → **-54.2** (3,000+ iter plateau) | ❌ 음수 |
+| bad_orientation 종료율 | **100%** (매 에피소드 넘어짐) | ❌ 치명적 |
+| 전진 속도 | **0.009 m/s** (목표 0.5) | ❌ 사실상 정지 |
+| 에피소드 길이 | **~1.5초** (최대 10초) | ❌ 즉사 |
+| 보행 지표 (trot/stride/gait) | 전부 ~0 | ❌ 학습 안 됨 |
 
-### 5.3 V16 PPO 하이퍼파라미터 (V15d와 동일)
+**근본 원인**: 35개 리워드 동시 활성화 → 페널티 합(-150 feet_below_knees, -100 undesired_contacts, -80 rear_both_ground)이 양수 보상 합보다 압도적 → 로봇이 "아무것도 안 하는 게 최선"이라 학습. 속도 게이팅된 양수 보상은 넘어지면 발동 불가 → 닭-달걀 문제.
+
+### 5.1 V18 설계: 3-Phase Reward Curriculum
+
+**핵심 전략**: Isaac Lab의 `CurriculumManager`를 이용해 훈련 단계별로 리워드 가중치를 동적으로 조절.
+
+| Phase | 이름 | Iteration | 목표 |
+|-------|------|-----------|------|
+| 1 | **STAND** | 0 ~ 2,000 | 서기 안정화, 페널티 최소 |
+| 2 | **WALK** | 2,000 ~ 6,000 | 전진 보행, 점진적 gait 도입 |
+| 3 | **TROT** | 6,000 ~ 15,000 | V17.1 전체 가중치 복원 |
+
+#### Phase별 주요 가중치 변화
+
+| 리워드 | Phase 1 | Phase 2 | Phase 3 (V17.1) |
+|--------|---------|---------|-----------------|
+| `standing_height` | **40** | 20 | 10 |
+| `height_bonus` | **25** | 15 | 7 |
+| `forward_velocity_bootstrap` | **8** | 4 | 0 |
+| `forward_velocity` | 2 | **8** | 8 |
+| `same_side_penalty` | **0** | -10 | -30 |
+| `rear_both_ground` | **0** | -30 | -80 |
+| `undesired_contacts` | **-20** | -50 | -100 |
+| `feet_below_knees` | **-30** | -80 | -150 |
+| `trot_gait` | 5 | 20 | **40** |
+| `rear_joint_frozen` | -10 | -30 | **-60** |
+| `diagonal_coupling` | 5 | 15 | **25** |
+| `gait_cycle_period` | 0 | 8 | **15** |
+| `stride_length` | 0 | 6 | **12** |
+| `foot_clearance` | 2 | 5 | **8** |
+
+### 5.2 V18 구현 파일
+
+| 파일 | 변경 내용 |
+|------|----------|
+| `mdp/rewards.py` | `reward_weight_curriculum()` 함수 추가 (~90줄) |
+| `env_cfg.py` | `SpotMicroRewardCurriculumCfg` 클래스 + `self.curriculum` 설정 |
+
+### 5.3 V18 PPO 하이퍼파라미터 (V15d와 동일)
 ```
 gamma=0.97, clip_param=0.1, lr=1e-4, schedule=fixed
 epochs=3, mini_batches=4, value_loss_coef=0.5, entropy=0.01
-network: [512, 256, 128] ELU
+network: [512, 256, 128] ELU, num_steps_per_env=48
 ```
 
-### 5.4 V16 훈련 현황
-
-| 항목 | 값 |
-|------|-----|
-| **상태** | ⏸️ play test를 위해 일시 중지 (2026-03-03) |
-| **진행률** | iter **10800 / 22600** (48%) |
-| **Mean Reward** | ~630 (안정적) |
-| **Value Loss** | 1.6~2.1 (정상) |
-| 체크포인트 위치 | `logs/rsl_rl/spot_micro_flat/2026-03-03_09-40-03/` (resume 이후) |
-| 원본 체크포인트 | `logs/rsl_rl/spot_micro_flat/2026-02-27_09-12-43/` (iter 0~7600) |
-| play test 결과 | **미확인** (사용자가 아직 피드백 안 줌) |
-
-### 5.5 Resume 명령어
+### 5.4 V18 훈련 명령어 (From Scratch)
 ```bash
 conda activate env_isaaclab
 cd D:\project\spot_micro_rl
+pip install -e source/spot_micro_rl --quiet
 C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\train.py \
   --task=Isaac-Velocity-Flat-SpotMicro-v0 \
-  --num_envs=24576 --headless --max_iterations=15000 \
-  --resume --load_run=2026-03-03_09-40-03 --checkpoint=model_10800.pt
+  --num_envs=24576 --headless --max_iterations=15000
 ```
-> 주의: `--max_iterations=15000` + resume offset 10800 = 총 25800까지 훈련됨
+> **주의**: V18은 기존 체크포인트에서 resume 불가 — 반드시 from scratch 훈련.  
+> `common_step_counter`가 0에서 시작하므로 resume 시 Phase가 리셋됨.
 
-### 5.6 Play Test 명령어
+### 5.5 Play Test 명령어
 ```bash
-# Flat 지형
+# 훈련 완료 후 (체크포인트 경로는 실제 타임스탬프로 교체)
 C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\play.py \
   --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=50 \
-  --checkpoint=D:\project\spot_micro_rl\logs\rsl_rl\spot_micro_flat\2026-03-03_09-40-03\model_10800.pt
-
-# 급경사 지형
-C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\play.py \
-  --task=Isaac-Velocity-Flat-SteepSlope-SpotMicro-Play-v0 --num_envs=50 \
-  --checkpoint=D:\project\spot_micro_rl\logs\rsl_rl\spot_micro_flat\2026-03-03_09-40-03\model_10800.pt
+  --checkpoint=<logs/rsl_rl/spot_micro_flat/TIMESTAMP/model_15000.pt>
 ```
 
 ---
@@ -158,29 +169,53 @@ C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\play.py \
   - **핵심 교훈**: PPO 안정성은 gamma(return 크기)와 clip(업데이트 크기)에 좌우됨
   - 하지만 **뒷다리는 여전히 끌림** → 리워드 구조 자체의 문제
 
-### V16: Diagonal Coupling (2026-02-27 ~ 현재)
+### V16: Diagonal Coupling (2026-02-27 ~ 2026-03-03)
 - **핵심 인사이트**: 접촉 센서 기반 → 키네마틱(joint velocity) 기반으로 전환
 - `diagonal_joint_coupling_reward`: FL↔RR, FR↔RL 관절 속도 상관 측정
 - V15d의 안정된 PPO 하이퍼파라미터 유지
 - 훈련 시작 (Feb 27) → iter 7600에서 중단 (이동) → 체크포인트 git commit
 - 재개 (Mar 3) → iter 10800까지 진행 → play test를 위해 중단
 
+### V17/V17.1: Action Rate + Gait Cycle + Stride Length (2026-03-04 ~ 2026-03-05)
+- V17: `action_rate_l2_clamped` (weight -3.0), `gait_cycle_period_reward`, `stride_length_reward` 추가
+- `dof_acc_l2` 강화 (-8e-8→-5e-6), `joint_vel_l2` 강화 (-0.02→-0.5)
+- 속도 범위 확대 lin_vel_x (0.1, 0.5), 최소 속도 도입 (정지 방지)
+- V17.1: `feet_air_time` threshold 완화 (0.25→0.1s, 솟구침 방지)
+- **결과**: iter 5,104에서 "정지 함정" — reward -54.2 plateau, 100% bad_orientation, 전진 0.009 m/s
+- **원인 분석**: 35개 리워드 동시 활성화, 페널티 합이 보상 합 압도, 닭-달걀 문제
+
+### V18: 3-Phase Reward Curriculum (2026-03-06 ~ 현재)
+- **전략**: Isaac Lab `CurriculumManager`로 STAND→WALK→TROT 단계적 리워드 가중치 변화
+- Phase 1 (0~2K): 서기 집중, 페널티 최소화, bootstrap 활성화
+- Phase 2 (2K~6K): 전진 유도, 점진적 gait 도입
+- Phase 3 (6K~15K): V17.1 전체 가중치 복원
+- `reward_weight_curriculum()` 함수 + `SpotMicroRewardCurriculumCfg` 구현
+- **상태**: 코드 구현 완료, From-scratch 훈련 대기
+- **참고**: Rough 환경은 terrain curriculum만 사용 (reward curriculum 미적용)
+  - Flat 완료 후 Rough 전이 시 별도 처리 필요
+
 ---
 
 ## 7. 다음 할 일 (우선순위순)
 
-1. **V16 Play Test 확인**: 사용자에게 뒷다리 trot 여부 피드백 받기
-   - 성공 시 → 훈련 완료까지 재개 → Flat→Rough 전이
-   - 실패 시 → `diagonal_coupling` weight 증가 또는 phase oscillator 도입 고려
+1. **V18 From-Scratch 훈련 시작**: 3-Phase Curriculum으로 flat 환경에서 처음부터 학습
+   - 예상 소요: ~4시간 (15,000 iter × 24,576 envs)
+   - Phase 전환 로그 확인: "[Curriculum] Phase X (NAME) @ iter Y"
 
-2. **V16 훈련 재개**: iter 10800 → 완료 (예상 ~22600)
-   - 리워드가 ~630에서 plateau → 추가 훈련이 quality를 개선하는지 지켜볼 것
+2. **TensorBoard 모니터링**: Phase별 학습 진행 확인
+   - Phase 1 (0~2K): reward가 양수로 전환되는지?
+   - Phase 2 (2K~6K): forward velocity가 증가하는지?
+   - Phase 3 (6K~15K): trot gait 지표가 올라가는지?
 
-3. **Flat→Rough 전이**: V16 trot 확인 후
-   - `scripts/transfer_flat_to_rough.py` 사용 (48→102 obs dim, height_scan Xavier init)
-   - Rough 환경: `Isaac-Velocity-Rough-SpotMicro-v0`
+3. **Play Test**: iter 15,000 완료 후 시각적 확인
+   - 서기 → 걷기 → 트로트 패턴 달성 여부
 
-4. **PROJECT_HISTORY.md 갱신**: V15d~V16 내용 추가 (현재 V15까지만 기록됨)
+4. **결과에 따른 후속 조치**:
+   - 성공 시 → Flat→Rough 전이학습 (`transfer_flat_to_rough.py`)
+   - 부분 성공 → Phase 경계 iteration 조정 (예: Phase 1 확장)
+   - 실패 시 → Phase 1 가중치 추가 조정, 또는 explicit phase oscillator 도입
+
+5. **PROJECT_HISTORY.md 갱신**: V16~V18 내용 추가
 
 ---
 
@@ -195,6 +230,8 @@ C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\play.py \
 | **clip_param이 작을수록 안정적** | 0.2→0.1로 줄이니 value_loss 안정화 |
 | **키네마틱(joint vel) 리워드가 접촉 센서보다 속이기 어려움** | V16 diagonal_coupling 설계 근거 |
 | **곱셈 리워드(A×B)로 "둘 다 해야"** 조건 표현 | rear_forward_stride = height × velocity |
+| **35개 리워드 동시 활성화 → 정지 함정** | V17.1: 페널티 합 > 보상 합 → 움직이지 않는 게 최적 |
+| **Phase Curriculum로 닭-달걀 문제 해결** | V18: 서기→걷기→트로트 단계적 도입 |
 
 ---
 
@@ -205,7 +242,9 @@ C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\play.py \
 |-------|------|----------|------|
 | `2026-02-26_16-08-11` | V15d | 14999 | reward=559, 뒷다리 끌림 |
 | `2026-02-27_09-12-43` | V16 | 7600 | 중간 저장 (이동용) |
-| `2026-03-03_09-40-03` | V16 resume | 10800 | **현재 최신**, play test 대기 |
+| `2026-03-03_09-40-03` | V16 resume | 10800 | play test 미확인 |
+| (V17.1 run) | V17.1 | 5104 | **실패** — 정지 함정, reward -54.2 |
+| (V18 예정) | V18 | - | **다음 훈련**, 3-Phase Curriculum |
 
 ### Rough 모델 (참고용)
 | 폴더 | 버전 | 최종 iter | 비고 |
@@ -220,9 +259,10 @@ C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\play.py \
 | 항목 | 값 |
 |------|-----|
 | Branch | `develop` |
-| 최신 커밋 | `adb3867` — V16: diagonal joint coupling reward |
-| 원격 | `origin/develop` (pushed) |
+| 최신 커밋 | V18: 3-Phase Curriculum 구현 (커밋 예정) |
+| 원격 | `origin/develop` |
 | 비추적 파일 | `logs/` (체크포인트, tensorboard) |
+| 주요 변경 파일 | `mdp/rewards.py`, `env_cfg.py`, `plan/MEMORY.md` |
 
 ---
 

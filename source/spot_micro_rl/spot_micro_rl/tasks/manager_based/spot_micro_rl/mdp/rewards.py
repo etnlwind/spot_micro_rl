@@ -1113,3 +1113,118 @@ def stride_length_reward(
     vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
 
     return reward * vel_gate
+
+
+# ============================================================
+# V18: 3-Phase Reward Weight Curriculum (STAND → WALK → TROT)
+# Isaac Lab CurriculumManager에서 호출되는 커리큘럼 함수
+# ============================================================
+
+def reward_weight_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    num_steps_per_env: int = 48,
+    phase1_end_iter: int = 2000,
+    phase2_end_iter: int = 6000,
+) -> None:
+    """3-Phase 리워드 가중치 커리큘럼.
+
+    훈련 iteration에 따라 리워드 가중치를 동적으로 변경한다.
+    Phase 1 (STAND): 서기 안정화에 집중, 보행 페널티 최소화
+    Phase 2 (WALK): 전진 보행 유도, 점진적 gait 도입
+    Phase 3 (TROT): V17.1 전체 가중치 복원
+
+    주의: common_step_counter는 체크포인트에 저장되지 않으므로
+          resume 시 Phase가 0부터 재시작됨. From-scratch 훈련 전용.
+    """
+    step = env.common_step_counter
+    iteration = step // num_steps_per_env
+
+    # Phase 추적 (최초 호출 시 -1로 초기화)
+    if not hasattr(env, "_curriculum_phase"):
+        env._curriculum_phase = -1
+
+    # 현재 Phase 결정
+    if iteration < phase1_end_iter:
+        phase = 1
+    elif iteration < phase2_end_iter:
+        phase = 2
+    else:
+        phase = 3
+
+    # Phase가 바뀌지 않으면 아무것도 안 함 (성능 최적화)
+    if phase == env._curriculum_phase:
+        return None
+
+    env._curriculum_phase = phase
+
+    # Phase별 가중치 정의
+    PHASE_WEIGHTS: dict[int, dict[str, float]] = {
+        1: {  # STAND — 서기 안정화, 페널티 최소, bootstrap 활성
+            "standing_height": 40.0,            # V17.1: 10
+            "height_bonus": 25.0,               # V17.1: 7
+            "forward_velocity_bootstrap": 8.0,  # V17.1: 0 (비활성)
+            "forward_velocity": 2.0,            # V17.1: 8
+            "same_side_penalty": 0.0,           # V17.1: -30
+            "rear_both_ground": 0.0,            # V17.1: -80
+            "undesired_contacts": -20.0,        # V17.1: -100
+            "feet_below_knees": -30.0,          # V17.1: -150
+            "trot_gait": 5.0,                   # V17.1: 40
+            "rear_joint_frozen": -10.0,         # V17.1: -60
+            "diagonal_coupling": 5.0,           # V17.1: 25
+            "gait_cycle_period": 0.0,           # V17.1: 15
+            "stride_length": 0.0,               # V17.1: 12
+            "foot_clearance": 2.0,              # V17.1: 8
+        },
+        2: {  # WALK — 전진 보행, 점진적 gait 도입
+            "standing_height": 20.0,
+            "height_bonus": 15.0,
+            "forward_velocity_bootstrap": 4.0,
+            "forward_velocity": 8.0,
+            "same_side_penalty": -10.0,
+            "rear_both_ground": -30.0,
+            "undesired_contacts": -50.0,
+            "feet_below_knees": -80.0,
+            "trot_gait": 20.0,
+            "rear_joint_frozen": -30.0,
+            "diagonal_coupling": 15.0,
+            "gait_cycle_period": 8.0,
+            "stride_length": 6.0,
+            "foot_clearance": 5.0,
+        },
+        3: {  # TROT — V17.1 전체 가중치 복원
+            "standing_height": 10.0,
+            "height_bonus": 7.0,
+            "forward_velocity_bootstrap": 0.0,
+            "forward_velocity": 8.0,
+            "same_side_penalty": -30.0,
+            "rear_both_ground": -80.0,
+            "undesired_contacts": -100.0,
+            "feet_below_knees": -150.0,
+            "trot_gait": 40.0,
+            "rear_joint_frozen": -60.0,
+            "diagonal_coupling": 25.0,
+            "gait_cycle_period": 15.0,
+            "stride_length": 12.0,
+            "foot_clearance": 8.0,
+        },
+    }
+
+    phase_names = {1: "STAND", 2: "WALK", 3: "TROT"}
+    weights = PHASE_WEIGHTS[phase]
+
+    print(f"\n{'=' * 60}")
+    print(f"[Curriculum] Phase {phase} ({phase_names[phase]}) activated @ iter {iteration}")
+    print(f"{'=' * 60}")
+
+    # 리워드 매니저의 가중치를 동적으로 변경
+    for term_name, new_weight in weights.items():
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = new_weight
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except (ValueError, KeyError, AttributeError):
+            # Term이 존재하지 않거나 API가 다른 경우 무시
+            pass
+
+    return None

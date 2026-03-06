@@ -8,6 +8,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.sensors import RayCasterCfg, patterns
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 import isaaclab.envs.mdp as isaaclab_mdp
@@ -129,6 +130,27 @@ SPOT_MICRO_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
 )
 
 
+# ============================================================
+# V18: 3-Phase 리워드 커리큐럼 (STAND → WALK → TROT)
+# ============================================================
+@configclass
+class SpotMicroRewardCurriculumCfg:
+    """훈련 iteration에 따라 리워드 가중치를 단계적으로 변경.
+
+    Phase 1 (STAND, 0~2K): 서기 안정화, 페널티 최소
+    Phase 2 (WALK, 2K~6K): 전진 보행, 점진적 gait 도입
+    Phase 3 (TROT, 6K~15K): V17.1 전체 가중치 복원
+    """
+    reward_weights = CurrTerm(
+        func=custom_mdp.reward_weight_curriculum,
+        params={
+            "num_steps_per_env": 48,
+            "phase1_end_iter": 2000,
+            "phase2_end_iter": 6000,
+        },
+    )
+
+
 @configclass
 class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
     def __post_init__(self):
@@ -146,8 +168,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # 느린 주파수로 진동 보행을 물리적으로 차단
         self.decimation = 8
         
-        # Flat terrain에서는 curriculum 비활성화
-        self.curriculum = None
+        # V18: 3-Phase 리워드 커리큐럼 (STAND→WALK→TROT)
+        self.curriculum = SpotMicroRewardCurriculumCfg()
 
         # Body link names 수정 - SpotMicro의 "base_link"
         base_cfg = SceneEntityCfg("robot", body_names=["base_link"])
