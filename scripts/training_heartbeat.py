@@ -724,10 +724,11 @@ def restart_supervisor():
     sv_cmd = (
         f'conda activate env_isaaclab && '
         f'set PYTHONIOENCODING=utf-8 && '
-        f'python "{supervisor_script}"'
+        f'python scripts/training_supervisor.py'
     )
     _sp.Popen(
         ["cmd", "/c", sv_cmd],
+        cwd=PROJECT_ROOT,
         creationflags=_sp.CREATE_NEW_PROCESS_GROUP,
     )
     time.sleep(15)  # supervisor 초기화 대기 (heartbeat보다 느림)

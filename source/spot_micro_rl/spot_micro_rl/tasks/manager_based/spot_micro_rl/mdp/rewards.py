@@ -1158,9 +1158,10 @@ def reward_weight_curriculum(
 
     env._curriculum_phase = phase
 
-    # Phase별 가중치 정의
+    # Phase별 가중치 정의 (V18.1: 비관리 패널티 5개 추가 — joint_vel, action_rate, flat_orientation, shoulder_neutral, dof_acc)
     PHASE_WEIGHTS: dict[int, dict[str, float]] = {
         1: {  # STAND — 서기 안정화, 페널티 최소, bootstrap 활성
+            # === 기존 관리 항목 (14개) ===
             "standing_height": 40.0,            # V17.1: 10
             "height_bonus": 25.0,               # V17.1: 7
             "forward_velocity_bootstrap": 8.0,  # V17.1: 0 (비활성)
@@ -1174,7 +1175,13 @@ def reward_weight_curriculum(
             "diagonal_coupling": 5.0,           # V17.1: 25
             "gait_cycle_period": 0.0,           # V17.1: 15
             "stride_length": 0.0,               # V17.1: 12
-            "foot_clearance": 2.0,              # V17.1: 8
+            "foot_clearance": 2.0,              # default: 8
+            # === V18.1 추가: 비관리 패널티 → Phase1에서 대폭 경감 ===
+            "joint_vel_l2": -0.05,              # default: -0.5 (10x 경감)
+            "action_rate_l2": -0.3,             # default: -3
+            "flat_orientation_l2": -1.0,         # default: -7
+            "shoulder_neutral": -1.0,           # default: -8
+            "dof_acc_l2": -5.0e-07,             # default: -5e-6
         },
         2: {  # WALK — 전진 보행, 점진적 gait 도입
             "standing_height": 20.0,
@@ -1191,8 +1198,14 @@ def reward_weight_curriculum(
             "gait_cycle_period": 8.0,
             "stride_length": 6.0,
             "foot_clearance": 5.0,
+            # === V18.1 추가 ===
+            "joint_vel_l2": -0.2,               # default: -0.5
+            "action_rate_l2": -1.0,
+            "flat_orientation_l2": -3.0,
+            "shoulder_neutral": -4.0,
+            "dof_acc_l2": -2.0e-06,
         },
-        3: {  # TROT — V17.1 전체 가중치 복원
+        3: {  # TROT — 원래 가중치 복원
             "standing_height": 10.0,
             "height_bonus": 7.0,
             "forward_velocity_bootstrap": 0.0,
@@ -1207,6 +1220,12 @@ def reward_weight_curriculum(
             "gait_cycle_period": 15.0,
             "stride_length": 12.0,
             "foot_clearance": 8.0,
+            # === V18.1 추가: 원래 기본값 복원 ===
+            "joint_vel_l2": -0.5,               # default: -0.5
+            "action_rate_l2": -3.0,
+            "flat_orientation_l2": -7.0,
+            "shoulder_neutral": -8.0,
+            "dof_acc_l2": -5.0e-06,
         },
     }
 
@@ -1218,13 +1237,20 @@ def reward_weight_curriculum(
     print(f"{'=' * 60}")
 
     # 리워드 매니저의 가중치를 동적으로 변경
+    success_count = 0
+    fail_count = 0
     for term_name, new_weight in weights.items():
         try:
             cfg = env.reward_manager.get_term_cfg(term_name)
+            old_weight = cfg.weight
             cfg.weight = new_weight
             env.reward_manager.set_term_cfg(term_name, cfg)
-        except (ValueError, KeyError, AttributeError):
-            # Term이 존재하지 않거나 API가 다른 경우 무시
-            pass
+            print(f"  ✓ {term_name}: {old_weight} → {new_weight}")
+            success_count += 1
+        except Exception as e:
+            print(f"  ✗ {term_name}: FAILED ({type(e).__name__}: {e})")
+            fail_count += 1
+
+    print(f"[Curriculum] Applied: {success_count}/{success_count + fail_count} terms")
 
     return None
