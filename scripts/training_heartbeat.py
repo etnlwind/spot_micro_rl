@@ -1,8 +1,7 @@
-"""
-Live Training Monitor - Iteration 100 배수마다 훈련 지표를 분석하여 텔레그램으로 전송
+"""Training Heartbeat - Iteration 100 배수마다 훈련 지표를 분석하여 텔레그램으로 전송
 훈련을 중단하지 않고 TensorBoard 이벤트를 읽기 전용으로 분석합니다.
 
-Usage: python scripts/live_monitor.py [--iter_step 100] [--poll 30] [--run_dir <path>]
+Usage: python scripts/training_heartbeat.py [--iter_step 100] [--poll 30] [--run_dir <path>]
 """
 
 import argparse
@@ -56,7 +55,8 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
 # Paths & config from .env
 _log_subdir = _env.get("LOG_SUBDIR", "spot_micro_flat")
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", _log_subdir)
-PID_FILE = os.path.join(PROJECT_ROOT, "logs", "live_monitor.pid")
+PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_heartbeat.pid")
+MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
 
 
@@ -625,7 +625,7 @@ def acquire_lock():
                 capture_output=True, text=True, timeout=5
             )
             if "python.exe" in result.stdout:
-                print(f"ERROR: Another live_monitor is already running (PID {old_pid})")
+                print(f"ERROR: Another training_heartbeat is already running (PID {old_pid})")
                 print(f"Kill it first: Stop-Process -Id {old_pid} -Force")
                 sys.exit(1)
             else:
@@ -648,30 +648,68 @@ def release_lock():
         pass
 
 
+def check_maintenance_mode():
+    """Supervisor 유지보수 중인지 확인 (maintenance.flag 존재 여부)."""
+    return os.path.isfile(MAINTENANCE_FLAG)
+
+
 def check_training_alive():
-    """훈련 프로세스가 살아있는지 확인 (자기 자신 제외)."""
+    """훈련 프로세스가 살아있는지 확인 (자기 자신 제외, training_heartbeat 제외)."""
     import subprocess
     my_pid = os.getpid()
-    result = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV", "/NH"],
-        capture_output=True, text=True, timeout=10
-    )
-    # 자기 자신을 제외한 python.exe가 있는지 확인
-    for line in result.stdout.strip().split("\n"):
-        if "python.exe" in line.lower():
-            try:
-                pid = int(line.split('"')[3])
-                if pid != my_pid:
-                    return True
-            except (IndexError, ValueError):
-                continue
-    return False
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Select-Object ProcessId,CommandLine | Format-List"],
+            capture_output=True, text=True, timeout=15
+        )
+        # training 관련 python.exe가 있는지 확인 (heartbeat/monitor 제외)
+        current_pid = None
+        current_cmd = ""
+        for line in result.stdout.split("\n"):
+            line = line.strip()
+            if line.startswith("ProcessId"):
+                try:
+                    current_pid = int(line.split(":", 1)[1].strip())
+                except (ValueError, IndexError):
+                    current_pid = None
+            elif line.startswith("CommandLine"):
+                current_cmd = line.split(":", 1)[1].strip() if ":" in line else ""
+                # 이 PID+CommandLine 쌍을 판별
+                if current_pid and current_pid != my_pid:
+                    cmd_lower = current_cmd.lower()
+                    # heartbeat/monitor 스크립트는 제외, 훈련 프로세스만 카운트
+                    if "training_heartbeat" not in cmd_lower and "live_monitor" not in cmd_lower:
+                        return True
+                current_pid = None
+                current_cmd = ""
+        return False
+    except Exception:
+        # 오류 시 보수적으로 True 반환 (훈련 있다고 가정)
+        return True
+
+
+def check_supervisor_alive():
+    """Training Supervisor (powershell) 프로세스가 살아있는지 확인."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Select-Object CommandLine | Format-List"],
+            capture_output=True, text=True, timeout=15
+        )
+        for line in result.stdout.split("\n"):
+            if "training_supervisor" in line.lower():
+                return True
+        return False
+    except Exception:
+        return True  # 오류 시 보수적으로 alive 간주
 
 
 # ─── MAIN LOOP ──────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Live Training Monitor")
+    parser = argparse.ArgumentParser(description="Training Heartbeat")
     parser.add_argument("--iter_step", type=int, default=100, help="Report every N iterations (default: 100)")
     parser.add_argument("--poll", type=int, default=30, help="Polling interval in seconds (default: 30)")
     parser.add_argument("--run_dir", type=str, default=None, help="Specific run dir (auto-detect if omitted)")
@@ -680,23 +718,47 @@ def main():
     # 중복 실행 방지
     acquire_lock()
 
-    print(f"🤖 Live Monitor started | iter_step={args.iter_step} | poll={args.poll}s | PID={os.getpid()}")
+    print(f"🤖 Training Heartbeat started | iter_step={args.iter_step} | poll={args.poll}s | PID={os.getpid()}")
     # 시작 알림은 첫 리포트에 포함 (별도 메시지 보내지 않음)
 
     cycle = 0
     last_reported_milestone = 0  # 마지막으로 리포트한 iter milestone
     first_check = True
+    supervisor_alert_sent = False  # Supervisor 사망 알림 중복 방지
+    maintenance_logged = False  # 유지보수 모드 로그 중복 방지
 
     try:
         while True:
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             try:
-                # 훈련 프로세스 확인
+                # ── Supervisor 워치독 ──
+                if not check_supervisor_alive():
+                    if not supervisor_alert_sent:
+                        send_telegram("⚠️ <b>Training Supervisor 감지 불가!</b>\nSupervisor(PS1)가 종료되었거나 크래시 발생\n수동 재시작 필요: powershell -ExecutionPolicy Bypass -File scripts/training_supervisor.ps1")
+                        print(f"[{now}] WARNING: Supervisor not alive!")
+                        supervisor_alert_sent = True
+                else:
+                    if supervisor_alert_sent:
+                        send_telegram("✅ <b>Training Supervisor 복구 확인</b>")
+                        print(f"[{now}] Supervisor recovered.")
+                    supervisor_alert_sent = False
+
+                # ── 훈련 프로세스 확인 ──
                 if not check_training_alive():
-                    send_telegram(f"🛑 <b>훈련 프로세스 없음!</b>\n훈련이 종료되었거나 크래시 발생")
-                    print("No training process found!")
-                    break
+                    # 유지보수 모드인지 확인
+                    if check_maintenance_mode():
+                        if not maintenance_logged:
+                            print(f"[{now}] Maintenance mode — Supervisor가 녹화/분석 중. 대기...")
+                            maintenance_logged = True
+                        time.sleep(args.poll)
+                        continue
+                    else:
+                        send_telegram(f"🛑 <b>훈련 프로세스 없음!</b>\n훈련이 종료되었거나 크래시 발생")
+                        print("No training process found!")
+                        break
+                else:
+                    maintenance_logged = False  # 훈련 복귀 시 리셋
 
                 # 런 디렉토리 찾기
                 run_dir = args.run_dir if args.run_dir else find_latest_run()
@@ -730,7 +792,7 @@ def main():
                     # 첫 번째 리포트는 즉시 전송
                     cycle += 1
                     report = format_report(data, run_name, cycle)
-                    header = f"🤖 <b>Live Monitor 시작</b> (PID {os.getpid()})\n"
+                    header = f"🤖 <b>Training Heartbeat 시작</b> (PID {os.getpid()})\n"
                     header += f"📊 매 {args.iter_step} iter마다 리포트\n"
                     header += "━" * 30 + "\n\n"
                     report = header + report
@@ -768,8 +830,8 @@ def main():
     finally:
         release_lock()
 
-    send_telegram("👋 <b>Live Monitor 종료</b>")
-    print("Monitor exited.")
+    send_telegram("👋 <b>Training Heartbeat 종료</b>")
+    print("Heartbeat exited.")
 
 
 if __name__ == "__main__":

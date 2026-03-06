@@ -9,7 +9,7 @@
 #   Phase별 try-catch, GPU메모리기준 Wait-GpuFree, 분석타임아웃 120s
 #   conda activate (no conda run), Kill-AllPython 단순화, Ensure-GpuClean 통합
 #   메인루프 외부 try-catch, 타임아웃 프로세스 강제 kill
-# Usage: powershell -ExecutionPolicy Bypass -File scripts\auto_monitor.ps1
+# Usage: powershell -ExecutionPolicy Bypass -File scripts\training_supervisor.ps1
 
 param(
     [int]$IntervalMinutes = 0,
@@ -71,10 +71,14 @@ $DecisionTimeoutSec = if ($envMap['DECISION_TIMEOUT_SEC']) { [int]$envMap['DECIS
 $logBase = "$ProjectRoot\logs\rsl_rl\$LogSubdir"
 $monitorLog = "$ProjectRoot\logs\monitor_log.txt"
 $analyzeScript = "$ProjectRoot\scripts\analyze_training.py"
+$maintenanceFlag = "$ProjectRoot\logs\maintenance.flag"
+$heartbeatPidFile = "$ProjectRoot\logs\training_heartbeat.pid"
+$heartbeatScript = "$ProjectRoot\scripts\training_heartbeat.py"
 
 $script:tgOffset = 0
 $script:lastAnalysisText = ""
 $script:prevScore = -1
+$script:heartbeatAlertSent = $false
 
 # ============================================================
 # UTILITY
@@ -248,20 +252,93 @@ function Get-LatestCheckpoint($runDir) {
 # RESOURCE CLEANUP
 # ============================================================
 
+function Get-HeartbeatPid {
+    <# training_heartbeat의 PID를 읽어 반환 (보호 대상) #>
+    if (Test-Path $heartbeatPidFile) {
+        try {
+            $pid = [int](Get-Content $heartbeatPidFile -Raw).Trim()
+            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+            if ($proc -and $proc.Name -eq 'python') { return $pid }
+        } catch {}
+    }
+    return 0
+}
+
 function Kill-AllPython {
     param([string]$reason = "cleanup")
-    Write-Log "[$reason] Killing python/Kit processes..."
-    @("python", "python3", "Kit") | ForEach-Object {
-        Stop-Process -Name $_ -Force -ErrorAction SilentlyContinue
+    $protectedPid = Get-HeartbeatPid
+    if ($protectedPid -gt 0) {
+        Write-Log "[$reason] Heartbeat PID $protectedPid 보호 (kill 제외)"
+    }
+    Write-Log "[$reason] Killing python/Kit processes (heartbeat 제외)..."
+    # Kit 프로세스는 무조건 kill
+    Stop-Process -Name "Kit" -Force -ErrorAction SilentlyContinue
+    # python 프로세스는 heartbeat 제외
+    Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $protectedPid } | ForEach-Object {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 5
-    $remaining = Get-Process python -ErrorAction SilentlyContinue
+    $remaining = Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $protectedPid }
     if ($remaining) {
         Write-Log "[$reason] $($remaining.Count) python remaining → taskkill"
         $remaining | ForEach-Object { taskkill /F /PID $_.Id 2>$null | Out-Null }
         Start-Sleep -Seconds 5
     }
     Write-Log "[$reason] Process cleanup done."
+}
+
+# ============================================================
+# MAINTENANCE FLAG — Heartbeat에게 유지보수 중임을 알림
+# ============================================================
+
+function Set-MaintenanceFlag {
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$ts" | Out-File -FilePath $maintenanceFlag -Encoding UTF8 -Force
+    Write-Log "Maintenance flag SET"
+}
+
+function Remove-MaintenanceFlag {
+    Remove-Item $maintenanceFlag -Force -ErrorAction SilentlyContinue
+    Write-Log "Maintenance flag REMOVED"
+}
+
+# ============================================================
+# HEARTBEAT WATCHDOG — heartbeat 프로세스 감시 + 재시작
+# ============================================================
+
+function Test-HeartbeatAlive {
+    <# training_heartbeat.py가 살아있는지 확인 #>
+    try {
+        $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue
+        foreach ($p in $procs) {
+            if ($p.CommandLine -match 'training_heartbeat') { return $true }
+        }
+    } catch {}
+    return $false
+}
+
+function Restart-Heartbeat {
+    <# training_heartbeat.py를 재시작하고 결과를 텔레그램으로 알림 #>
+    Write-Log "Restarting training_heartbeat..."
+    # 기존 PID 파일 제거
+    Remove-Item $heartbeatPidFile -Force -ErrorAction SilentlyContinue
+    # 최신 run dir 찾기
+    $latestRun = Get-ChildItem $logBase -Directory -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
+    $runArg = if ($latestRun) { "--run_dir `"$($latestRun.FullName)`"" } else { "" }
+    $hbCmd = "conda activate env_isaaclab; `$env:PYTHONIOENCODING='utf-8'; python `"$heartbeatScript`" --iter_step 100 --poll 30 $runArg"
+    Start-Process powershell -ArgumentList "-Command", $hbCmd -NoNewWindow
+    Start-Sleep 10
+    if (Test-HeartbeatAlive) {
+        $newPid = 0
+        try { $newPid = [int](Get-Content $heartbeatPidFile -Raw).Trim() } catch {}
+        Write-Log "Heartbeat restarted OK (PID $newPid)"
+        Send-Telegram "✅ Training Heartbeat 자동 재시작 완료 (PID $newPid)"
+        return $true
+    } else {
+        Write-Log "WARNING: Heartbeat restart FAILED"
+        Send-Telegram "⚠️ Training Heartbeat 재시작 실패! 수동 확인 필요"
+        return $false
+    }
 }
 
 function Wait-GpuFree {
@@ -524,20 +601,41 @@ function Resume-Training($runDir, $checkpoint) {
 # ============================================================
 
 Write-Log "========================================="
-Write-Log "V17.1 Auto Monitor v4 (Telegram Interactive)"
+Write-Log "V17.1 Training Supervisor (Telegram Interactive)"
 Write-Log "Phase에러격리 | GPU메모리기준 | 분석타임아웃"
 Write-Log "Interval: ${IntervalMinutes}min | Video: ${VideoLength}steps"
 Write-Log "Train: $TrainEnvs envs | Play: $PlayEnvs envs"
 Write-Log "========================================="
 
 Flush-TelegramUpdates
-Send-Telegram "🤖 SpotMicro Monitor v4 시작`n`n⚙️ 설정`n├ Interval: ${IntervalMinutes}min`n├ Envs: $TrainEnvs`n├ Video: ${VideoLength}steps`n├ Max: $MaxIterations iter`n└ 의사결정 타임아웃: ${DecisionTimeoutSec}초`n`n📢 등급 D/F 시 텔레그램으로 물어봅니다`n10분 무응답 → 자동 계속"
+Send-Telegram "🤖 SpotMicro Training Supervisor 시작`n`n⚙️ 설정`n├ Interval: ${IntervalMinutes}min`n├ Envs: $TrainEnvs`n├ Video: ${VideoLength}steps`n├ Max: $MaxIterations iter`n└ 의사결정 타임아웃: ${DecisionTimeoutSec}초`n`n📢 등급 D/F 시 텔레그램으로 물어봅니다`n10분 무응답 → 자동 계속"
 
 $clipNum = 0
 
 while ($true) {
-    Write-Log "Sleeping $IntervalMinutes min..."
-    Start-Sleep -Seconds ($IntervalMinutes * 60)
+    # ── 인터벌 대기 (60초 단위로 Heartbeat 워치독 체크) ──
+    $sleepTotal = $IntervalMinutes * 60
+    $sleepElapsed = 0
+    Write-Log "Sleeping $IntervalMinutes min (heartbeat watchdog active)..."
+    while ($sleepElapsed -lt $sleepTotal) {
+        $chunk = [Math]::Min(60, $sleepTotal - $sleepElapsed)
+        Start-Sleep -Seconds $chunk
+        $sleepElapsed += $chunk
+        # Heartbeat 워치독
+        if (-not (Test-HeartbeatAlive)) {
+            if (-not $script:heartbeatAlertSent) {
+                Write-Log "WARNING: Heartbeat not alive! Restarting..."
+                Send-Telegram "⚠️ Training Heartbeat 감지 불가! 자동 재시작 시도 중..."
+                Restart-Heartbeat
+                $script:heartbeatAlertSent = $true
+            }
+        } else {
+            if ($script:heartbeatAlertSent) {
+                Write-Log "Heartbeat recovered."
+                $script:heartbeatAlertSent = $false
+            }
+        }
+    }
     $clipNum++
     Write-Log ""
     Write-Log "########## CLIP #$clipNum ##########"
@@ -574,6 +672,9 @@ while ($true) {
             } catch { Send-Telegram "✅ 훈련 완료. 모니터 종료." }
             Write-Log "===== MONITOR FINISHED ====="; break
         }
+
+        # ── Maintenance Flag ON ──
+        Set-MaintenanceFlag
 
         # Phase 1: 훈련 중단 + GPU 해제
         Write-Log "--- Phase 1/5: Stop Training ---"
@@ -648,18 +749,26 @@ while ($true) {
         Send-Telegram "▶️ P5/5: 훈련 재개 중... (iter $iterNum~)`n다음 체크: ${IntervalMinutes}분 후"
         Resume-Training $runDir $checkpoint
 
+        # ── Maintenance Flag OFF ──
+        Remove-MaintenanceFlag
+
     } catch {
         # 메인 루프 예외 → 비상 훈련 재개
         Write-Log "CRITICAL: $_"
         Send-Telegram "🚨 CRITICAL ERROR`n$($_)`n`n비상 훈련 재개 시도 중..."
         Write-Log "Emergency resume..."
         try {
+            Set-MaintenanceFlag
             Kill-AllPython -reason "emergency"; Start-Sleep 15
             $er = if ($runDir) { $runDir } else { Get-LatestRunDir }
             $ec = if ($checkpoint) { $checkpoint } else { Get-LatestCheckpoint $er }
             if ($er -and $ec) { Resume-Training $er $ec }
             else { Write-Log "FATAL: Cannot find run/checkpoint for emergency resume!" }
-        } catch { Write-Log "FATAL: Emergency resume failed: $_" }
+            Remove-MaintenanceFlag
+        } catch {
+            Write-Log "FATAL: Emergency resume failed: $_"
+            Remove-MaintenanceFlag
+        }
     }
 
     Write-Log "########## CLIP #$clipNum DONE ##########"

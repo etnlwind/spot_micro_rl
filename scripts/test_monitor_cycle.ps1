@@ -21,7 +21,7 @@ $analyzeScript = "$ProjectRoot\scripts\analyze_training.py"
 $passed = 0; $failed = 0; $total = 7
 
 # ============================================================
-# UTILITY (auto_monitor.ps1과 동일 로직)
+# UTILITY (training_supervisor.ps1과 동일 로직)
 # ============================================================
 
 function Write-Log($msg) {
@@ -306,7 +306,7 @@ Write-Log ""
 Write-Log "============================================="
 Write-Log "TEST RESULTS: $passed PASS / $failed FAIL / $total TOTAL"
 if ($failed -eq 0) {
-    Write-Log "ALL TESTS PASSED — auto_monitor v3 ready"
+    Write-Log "ALL TESTS PASSED — training_supervisor ready"
 } else {
     Write-Log "SOME TESTS FAILED — review log: $testLog"
 }
