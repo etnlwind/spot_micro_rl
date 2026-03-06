@@ -534,13 +534,15 @@ def record_video(checkpoint_path: str, run_dir: str, clip_num: int) -> str | Non
     iter_num = get_checkpoint_iter(checkpoint_path)
     write_log(f"Recording clip #{clip_num} from: {cp_name}")
 
+    play_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "play.py")
     play_cmd = (
         f'conda activate env_isaaclab && '
-        f'cd /d "{PROJECT_ROOT}" && '
-        f'"{ISAAC_LAB}" -p "{os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "play.py")}" '
+        f'cd /d {PROJECT_ROOT} && '
+        f'{ISAAC_LAB} -p {play_script} '
         f'--task={TASK} --num_envs={PLAY_ENVS} '
-        f'--checkpoint="{checkpoint_path}" --video --video_length={VIDEO_LENGTH}'
+        f'--checkpoint={checkpoint_path} --video --video_length={VIDEO_LENGTH}'
     )
+    write_log(f"play_cmd: {play_cmd}")
     proc = subprocess.Popen(["cmd", "/c", play_cmd])
 
     timeout = 480
@@ -706,10 +708,11 @@ def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, vid
 
     analysis_cmd = (
         f'conda activate env_isaaclab && '
-        f'cd /d "{PROJECT_ROOT}" && '
-        f'"{ISAAC_LAB}" -p "{ANALYZE_SCRIPT}" '
-        f'--run_dir "{run_dir}" --clip_num {clip_num}'
+        f'cd /d {PROJECT_ROOT} && '
+        f'{ISAAC_LAB} -p {ANALYZE_SCRIPT} '
+        f'--run_dir {run_dir} --clip_num {clip_num}'
     )
+    write_log(f"analysis_cmd: {analysis_cmd}")
 
     try:
         proc = subprocess.Popen(
@@ -776,14 +779,16 @@ def resume_training(run_dir: str, checkpoint_path: str):
     ensure_gpu_clean(reason="pre-resume")
 
     write_log(f"Resuming: {run_name} / {cp_name} (iter {iter_num})")
+    train_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "train.py")
     train_cmd = (
         f'conda activate env_isaaclab && '
-        f'cd /d "{PROJECT_ROOT}" && '
-        f'"{ISAAC_LAB}" -p "{os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "train.py")}" '
+        f'cd /d {PROJECT_ROOT} && '
+        f'{ISAAC_LAB} -p {train_script} '
         f'--task={TASK} --num_envs={TRAIN_ENVS} --headless '
         f'--max_iterations={MAX_ITERATIONS} '
         f'--resume --load_run={run_name} --checkpoint={cp_name}'
     )
+    write_log(f"train_cmd: {train_cmd}")
     subprocess.Popen(
         ["cmd", "/c", train_cmd],
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
