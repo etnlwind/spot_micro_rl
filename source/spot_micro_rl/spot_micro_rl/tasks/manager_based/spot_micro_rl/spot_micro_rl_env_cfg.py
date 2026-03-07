@@ -574,6 +574,19 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
+        # ============================================================
+        # V18.2: 관절 과속 진동 페널티
+        # 고속 미세진동(~20 rad/s)을 직접 억제하여 "벌레 걸음" 데드락 방지
+        # ============================================================
+        self.rewards.joint_oscillation = RewTerm(
+            func=custom_mdp.excessive_joint_oscillation_penalty,
+            weight=-5.0,  # Phase 1 기본값, 커리큘럼에서 Phase별 조정
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "max_vel_per_joint": 5.0,
+            },
+        )
+
         # Action scale
         self.actions.joint_pos.scale = 1.0
 

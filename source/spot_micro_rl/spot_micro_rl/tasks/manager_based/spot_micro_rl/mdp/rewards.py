@@ -912,6 +912,30 @@ def diagonal_joint_coupling_reward(
 
 
 # ============================================================
+# V18.2: 관절 과속 진동 페널티
+# ============================================================
+
+def excessive_joint_oscillation_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_vel_per_joint: float = 5.0,
+) -> torch.Tensor:
+    """개별 관절 속도가 max_vel_per_joint를 초과하면 페널티.
+
+    '벌레 걸음' 데드락의 근본 원인인 고속 미세진동(~20 rad/s)을
+    직접 억제한다. 정상 보행 시 관절속도는 3~5 rad/s 수준.
+
+    Args:
+        asset_cfg: 로봇 에셋 설정
+        max_vel_per_joint: 페널티 없는 최대 관절 속도 (rad/s)
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_vel = torch.abs(asset.data.joint_vel[:, asset_cfg.joint_ids])
+    excess = torch.clamp(joint_vel - max_vel_per_joint, min=0.0)
+    return excess.mean(dim=1)
+
+
+# ============================================================
 # V17: 걸음걸이 주기 보상 & 보폭 길이 보상
 # ============================================================
 
@@ -1182,12 +1206,14 @@ def reward_weight_curriculum(
             "flat_orientation_l2": -1.0,         # default: -7
             "shoulder_neutral": -1.0,           # default: -8
             "dof_acc_l2": -5.0e-07,             # default: -5e-6
+            # === V18.2 신규 ===
+            "joint_oscillation": -5.0,           # V18.2: 과속 진동 페널티 (약함)
         },
         2: {  # WALK — 전진 보행, 점진적 gait 도입
-            "standing_height": 20.0,
+            "standing_height": 8.0,              # V18.2: 20→8 (서기 지배력 감소)
             "height_bonus": 15.0,
             "forward_velocity_bootstrap": 4.0,
-            "forward_velocity": 8.0,
+            "forward_velocity": 12.0,             # V18.2: 8→12 (이동 인센티브 강화)
             "same_side_penalty": -10.0,
             "rear_both_ground": -30.0,
             "undesired_contacts": -50.0,
@@ -1199,17 +1225,19 @@ def reward_weight_curriculum(
             "stride_length": 6.0,
             "foot_clearance": 5.0,
             # === V18.1 추가 ===
-            "joint_vel_l2": -0.2,               # default: -0.5
+            "joint_vel_l2": -0.5,                # V18.2: -0.2→-0.5 (떨기 비용 증가)
             "action_rate_l2": -1.0,
             "flat_orientation_l2": -3.0,
             "shoulder_neutral": -4.0,
             "dof_acc_l2": -2.0e-06,
+            # === V18.2 신규 ===
+            "joint_oscillation": -15.0,          # V18.2: 과속 진동 페널티
         },
         3: {  # TROT — 원래 가중치 복원
-            "standing_height": 10.0,
+            "standing_height": 3.0,              # V18.2: 10→3 (서기 지배력 최소화)
             "height_bonus": 7.0,
             "forward_velocity_bootstrap": 0.0,
-            "forward_velocity": 8.0,
+            "forward_velocity": 12.0,             # V18.2: 8→12 (이동 인센티브 강화)
             "same_side_penalty": -30.0,
             "rear_both_ground": -80.0,
             "undesired_contacts": -100.0,
@@ -1220,12 +1248,14 @@ def reward_weight_curriculum(
             "gait_cycle_period": 15.0,
             "stride_length": 12.0,
             "foot_clearance": 8.0,
-            # === V18.1 추가: 원래 기본값 복원 ===
-            "joint_vel_l2": -0.5,               # default: -0.5
+            # === V18.1 추가 ===
+            "joint_vel_l2": -1.0,                # V18.2: -0.5→-1.0 (떨기 비용 최대)
             "action_rate_l2": -3.0,
             "flat_orientation_l2": -7.0,
             "shoulder_neutral": -8.0,
             "dof_acc_l2": -5.0e-06,
+            # === V18.2 신규 ===
+            "joint_oscillation": -20.0,          # V18.2: 과속 진동 페널티 최대
         },
     }
 
