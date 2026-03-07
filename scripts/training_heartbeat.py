@@ -6,6 +6,7 @@ Usage: python scripts/training_heartbeat.py [--iter_step 100] [--poll 30] [--run
 
 import argparse
 import os
+import re
 import sys
 import time
 import datetime
@@ -59,9 +60,29 @@ PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_heartbeat.pid")
 MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
 
+# Training version tag (env_cfg.py에서 읽음)
+def _read_train_version() -> str:
+    cfg_path = os.path.join(
+        PROJECT_ROOT, "source", "spot_micro_rl", "spot_micro_rl",
+        "tasks", "manager_based", "spot_micro_rl", "spot_micro_rl_env_cfg.py"
+    )
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r'^TRAIN_VERSION\s*=\s*["\'](.+?)["\']', line)
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
+    return _env.get("TRAIN_VERSION", "")
+
+TRAIN_VERSION = _read_train_version()
+
 
 def send_telegram(text):
-    """텔레그램 메시지 전송 (최대 4096자 분할)."""
+    """텔레그램 메시지 전송 (최대 4096자 분할). TRAIN_VERSION 자동 prefix."""
+    if TRAIN_VERSION:
+        text = f"[{TRAIN_VERSION}] {text}"
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chunks = []
     while len(text) > 4000:

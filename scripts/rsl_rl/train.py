@@ -209,6 +209,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # load previously trained model
         runner.load(resume_path, load_optimizer=has_optimizer)
 
+        # V18.3 fix: resume 시 env.common_step_counter를 복원된 iteration에 맞게 동기화
+        # runner.load()가 current_learning_iteration을 체크포인트에서 복원하지만,
+        # env.common_step_counter는 0으로 시작 → curriculum Phase가 1로 리셋됨
+        resumed_iter = runner.current_learning_iteration
+        offset_steps = resumed_iter * runner.num_steps_per_env
+        env.unwrapped.common_step_counter = offset_steps
+        print(f"[INFO] Synced env.common_step_counter = {offset_steps} "
+              f"(iter {resumed_iter} × {runner.num_steps_per_env} steps/iter)")
+
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)

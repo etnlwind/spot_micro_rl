@@ -87,10 +87,33 @@ MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
 VIDEO_FPS = int(_env.get("VIDEO_FPS", "15"))
 DECISION_TIMEOUT_SEC = int(_env.get("DECISION_TIMEOUT_SEC", "600"))
 
+# Training version tag (env_cfg.py에서 읽음 — 코드 변경 시 자동 반영)
+def _read_train_version() -> str:
+    """env_cfg.py에서 TRAIN_VERSION 상수를 파싱."""
+    cfg_path = os.path.join(
+        PROJECT_ROOT, "source", "spot_micro_rl", "spot_micro_rl",
+        "tasks", "manager_based", "spot_micro_rl", "spot_micro_rl_env_cfg.py"
+    )
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r'^TRAIN_VERSION\s*=\s*["\'](.+?)["\']', line)
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
+    return _env.get("TRAIN_VERSION", "")
+
+TRAIN_VERSION = _read_train_version()
+
+# Curriculum Phase boundaries (must match rewards.py PHASE_WEIGHTS)
+PHASE1_END_ITER = int(_env.get("PHASE1_END_ITER", "2000"))
+PHASE2_END_ITER = int(_env.get("PHASE2_END_ITER", "6000"))
+
 # Derived paths
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", LOG_SUBDIR)
 MONITOR_LOG = os.path.join(PROJECT_ROOT, "logs", "monitor_log.txt")
-ANALYZE_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "analyze_training.py")
+ANALYZE_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "utils", "analyze_training.py")
 MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
 HEARTBEAT_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_heartbeat.pid")
 HEARTBEAT_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "training_heartbeat.py")
@@ -140,7 +163,9 @@ def write_log(msg: str):
 
 
 def send_telegram(msg: str):
-    """텔레그램 메시지 전송 (UTF-8 명시)."""
+    """텔레그램 메시지 전송 (UTF-8 명시). TRAIN_VERSION 자동 prefix."""
+    if TRAIN_VERSION:
+        msg = f"[{TRAIN_VERSION}] {msg}"
     try:
         data = urllib.parse.urlencode({
             "chat_id": TELEGRAM_CHAT_ID,
@@ -333,6 +358,16 @@ def get_checkpoint_iter(checkpoint_path: str) -> int:
     """체크포인트 파일명에서 iteration 숫자 추출."""
     m = re.search(r"model_(\d+)", os.path.basename(checkpoint_path))
     return int(m.group(1)) if m else 0
+
+
+def get_curriculum_phase(iteration: int) -> tuple[int, str]:
+    """iteration 기반 예상 커리큘럼 Phase 및 이름 반환."""
+    if iteration < PHASE1_END_ITER:
+        return 1, "STAND"
+    elif iteration < PHASE2_END_ITER:
+        return 2, "WALK"
+    else:
+        return 3, "TROT"
 
 
 # ============================================================
@@ -778,7 +813,9 @@ def resume_training(run_dir: str, checkpoint_path: str):
     write_log("Pre-resume cleanup...")
     ensure_gpu_clean(reason="pre-resume")
 
-    write_log(f"Resuming: {run_name} / {cp_name} (iter {iter_num})")
+    phase_num, phase_name = get_curriculum_phase(iter_num)
+    write_log(f"Resuming: {run_name} / {cp_name} (iter {iter_num}, Phase {phase_num}/{phase_name})")
+    write_log(f"  common_step_counter will sync to iter {iter_num} × steps_per_env")
     train_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "train.py")
     train_cmd = (
         f'conda activate env_isaaclab && '
@@ -1078,7 +1115,12 @@ def main():
 
                 # Phase 5: 훈련 재개 (반드시 실행)
                 write_log("--- Phase 5/5: Resume Training ---")
-                send_telegram(f"▶️ P5/5: 훈련 재개 중... (iter {iter_num}~)\n다음 체크: {INTERVAL_MINUTES}분 후")
+                phase_num, phase_name = get_curriculum_phase(iter_num)
+                send_telegram(
+                    f"▶️ P5/5: 훈련 재개 중... (iter {iter_num}~)\n"
+                    f"📋 Curriculum Phase {phase_num} ({phase_name})\n"
+                    f"다음 체크: {INTERVAL_MINUTES}분 후"
+                )
                 resume_training(run_dir, checkpoint)
 
                 # ── Maintenance Flag OFF ──

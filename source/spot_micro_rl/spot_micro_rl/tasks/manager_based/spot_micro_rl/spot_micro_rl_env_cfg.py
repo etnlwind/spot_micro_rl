@@ -3,6 +3,9 @@
 
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
+# ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
+TRAIN_VERSION = "V18.3"
+
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
@@ -570,6 +573,23 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
                 "asset_cfg": SceneEntityCfg("robot"),
                 "target_stride": 0.06,
+                "min_vel": 0.05,
+            },
+        )
+
+        # ============================================================
+        # V18.3: 스탠스 추진 보상 — 바닥을 밀어서 동체를 앞으로 보내는 메커니즘 보상
+        # 스탠스 중 발이 동체 대비 뒤로 밀리면 = 실제로 바닥을 밀고 있음 → 보상
+        # ============================================================
+        self.rewards.stance_propulsion = RewTerm(
+            func=custom_mdp.stance_propulsion_reward,
+            weight=8.0,  # Phase 1 기본값, 커리큘럼에서 Phase별 조정
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "target_push_vel": 0.3,
                 "min_vel": 0.05,
             },
         )

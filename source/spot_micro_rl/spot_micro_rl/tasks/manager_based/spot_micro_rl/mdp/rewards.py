@@ -912,6 +912,86 @@ def diagonal_joint_coupling_reward(
 
 
 # ============================================================
+# V18.3: 스탠스 추진 보상 (Stance Propulsion Reward)
+# 발이 바닥에 닿아서 뒤로 밀어야 동체가 앞으로 나가는 메커니즘 보상
+# ============================================================
+
+def stance_propulsion_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_push_vel: float = 0.3,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """스탠스 추진 보상: 발이 바닥에 닿은 상태에서 동체 대비 뒤로 밀리면 보상.
+
+    보행의 물리적 원리: 스탠스 페이즈에서 발이 지면에 고정되고,
+    다리가 뒤로 밀면서 동체가 앞으로 나간다. 이때 발의 월드 속도는
+    거의 0이고, 동체는 앞으로 이동하므로 발의 동체-상대 속도는
+    heading 방향으로 음수(뒤쪽)가 된다.
+
+    측정: stance 중인 발의 heading 방향 속도 - 동체의 heading 방향 속도
+    이 값이 음수(발이 동체 대비 뒤쪽으로 이동) → 추진력 발생 → 보상
+
+    Args:
+        sensor_cfg: 발 접촉 센서 설정
+        foot_cfg: 발 바디 설정 (속도 추적용)
+        asset_cfg: 로봇 설정
+        contact_threshold: 접촉 판정 힘 문턱값 (N)
+        target_push_vel: 정규화 기준 추진 속도 (m/s)
+        min_vel: 전진 속도 게이팅 문턱값
+    """
+    # 1) 접촉 감지 → 스탠스 마스크
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    stance_mask = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    ).float()  # (num_envs, 4), 1.0 = 접촉 중 (스탠스)
+
+    # 2) 발의 월드 속도
+    foot_asset = env.scene[foot_cfg.name]
+    foot_vel_w = foot_asset.data.body_vel_w[:, foot_cfg.body_ids, :3]  # (num_envs, 4, 3)
+
+    # 3) 로봇 heading 방향 계산
+    robot = env.scene[asset_cfg.name]
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    heading_x = 1.0 - 2.0 * (y * y + z * z)
+    heading_y = 2.0 * (x * y + w * z)
+
+    # 4) 발의 heading 방향 속도 (월드 프레임)
+    foot_heading_vel = (
+        foot_vel_w[:, :, 0] * heading_x.unsqueeze(1) +
+        foot_vel_w[:, :, 1] * heading_y.unsqueeze(1)
+    )  # (num_envs, 4)
+
+    # 5) 동체의 heading 방향 속도 (월드 프레임)
+    body_vel_w = robot.data.root_lin_vel_w  # (num_envs, 3)
+    body_heading_vel = body_vel_w[:, 0] * heading_x + body_vel_w[:, 1] * heading_y  # (num_envs,)
+
+    # 6) 발의 동체-상대 heading 속도
+    # 음수 = 발이 동체 대비 뒤로 이동 = 바닥을 밀고 있음
+    relative_vel = foot_heading_vel - body_heading_vel.unsqueeze(1)  # (num_envs, 4)
+
+    # 7) 추진력: 음의 상대속도를 양의 보상으로 변환
+    push_magnitude = torch.clamp(-relative_vel, min=0.0)  # (num_envs, 4)
+    normalized_push = torch.clamp(push_magnitude / target_push_vel, 0.0, 1.0)
+
+    # 8) 스탠스 중인 발만 보상
+    stance_push = normalized_push * stance_mask
+    num_stance = stance_mask.sum(dim=1).clamp(min=1.0)
+    reward = stance_push.sum(dim=1) / num_stance
+
+    # 9) 전진 게이팅
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return reward * vel_gate
+
+
+# ============================================================
 # V18.2: 관절 과속 진동 페널티
 # ============================================================
 
@@ -1159,7 +1239,8 @@ def reward_weight_curriculum(
     Phase 3 (TROT): V17.1 전체 가중치 복원
 
     주의: common_step_counter는 체크포인트에 저장되지 않으므로
-          resume 시 Phase가 0부터 재시작됨. From-scratch 훈련 전용.
+          resume 시 train.py에서 runner.current_learning_iteration 기반으로
+          common_step_counter를 동기화해야 Phase가 올바르게 적용됨. (V18.3 fix)
     """
     step = env.common_step_counter
     iteration = step // num_steps_per_env
@@ -1208,6 +1289,8 @@ def reward_weight_curriculum(
             "dof_acc_l2": -5.0e-07,             # default: -5e-6
             # === V18.2 신규 ===
             "joint_oscillation": -5.0,           # V18.2: 과속 진동 페널티 (약함)
+            # === V18.3 신규 ===
+            "stance_propulsion": 8.0,            # V18.3: 스탠스 추진 (바닥 밀기)
         },
         2: {  # WALK — 전진 보행, 점진적 gait 도입
             "standing_height": 8.0,              # V18.2: 20→8 (서기 지배력 감소)
@@ -1232,6 +1315,8 @@ def reward_weight_curriculum(
             "dof_acc_l2": -2.0e-06,
             # === V18.2 신규 ===
             "joint_oscillation": -15.0,          # V18.2: 과속 진동 페널티
+            # === V18.3 신규 ===
+            "stance_propulsion": 15.0,           # V18.3: 스탠스 추진 강화
         },
         3: {  # TROT — 원래 가중치 복원
             "standing_height": 3.0,              # V18.2: 10→3 (서기 지배력 최소화)
@@ -1256,6 +1341,8 @@ def reward_weight_curriculum(
             "dof_acc_l2": -5.0e-06,
             # === V18.2 신규 ===
             "joint_oscillation": -20.0,          # V18.2: 과속 진동 페널티 최대
+            # === V18.3 신규 ===
+            "stance_propulsion": 20.0,           # V18.3: 스탠스 추진 최대
         },
     }
 
