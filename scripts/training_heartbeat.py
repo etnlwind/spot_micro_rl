@@ -94,6 +94,77 @@ def update_tb_junction(run_dir: str):
     except Exception as e:
         print(f"[TB] Junction update failed: {e}")
 
+
+# ─── TensorBoard 프로세스 관리 ──────────────────────────────────
+
+_tb_restart_count = 0
+
+def _is_tb_alive() -> bool:
+    """TB_PORT에 TCP 연결이 가능한지 확인."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", int(TB_PORT)), timeout=3):
+            return True
+    except (OSError, ConnectionRefusedError):
+        return False
+
+
+def ensure_tensorboard() -> None:
+    """TensorBoard가 죽었으면 자동 재시작. junction 경로 기준."""
+    global _tb_restart_count
+
+    if not TB_CURRENT_LINK or not os.path.isdir(TB_CURRENT_LINK):
+        return  # junction이 아직 없으면 스킵
+
+    if _is_tb_alive():
+        return  # 정상 동작 중
+
+    # 죽어 있음 — 재시작
+    import subprocess
+    _tb_restart_count += 1
+    logdir = TB_CURRENT_LINK
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+
+    try:
+        # 이전 좀비 프로세스 정리
+        import psutil
+        for p in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = " ".join(p.info["cmdline"] or [])
+                if "tensorboard" in cmdline.lower() and str(TB_PORT) in cmdline:
+                    p.terminate()
+                    print(f"[TB] Killed zombie TensorBoard PID {p.pid}")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # 새 TensorBoard 시작
+        cmd = [
+            sys.executable, "-m", "tensorboard.main",
+            f"--logdir={logdir}",
+            "--host=0.0.0.0",
+            f"--port={TB_PORT}",
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+
+        # 잠시 대기 후 확인
+        time.sleep(3)
+        if _is_tb_alive():
+            print(f"[{now}] [TB] Restarted TensorBoard (PID {proc.pid}, restart #{_tb_restart_count})")
+            if _tb_restart_count <= 3:  # 반복 알림 방지
+                send_telegram(f"🔄 TensorBoard 자동 재시작 완료 (PID {proc.pid})\n🔗 {TB_URL}")
+        else:
+            print(f"[{now}] [TB] TensorBoard restart failed (PID {proc.pid} started but port not responding)")
+            if _tb_restart_count <= 3:
+                send_telegram(f"⚠️ TensorBoard 재시작 실패 — 포트 {TB_PORT} 응답 없음")
+    except Exception as e:
+        print(f"[{now}] [TB] TensorBoard restart error: {e}")
+
+
 # Training version tag (env_cfg.py에서 읽음)
 def _read_train_version() -> str:
     cfg_path = os.path.join(
@@ -1356,6 +1427,9 @@ def main():
 
                 # TensorBoard junction 업데이트 (런 변경 시 자동 반영)
                 update_tb_junction(run_dir)
+
+                # TensorBoard 프로세스 상태 확인 및 자동 재시작
+                ensure_tensorboard()
 
                 # TensorBoard 읽기 (재시도 포함)
                 data = read_tfevents(run_dir)
