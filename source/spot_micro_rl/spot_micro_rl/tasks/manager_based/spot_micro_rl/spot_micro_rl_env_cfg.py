@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V19"
+TRAIN_VERSION = "V20"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -134,22 +134,29 @@ SPOT_MICRO_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
 
 
 # ============================================================
-# V18: 3-Phase 리워드 커리큐럼 (STAND → WALK → TROT)
+# V20: Soft-Ramp 리워드 커리큘럼 (STAND → WALK → TROT)
+# 하드 Phase 전환 대신 선형 보간 ramp로 critic shock 방지
 # ============================================================
 @configclass
 class SpotMicroRewardCurriculumCfg:
-    """훈련 iteration에 따라 리워드 가중치를 단계적으로 변경.
+    """Soft-ramp 리워드 가중치 커리큘럼 (V20).
 
-    Phase 1 (STAND, 0~2K): 서기 안정화, 페널티 최소
-    Phase 2 (WALK, 2K~6K): 전진 보행, 점진적 gait 도입
-    Phase 3 (TROT, 6K~15K): V17.1 전체 가중치 복원
+    Phase 1→2 (STAND→WALK): iter 1500~3000 선형 보간
+    Phase 2→3 (WALK→TROT):  iter 5500~8000 선형 보간
+    Metric gating: ep_len < 200이면 ramp 일시정지
     """
     reward_weights = CurrTerm(
         func=custom_mdp.reward_weight_curriculum,
         params={
             "num_steps_per_env": 48,
-            "phase1_end_iter": 2000,
-            "phase2_end_iter": 6000,
+            "ramp1_start": 1500,
+            "ramp1_end": 3000,
+            "ramp2_start": 5500,
+            "ramp2_end": 8000,
+            "update_interval": 10,
+            "gait_gate_enabled": True,
+            "gait_gate_min_ep_len": 200.0,
+            "log_interval": 100,
         },
     )
 
@@ -171,7 +178,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # 느린 주파수로 진동 보행을 물리적으로 차단
         self.decimation = 8
         
-        # V18: 3-Phase 리워드 커리큐럼 (STAND→WALK→TROT)
+        # V20: Soft-Ramp 리워드 커리큘럼 (STAND→WALK→TROT)
         self.curriculum = SpotMicroRewardCurriculumCfg()
 
         # Body link names 수정 - SpotMicro의 "base_link"

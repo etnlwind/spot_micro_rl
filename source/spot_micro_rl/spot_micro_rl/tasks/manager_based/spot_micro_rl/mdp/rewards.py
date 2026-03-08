@@ -1228,154 +1228,329 @@ def stride_length_reward(
 
 
 # ============================================================
-# V18: 3-Phase Reward Weight Curriculum (STAND → WALK → TROT)
-# Isaac Lab CurriculumManager에서 호출되는 커리큘럼 함수
+# V20: Soft-Ramp Reward Weight Curriculum (STAND → WALK → TROT)
+# Hard phase switch를 선형 보간 ramp로 대체하여 critic shock 방지.
+# Metric gating: 보행 구조 유지 확인 후에만 ramp 진행.
 # ============================================================
+
+# Phase별 가중치 정의 (모듈 레벨 상수)
+_CURRICULUM_PHASE_WEIGHTS: dict[int, dict[str, float]] = {
+    1: {  # STAND — 서기 안정화, 페널티 최소, bootstrap 활성
+        "standing_height": 40.0,
+        "height_bonus": 25.0,
+        "forward_velocity_bootstrap": 8.0,
+        "forward_velocity": 2.0,
+        "same_side_penalty": 0.0,
+        "rear_both_ground": 0.0,
+        "undesired_contacts": -20.0,
+        "feet_below_knees": -30.0,
+        "trot_gait": 5.0,
+        "rear_joint_frozen": -10.0,
+        "diagonal_coupling": 5.0,
+        "gait_cycle_period": 0.0,
+        "stride_length": 0.0,
+        "foot_clearance": 2.0,
+        "joint_vel_l2": -0.05,
+        "action_rate_l2": -0.3,
+        "flat_orientation_l2": -1.0,
+        "shoulder_neutral": -1.0,
+        "dof_acc_l2": -5.0e-07,
+        "joint_oscillation": -5.0,
+        "stance_propulsion": 8.0,
+    },
+    2: {  # WALK — 전진 보행, 점진적 gait 도입
+        "standing_height": 8.0,
+        "height_bonus": 15.0,
+        "forward_velocity_bootstrap": 4.0,
+        "forward_velocity": 12.0,
+        "same_side_penalty": -10.0,
+        "rear_both_ground": -30.0,
+        "undesired_contacts": -50.0,
+        "feet_below_knees": -80.0,
+        "trot_gait": 20.0,
+        "rear_joint_frozen": -30.0,
+        "diagonal_coupling": 15.0,
+        "gait_cycle_period": 8.0,
+        "stride_length": 6.0,
+        "foot_clearance": 5.0,
+        "joint_vel_l2": -0.5,
+        "action_rate_l2": -1.0,
+        "flat_orientation_l2": -3.0,
+        "shoulder_neutral": -3.0,
+        "dof_acc_l2": -2.0e-06,
+        "joint_oscillation": -15.0,
+        "stance_propulsion": 15.0,
+    },
+    3: {  # TROT — 전체 가중치 복원
+        "standing_height": 3.0,
+        "height_bonus": 7.0,
+        "forward_velocity_bootstrap": 0.0,
+        "forward_velocity": 12.0,
+        "same_side_penalty": -30.0,
+        "rear_both_ground": -80.0,
+        "undesired_contacts": -100.0,
+        "feet_below_knees": -150.0,
+        "trot_gait": 40.0,
+        "rear_joint_frozen": -60.0,
+        "diagonal_coupling": 25.0,
+        "gait_cycle_period": 15.0,
+        "stride_length": 12.0,
+        "foot_clearance": 8.0,
+        "joint_vel_l2": -1.0,
+        "action_rate_l2": -3.0,
+        "flat_orientation_l2": -7.0,
+        "shoulder_neutral": -6.0,
+        "dof_acc_l2": -5.0e-06,
+        "joint_oscillation": -20.0,
+        "stance_propulsion": 20.0,
+    },
+}
+
+
+def _curriculum_target_alpha(iteration: int, ramp_start: int, ramp_end: int) -> float:
+    """Iteration 기반 목표 alpha (0.0~1.0) 계산."""
+    if iteration <= ramp_start:
+        return 0.0
+    if iteration >= ramp_end:
+        return 1.0
+    return (iteration - ramp_start) / (ramp_end - ramp_start)
+
+
+def _curriculum_apply_weights(env: ManagerBasedRLEnv, alpha12: float, alpha23: float) -> None:
+    """alpha 기반으로 Phase 가중치를 보간하여 적용."""
+    w = _CURRICULUM_PHASE_WEIGHTS
+    for term_name in w[1]:
+        w1 = w[1][term_name]
+        w2 = w[2][term_name]
+        w3 = w[3][term_name]
+        # 2단계 보간: P1→P2 (alpha12), 이후 P2→P3 (alpha23)
+        if alpha23 > 0.0:
+            current = w2 + alpha23 * (w3 - w2)
+        else:
+            current = w1 + alpha12 * (w2 - w1)
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = current
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+
+# ── 로깅 대상 핵심 term 정의 ──
+_LOG_WEIGHT_TERMS = ["forward_velocity", "trot_gait", "joint_vel_l2", "dof_acc_l2"]
+_LOG_RAW_GAIT_TERMS = ["forward_velocity", "trot_gait", "diagonal_coupling", "leg_lift", "foot_clearance"]
+_LOG_RAW_QUALITY_TERMS = ["joint_vel_l2", "dof_acc_l2", "action_rate_l2"]
+
+
+def _curriculum_log_snapshot(env: ManagerBasedRLEnv, iteration: int,
+                             alpha12: float, alpha23: float, gate_paused: bool) -> None:
+    """Ramp 상태 + key weight + raw metric snapshot 로깅.
+
+    리뷰어 요청 A, B:
+      A) phase, alpha, gate 상태, 주요 weight 값
+      B) raw gait + quality metric snapshot
+    """
+    phase_str = _curriculum_phase_str(alpha12, alpha23)
+    mean_ep_len = env.episode_length_buf.float().mean().item()
+    gate_str = "PAUSED" if gate_paused else "active"
+
+    print(f"\n{'─' * 60}")
+    print(f"[Curriculum Snapshot] iter {iteration} | {phase_str}")
+    print(f"  alpha12={alpha12:.4f}  alpha23={alpha23:.4f}  gate={gate_str}  ep_len={mean_ep_len:.1f}")
+
+    # A: 현재 적용된 주요 weight 값
+    weight_parts = []
+    for name in _LOG_WEIGHT_TERMS:
+        try:
+            cfg = env.reward_manager.get_term_cfg(name)
+            weight_parts.append(f"{name}={cfg.weight:.4f}")
+        except Exception:
+            pass
+    if weight_parts:
+        print(f"  weights: {', '.join(weight_parts)}")
+
+    # B: raw metric snapshot (from _step_reward)
+    rm = env.reward_manager
+    term_names = rm._term_names
+    step_reward = rm._step_reward  # (num_envs, num_terms), weighted per-step
+
+    # Gait raw metrics
+    gait_parts = []
+    for name in _LOG_RAW_GAIT_TERMS:
+        if name in term_names:
+            idx = term_names.index(name)
+            try:
+                cfg = rm.get_term_cfg(name)
+                w = cfg.weight
+                weighted_mean = step_reward[:, idx].mean().item()
+                raw = weighted_mean / w if abs(w) > 1e-8 else 0.0
+                gait_parts.append(f"{name}={raw:.4f}")
+            except Exception:
+                pass
+    if gait_parts:
+        print(f"  raw gait: {', '.join(gait_parts)}")
+
+    # Quality raw metrics (penalties — raw 값은 양수, weight가 음수)
+    quality_parts = []
+    for name in _LOG_RAW_QUALITY_TERMS:
+        if name in term_names:
+            idx = term_names.index(name)
+            try:
+                cfg = rm.get_term_cfg(name)
+                w = cfg.weight
+                weighted_mean = step_reward[:, idx].mean().item()
+                raw = weighted_mean / w if abs(w) > 1e-8 else 0.0
+                quality_parts.append(f"{name}={raw:.4f}")
+            except Exception:
+                pass
+    if quality_parts:
+        print(f"  raw quality: {', '.join(quality_parts)}")
+    print(f"{'─' * 60}")
+
 
 def reward_weight_curriculum(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
     num_steps_per_env: int = 48,
-    phase1_end_iter: int = 2000,
-    phase2_end_iter: int = 6000,
+    # Ramp 구간 정의
+    ramp1_start: int = 1500,    # Phase 1→2 ramp 시작
+    ramp1_end: int = 3000,      # Phase 1→2 ramp 완료
+    ramp2_start: int = 5500,    # Phase 2→3 ramp 시작
+    ramp2_end: int = 8000,      # Phase 2→3 ramp 완료
+    # 업데이트 주기
+    update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
+    # Metric gating (보행 구조 보호)
+    gait_gate_enabled: bool = True,
+    gait_gate_min_ep_len: float = 200.0,  # ep_len < 이 값이면 ramp 일시정지
+    # 로깅
+    log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
-    """3-Phase 리워드 가중치 커리큘럼.
+    """Soft-ramp 리워드 가중치 커리큘럼 (V20).
 
-    훈련 iteration에 따라 리워드 가중치를 동적으로 변경한다.
-    Phase 1 (STAND): 서기 안정화에 집중, 보행 페널티 최소화
-    Phase 2 (WALK): 전진 보행 유도, 점진적 gait 도입
-    Phase 3 (TROT): V17.1 전체 가중치 복원
+    기존 hard phase switch를 선형 보간 ramp로 대체.
+    Phase 1 (STAND) → Phase 2 (WALK) → Phase 3 (TROT) 가중치를
+    ramp 구간에서 점진적으로 보간하여 critic shock를 방지한다.
+
+    Metric gating: 평균 episode length가 gait_gate_min_ep_len 미만이면
+    ramp를 일시정지하여 보행 구조 붕괴를 방지한다.
+    ("시간이 됐으니 벌점 추가"가 아니라 "정책이 준비됐으니 벌점 추가")
+
+    타임라인 예시 (기본값):
+      iter    0~1500: Phase 1 고정 (STAND)
+      iter 1500~3000: Phase 1→2 선형 보간 (STAND→WALK)
+      iter 3000~5500: Phase 2 고정 (WALK)
+      iter 5500~8000: Phase 2→3 선형 보간 (WALK→TROT)
+      iter 8000~    : Phase 3 고정 (TROT)
 
     주의: common_step_counter는 체크포인트에 저장되지 않으므로
           resume 시 train.py에서 runner.current_learning_iteration 기반으로
-          common_step_counter를 동기화해야 Phase가 올바르게 적용됨. (V18.3 fix)
+          common_step_counter를 동기화해야 한다. (V18.3 fix)
     """
     step = env.common_step_counter
     iteration = step // num_steps_per_env
 
-    # Phase 추적 (최초 호출 시 -1로 초기화)
-    if not hasattr(env, "_curriculum_phase"):
-        env._curriculum_phase = -1
-
-    # 현재 Phase 결정
-    if iteration < phase1_end_iter:
-        phase = 1
-    elif iteration < phase2_end_iter:
-        phase = 2
-    else:
-        phase = 3
-
-    # Phase가 바뀌지 않으면 아무것도 안 함 (성능 최적화)
-    if phase == env._curriculum_phase:
+    # ── 상태 초기화 (최초 호출 또는 resume 후) ──
+    if not hasattr(env, "_crr_alpha12"):
+        # resume 시 iteration 기반으로 alpha를 복원 (과거 ramp는 완료된 것으로 간주)
+        env._crr_alpha12 = _curriculum_target_alpha(iteration, ramp1_start, ramp1_end)
+        env._crr_alpha23 = _curriculum_target_alpha(iteration, ramp2_start, ramp2_end)
+        env._crr_last_update = iteration
+        env._crr_gate_paused = False
+        _curriculum_apply_weights(env, env._crr_alpha12, env._crr_alpha23)
+        phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
+        print(f"\n{'=' * 60}")
+        print(f"[Curriculum] INIT @ iter {iteration} | {phase_str}")
+        print(f"  alpha12={env._crr_alpha12:.3f}, alpha23={env._crr_alpha23:.3f}")
+        print(f"  ramp1=[{ramp1_start}~{ramp1_end}], ramp2=[{ramp2_start}~{ramp2_end}]")
+        print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
+        print(f"{'=' * 60}")
+        # INIT 시점 key weight 로깅
+        weight_parts = []
+        for name in _LOG_WEIGHT_TERMS:
+            try:
+                cfg = env.reward_manager.get_term_cfg(name)
+                weight_parts.append(f"{name}={cfg.weight:.4f}")
+            except Exception:
+                pass
+        if weight_parts:
+            print(f"  init weights: {', '.join(weight_parts)}")
         return None
 
-    env._curriculum_phase = phase
+    # ── 업데이트 주기 확인 ──
+    if iteration - env._crr_last_update < update_interval:
+        return None
+    env._crr_last_update = iteration
 
-    # Phase별 가중치 정의 (V18.1: 비관리 패널티 5개 추가 — joint_vel, action_rate, flat_orientation, shoulder_neutral, dof_acc)
-    PHASE_WEIGHTS: dict[int, dict[str, float]] = {
-        1: {  # STAND — 서기 안정화, 페널티 최소, bootstrap 활성
-            # === 기존 관리 항목 (14개) ===
-            "standing_height": 40.0,            # V17.1: 10
-            "height_bonus": 25.0,               # V17.1: 7
-            "forward_velocity_bootstrap": 8.0,  # V17.1: 0 (비활성)
-            "forward_velocity": 2.0,            # V17.1: 8
-            "same_side_penalty": 0.0,           # V17.1: -30
-            "rear_both_ground": 0.0,            # V17.1: -80
-            "undesired_contacts": -20.0,        # V17.1: -100
-            "feet_below_knees": -30.0,          # V17.1: -150
-            "trot_gait": 5.0,                   # V17.1: 40
-            "rear_joint_frozen": -10.0,         # V17.1: -60
-            "diagonal_coupling": 5.0,           # V17.1: 25
-            "gait_cycle_period": 0.0,           # V17.1: 15
-            "stride_length": 0.0,               # V17.1: 12
-            "foot_clearance": 2.0,              # default: 8
-            # === V18.1 추가: 비관리 패널티 → Phase1에서 대폭 경감 ===
-            "joint_vel_l2": -0.05,              # default: -0.5 (10x 경감)
-            "action_rate_l2": -0.3,             # default: -3
-            "flat_orientation_l2": -1.0,         # default: -7
-            "shoulder_neutral": -1.0,           # default: -6 (V19: -8→-6)
-            "dof_acc_l2": -5.0e-07,             # default: -5e-6
-            # === V18.2 신규 ===
-            "joint_oscillation": -5.0,           # V18.2: 과속 진동 페널티 (약함)
-            # === V18.3 신규 ===
-            "stance_propulsion": 8.0,            # V18.3: 스탠스 추진 (바닥 밀기)
-        },
-        2: {  # WALK — 전진 보행, 점진적 gait 도입
-            "standing_height": 8.0,              # V18.2: 20→8 (서기 지배력 감소)
-            "height_bonus": 15.0,
-            "forward_velocity_bootstrap": 4.0,
-            "forward_velocity": 12.0,             # V18.2: 8→12 (이동 인센티브 강화)
-            "same_side_penalty": -10.0,
-            "rear_both_ground": -30.0,
-            "undesired_contacts": -50.0,
-            "feet_below_knees": -80.0,
-            "trot_gait": 20.0,
-            "rear_joint_frozen": -30.0,
-            "diagonal_coupling": 15.0,
-            "gait_cycle_period": 8.0,
-            "stride_length": 6.0,
-            "foot_clearance": 5.0,
-            # === V18.1 추가 ===
-            "joint_vel_l2": -0.5,                # V18.2: -0.2→-0.5 (떨기 비용 증가)
-            "action_rate_l2": -1.0,
-            "flat_orientation_l2": -3.0,
-            "shoulder_neutral": -3.0,            # V19: -4→-3 (자연스러운 타깃)
-            "dof_acc_l2": -2.0e-06,
-            # === V18.2 신규 ===
-            "joint_oscillation": -15.0,          # V18.2: 과속 진동 페널티
-            # === V18.3 신규 ===
-            "stance_propulsion": 15.0,           # V18.3: 스탠스 추진 강화
-        },
-        3: {  # TROT — 원래 가중치 복원
-            "standing_height": 3.0,              # V18.2: 10→3 (서기 지배력 최소화)
-            "height_bonus": 7.0,
-            "forward_velocity_bootstrap": 0.0,
-            "forward_velocity": 12.0,             # V18.2: 8→12 (이동 인센티브 강화)
-            "same_side_penalty": -30.0,
-            "rear_both_ground": -80.0,
-            "undesired_contacts": -100.0,
-            "feet_below_knees": -150.0,
-            "trot_gait": 40.0,
-            "rear_joint_frozen": -60.0,
-            "diagonal_coupling": 25.0,
-            "gait_cycle_period": 15.0,
-            "stride_length": 12.0,
-            "foot_clearance": 8.0,
-            # === V18.1 추가 ===
-            "joint_vel_l2": -1.0,                # V18.2: -0.5→-1.0 (떨기 비용 최대)
-            "action_rate_l2": -3.0,
-            "flat_orientation_l2": -7.0,
-            "shoulder_neutral": -6.0,            # V19: -8→-6 (자연스러운 타깃)
-            "dof_acc_l2": -5.0e-06,
-            # === V18.2 신규 ===
-            "joint_oscillation": -20.0,          # V18.2: 과속 진동 페널티 최대
-            # === V18.3 신규 ===
-            "stance_propulsion": 20.0,           # V18.3: 스탠스 추진 최대
-        },
-    }
+    # ── Target alpha (iteration 기반 목표) ──
+    target_12 = _curriculum_target_alpha(iteration, ramp1_start, ramp1_end)
+    target_23 = _curriculum_target_alpha(iteration, ramp2_start, ramp2_end)
 
-    phase_names = {1: "STAND", 2: "WALK", 3: "TROT"}
-    weights = PHASE_WEIGHTS[phase]
+    # 이미 target에 도달 → 스킵
+    if (abs(env._crr_alpha12 - target_12) < 1e-6 and
+            abs(env._crr_alpha23 - target_23) < 1e-6):
+        return None
 
-    print(f"\n{'=' * 60}")
-    print(f"[Curriculum] Phase {phase} ({phase_names[phase]}) activated @ iter {iteration}")
-    print(f"{'=' * 60}")
+    # ── Metric gating: 보행 구조 보호 ──
+    if gait_gate_enabled:
+        mean_ep_len = env.episode_length_buf.float().mean().item()
+        if mean_ep_len < gait_gate_min_ep_len:
+            if not env._crr_gate_paused:
+                env._crr_gate_paused = True
+                print(f"[Curriculum] ⏸ Ramp PAUSED @ iter {iteration} "
+                      f"(ep_len={mean_ep_len:.1f} < {gait_gate_min_ep_len})")
+            return None
+        if env._crr_gate_paused:
+            env._crr_gate_paused = False
+            print(f"[Curriculum] ▶ Ramp RESUMED @ iter {iteration} "
+                  f"(ep_len={mean_ep_len:.1f})")
 
-    # 리워드 매니저의 가중치를 동적으로 변경
-    success_count = 0
-    fail_count = 0
-    for term_name, new_weight in weights.items():
-        try:
-            cfg = env.reward_manager.get_term_cfg(term_name)
-            old_weight = cfg.weight
-            cfg.weight = new_weight
-            env.reward_manager.set_term_cfg(term_name, cfg)
-            print(f"  ✓ {term_name}: {old_weight} → {new_weight}")
-            success_count += 1
-        except Exception as e:
-            print(f"  ✗ {term_name}: FAILED ({type(e).__name__}: {e})")
-            fail_count += 1
+    # ── Alpha 진행 (한 주기당 최대 증가량 제한) ──
+    max_step_12 = update_interval / max(1, ramp1_end - ramp1_start)
+    max_step_23 = update_interval / max(1, ramp2_end - ramp2_start)
+    new_12 = min(target_12, env._crr_alpha12 + max_step_12)
+    new_23 = min(target_23, env._crr_alpha23 + max_step_23)
 
-    print(f"[Curriculum] Applied: {success_count}/{success_count + fail_count} terms")
+    # 실제 변화 없으면 스킵
+    if abs(new_12 - env._crr_alpha12) < 1e-6 and abs(new_23 - env._crr_alpha23) < 1e-6:
+        return None
+
+    old_12 = env._crr_alpha12
+    old_23 = env._crr_alpha23
+    env._crr_alpha12 = new_12
+    env._crr_alpha23 = new_23
+
+    # ── 가중치 적용 ──
+    _curriculum_apply_weights(env, new_12, new_23)
+
+    # ── 주기적 로깅 (key weight + raw metric snapshot) ──
+    if iteration % log_interval == 0:
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
+
+    # ── 마일스톤 로깅 (ramp 시작/완료 + snapshot) ──
+    if abs(old_12) < 1e-6 and new_12 > 1e-6:
+        print(f"\n[Curriculum] 🔄 Ramp 1→2 START @ iter {iteration} (STAND→WALK)")
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
+    if abs(new_12 - 1.0) < 1e-6 and abs(old_12 - 1.0) >= 1e-6:
+        print(f"\n[Curriculum] ✅ Ramp 1→2 COMPLETE @ iter {iteration} (STAND→WALK)")
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
+    if abs(old_23) < 1e-6 and new_23 > 1e-6:
+        print(f"\n[Curriculum] 🔄 Ramp 2→3 START @ iter {iteration} (WALK→TROT)")
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
+    if abs(new_23 - 1.0) < 1e-6 and abs(old_23 - 1.0) >= 1e-6:
+        print(f"\n[Curriculum] ✅ Ramp 2→3 COMPLETE @ iter {iteration} (WALK→TROT)")
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
 
     return None
+
+
+def _curriculum_phase_str(alpha12: float, alpha23: float) -> str:
+    """현재 커리큘럼 상태를 문자열로 반환."""
+    if alpha12 < 1e-6:
+        return "Phase 1 (STAND)"
+    if alpha12 < 1.0 - 1e-6:
+        return f"Ramp 1→2 ({alpha12:.0%})"
+    if alpha23 < 1e-6:
+        return "Phase 2 (WALK)"
+    if alpha23 < 1.0 - 1e-6:
+        return f"Ramp 2→3 ({alpha23:.0%})"
+    return "Phase 3 (TROT)"
