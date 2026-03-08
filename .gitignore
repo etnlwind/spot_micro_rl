@@ -4,6 +4,9 @@
 **/*.so
 **/*.log*
 
+# Local scripts
+_manual_clip.py
+
 # Omniverse
 **/*.dmp
 **/.thumbs

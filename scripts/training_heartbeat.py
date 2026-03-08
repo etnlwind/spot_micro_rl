@@ -311,64 +311,81 @@ def get_trend(values, window=50):
         return "➡️", pct
 
 
+# 현재 env_cfg 기준 활성/비활성 보상 항목 (weight=0이면 비활성)
+# 접촉 이벤트 기반 메트릭은 소형 로봇에서 측정 불안정할 수 있음
+INACTIVE_REWARDS = {"contact_count", "feet_on_ground", "forward_velocity_bootstrap",
+                    "stationary_penalty", "leg_pose_symmetry"}
+CONTACT_EVENT_METRICS = {"stride_length", "gait_cycle_period", "swing_stride",
+                         "rear_alternation", "rear_both_ground", "rear_forward_stride"}
+
+
 def gait_quality_score(rewards):
-    """걸음걸이 품질 종합 점수 (0-13)."""
+    """걸음걸이 품질 종합 점수 (0-13).
+    
+    관절 기반 지표(신뢰↑)와 접촉 이벤트 기반 지표(측정 불안정)를 구분.
+    weight=0 비활성 항목은 점수 산정에서 제외.
+    """
     score = 0
     details = []
 
-    # 1. 트로트 패턴 (0-3)
+    # ── 관절 기반 (신뢰도 높음) ──
+
+    # 1. 트로트 접촉 패턴 (0-3) — contact 기반이지만 핵심 지표
     trot = rewards.get("trot_gait", 0)
     if trot > 5.0:
-        score += 3; details.append(f"트로트 ✅✅✅ ({trot:.2f})")
+        score += 3; details.append(f"트로트패턴 ✅✅✅ ({trot:.2f})")
     elif trot > 1.0:
-        score += 1; details.append(f"트로트 🟡 ({trot:.2f})")
+        score += 1; details.append(f"트로트패턴 🟡 ({trot:.2f})")
     else:
-        details.append(f"트로트 ❌ ({trot:.3f})")
+        details.append(f"트로트패턴 ❌ ({trot:.3f})")
 
-    # 2. 대각선 커플링 (0-2)
+    # 2. 관절 커플링 (0-2) — 관절속도 상관 기반, 신뢰도 높음
+    #    주의: footfall trot이 아닌 joint-motion coupling임
     diag = rewards.get("diagonal_coupling", 0)
     if diag > 3.0:
-        score += 2; details.append(f"대각선 ✅✅ ({diag:.2f})")
+        score += 2; details.append(f"관절커플링 ✅✅ ({diag:.2f}) [운동학적]")
     elif diag > 0.5:
-        score += 1; details.append(f"대각선 🟡 ({diag:.2f})")
+        score += 1; details.append(f"관절커플링 🟡 ({diag:.2f}) [운동학적]")
     else:
-        details.append(f"대각선 ❌ ({diag:.3f})")
+        details.append(f"관절커플링 ❌ ({diag:.3f})")
 
-    # 3. 걸음 주기 (0-2)
-    cycle = rewards.get("gait_cycle_period", 0)
-    if cycle > 2.0:
-        score += 2; details.append(f"걸음주기 ✅✅ ({cycle:.2f})")
-    elif cycle > 0.5:
-        score += 1; details.append(f"걸음주기 🟡 ({cycle:.2f})")
-    else:
-        details.append(f"걸음주기 ❌ ({cycle:.4f})")
-
-    # 4. 보폭 (0-2)
-    stride = rewards.get("stride_length", 0)
-    if stride > 2.0:
-        score += 2; details.append(f"보폭 ✅✅ ({stride:.2f})")
-    elif stride > 0.5:
-        score += 1; details.append(f"보폭 🟡 ({stride:.2f})")
-    else:
-        details.append(f"보폭 ❌ ({stride:.4f})")
-
-    # 5. 뒷다리 (0-2)
+    # 3. 뒷다리 활성화 (0-2) — 관절속도 기반, 신뢰도 높음
     rear_vel = rewards.get("rear_joint_velocity", 0)
     if rear_vel > 5.0:
-        score += 2; details.append(f"뒷다리 ✅✅ ({rear_vel:.2f})")
+        score += 2; details.append(f"뒷다리활성 ✅✅ ({rear_vel:.2f})")
     elif rear_vel > 1.0:
-        score += 1; details.append(f"뒷다리 🟡 ({rear_vel:.2f})")
+        score += 1; details.append(f"뒷다리활성 🟡 ({rear_vel:.2f})")
     else:
-        details.append(f"뒷다리 ❌ ({rear_vel:.3f})")
+        details.append(f"뒷다리활성 ❌ ({rear_vel:.3f})")
 
-    # 6. 기립 안정성 (0-2)
+    # 4. 기립 안정성 (0-2) — 높이/자세 기반, 신뢰도 높음
     height = rewards.get("standing_height", 0)
     if height > 5.0:
-        score += 2; details.append(f"기립 ✅✅ ({height:.2f})")
+        score += 2; details.append(f"기립안정 ✅✅ ({height:.2f})")
     elif height > 1.0:
-        score += 1; details.append(f"기립 🟡 ({height:.2f})")
+        score += 1; details.append(f"기립안정 🟡 ({height:.2f})")
     else:
-        details.append(f"기립 ❌ ({height:.3f})")
+        details.append(f"기립안정 ❌ ({height:.3f})")
+
+    # ── 접촉 이벤트 기반 (측정 불안정 가능) ──
+
+    # 5. 걸음 주기 (0-2) — 접촉 이벤트 기반, 소형 로봇에서 불안정
+    cycle = rewards.get("gait_cycle_period", 0)
+    if cycle > 2.0:
+        score += 2; details.append(f"걸음주기 ✅✅ ({cycle:.2f}) [접촉]")
+    elif cycle > 0.5:
+        score += 1; details.append(f"걸음주기 🟡 ({cycle:.2f}) [접촉]")
+    else:
+        details.append(f"걸음주기 ⚪ ({cycle:.4f}) [접촉·불안정]")
+
+    # 6. 보폭 (0-2) — 접촉 이벤트 기반, 소형 로봇에서 불안정
+    stride = rewards.get("stride_length", 0)
+    if stride > 2.0:
+        score += 2; details.append(f"보폭 ✅✅ ({stride:.2f}) [접촉]")
+    elif stride > 0.5:
+        score += 1; details.append(f"보폭 🟡 ({stride:.2f}) [접촉]")
+    else:
+        details.append(f"보폭 ⚪ ({stride:.4f}) [접촉·불안정]")
 
     # 등급
     if score >= 10:
@@ -447,25 +464,30 @@ def format_report(data, run_name, cycle_num):
     # ── 핵심 메트릭 추세 ──
     key_trends = []
     trend_metrics = [
-        ("trot_gait", "트로트"),
-        ("diagonal_coupling", "대각선"),
-        ("leg_lift", "다리들기"),
-        ("rear_joint_velocity", "뒷다리속도"),
-        ("standing_height", "기립높이"),
-        ("foot_clearance", "발들기"),
-        ("forward_velocity", "전진속도"),
-        ("stride_length", "보폭"),
-        ("gait_cycle_period", "걸음주기"),
-        ("rear_forward_stride", "뒷다리보폭"),
-        ("rear_alternation", "뒷다리교대"),
-        ("swing_stride", "스윙보폭"),
+        ("trot_gait", "트로트패턴", ""),
+        ("diagonal_coupling", "관절커플링", "[운동학]"),  # joint-motion coupling, not footfall trot
+        ("leg_lift", "다리들기", ""),
+        ("rear_joint_velocity", "뒷다리속도", "[관절]"),
+        ("standing_height", "기립높이", ""),
+        ("foot_clearance", "발들기", ""),
+        ("forward_velocity", "전진속도", ""),
+        ("stride_length", "보폭", "[접촉]"),
+        ("gait_cycle_period", "걸음주기", "[접촉]"),
+        ("rear_forward_stride", "뒷다리보폭", "[접촉]"),
+        ("rear_alternation", "뒷다리교대", "[접촉]"),
+        ("swing_stride", "스윙보폭", "[접촉]"),
+        ("stance_propulsion", "스탠스추진", "[접촉]"),
     ]
-    for metric_name, label in trend_metrics:
+    for metric_name, label, tag_type in trend_metrics:
         tag = f"Episode_Reward/{metric_name}"
         if tag in data and data[tag]:
             val = data[tag][-1][1]
+            # weight=0 비활성 항목은 건너뜀
+            if metric_name in INACTIVE_REWARDS:
+                continue
             icon, pct = get_trend(data[tag])
-            key_trends.append(f"  {icon} {label}: {val:+.4f} ({pct:+.1f}%)")
+            suffix = f" {tag_type}" if tag_type else ""
+            key_trends.append(f"  {icon} {label}: {val:+.4f} ({pct:+.1f}%){suffix}")
 
     penalty_trends = []
     penalty_metrics = [
@@ -554,8 +576,9 @@ def format_report(data, run_name, cycle_num):
     lines.append(f"  💀 종료: timeout {timeout_pct:.0f}% / fall {100-timeout_pct:.0f}%")
     lines.append("")
 
-    # 걸음걸이 품질
+    # 걸음걸이 품질 (관절 기반 + 접촉 기반 구분)
     lines.append(f"<b>🦿 걸음걸이 {grade} ({gait_score}/13)</b>")
+    lines.append(f"  ℹ️ 관절/높이 기반=신뢰↑, [접촉]=측정 불안정 가능")
     for d in gait_details:
         lines.append(f"  {d}")
     lines.append("")
@@ -589,16 +612,19 @@ def format_report(data, run_name, cycle_num):
     lines.append(f"  Vel err (yaw): {vel_yaw:.4f}")
     lines.append("")
 
-    # TOP5 양수/음수 보상
+    # TOP5 양수/음수 보상 (weight=0 비활성 항목 제외)
+    active_positive = [(k, v) for k, v in positive if k not in INACTIVE_REWARDS]
+    active_negative = [(k, v) for k, v in negative if k not in INACTIVE_REWARDS]
     lines.append(f"<b>🏅 TOP5 기여 보상</b>")
-    for i, (name, val) in enumerate(positive[:5]):
+    for i, (name, val) in enumerate(active_positive[:5]):
         tag = f"Episode_Reward/{name}"
         icon, pct = get_trend(data.get(tag, []))
-        lines.append(f"  {i+1}. {name}: {val:+.4f} {icon}")
+        ct_mark = " [접촉]" if name in CONTACT_EVENT_METRICS else ""
+        lines.append(f"  {i+1}. {name}: {val:+.4f} {icon}{ct_mark}")
     lines.append("")
 
     lines.append(f"<b>💣 TOP5 패널티</b>")
-    for i, (name, val) in enumerate(negative[:5]):
+    for i, (name, val) in enumerate(active_negative[:5]):
         tag = f"Episode_Reward/{name}"
         icon, pct = get_trend(data.get(tag, []))
         lines.append(f"  {i+1}. {name}: {val:+.4f} {icon}")
@@ -672,17 +698,17 @@ def format_report(data, run_name, cycle_num):
         phase_icon = "🐣"
         phase_desc = "짧게 서있기 시작. 균형 학습 중"
     elif survival_pct < 50:
-        phase = "3단계: 보행 출현"
+        phase = "3단계: 관절 패턴 형성"
         phase_icon = "🐥"
-        phase_desc = "걸음걸이 패턴 형성 시작"
+        phase_desc = "관절 리듬 출현 (실제 보행 여부는 영상 확인 필요)"
     elif survival_pct < 80:
-        phase = "4단계: 보행 발달"
+        phase = "4단계: 보행 발달 후보"
         phase_icon = "🐕"
-        phase_desc = "트로트 패턴 발달, 속도 증가 중"
+        phase_desc = "관절 커플링 발달 중 — rear-driven일 가능성 있음 (영상 확인)"
     else:
-        phase = "5단계: 보행 안정화"
+        phase = "5단계: 안정화"
         phase_icon = "🦮"
-        phase_desc = "안정적 보행, 미세 조정 단계"
+        phase_desc = "안정적 생존, 실제 보행 품질은 영상으로 최종 확인 필요"
 
     # ════════════════════════════════════════════
     # 종합 분석 섹션
@@ -744,10 +770,10 @@ def format_report(data, run_name, cycle_num):
     phases_timeline = [
         (2000, "기립 시작", "ep length 증가 시작"),
         (4000, "균형 학습", "넘어짐 비율 감소"),
-        (7000, "보행 출현", "트로트 패턴 형성"),
-        (10000, "보행 발달", "속도/보폭 증가"),
+        (7000, "관절 패턴 형성", "커플링/리듬 발달 (영상 확인 필요)"),
+        (10000, "보행 발달", "실제 stride/velocity 확인 필요"),
         (13000, "보행 안정화", "미세 조정"),
-        (15600, "훈련 완료", "최종 모델"),
+        (15600, "훈련 완료", "최종 모델 (영상 검증 필수)"),
     ]
     for target_iter, label, desc in phases_timeline:
         if current_iter < target_iter:
@@ -792,28 +818,30 @@ def format_report(data, run_name, cycle_num):
         if gait_score >= 7:
             prose_parts.append(
                 f"중반부(iter {int(current_iter):,})에서 걸음걸이 점수 {gait_score}/13({grade})로 "
-                f"보행 패턴이 잘 형성되고 있습니다. 이 추세라면 후반부에서 미세 조정이 가능할 것입니다."
+                f"관절 패턴이 형성되고 있습니다. 단, 관절 커플링 수치가 높아도 실제 footfall trot인지는 "
+                f"영상으로 확인해야 합니다."
             )
         elif gait_score >= 4:
             prose_parts.append(
                 f"중반부(iter {int(current_iter):,})에서 걸음걸이 {grade}({gait_score}/13)입니다. "
-                f"기본적인 보행 패턴은 나타나고 있으나, 트로트 대각 패턴의 완성도를 높여야 합니다."
+                f"관절 수준의 리듬은 나타나고 있으나, 접촉 기반 지표(보폭/걸음주기)는 측정이 불안정할 수 있어 "
+                f"실제 보행 품질은 영상으로 판단해야 합니다."
             )
         else:
             prose_parts.append(
                 f"iter {int(current_iter):,}까지 왔지만 걸음걸이 {grade}({gait_score}/13)로 "
-                f"보행 패턴 형성이 더딥니다. 보상 구조 또는 커리큘럼 변경을 고려해볼 시점입니다."
+                f"관절 패턴 형성이 더딥니다. 보상 구조 또는 커리큘럼 변경을 고려해볼 시점입니다."
             )
     else:
         if gait_score >= 10:
             prose_parts.append(
-                f"후반부(iter {int(current_iter):,})에서 {grade}({gait_score}/13) — 우수한 보행 품질입니다. "
-                f"남은 구간에서 안정성과 에너지 효율 최적화에 집중하면 됩니다."
+                f"후반부(iter {int(current_iter):,})에서 {grade}({gait_score}/13) — 관절 지표 기준 우수합니다. "
+                f"실제 보행 품질은 영상으로 최종 확인이 필요합니다."
             )
         elif gait_score >= 7:
             prose_parts.append(
                 f"후반부(iter {int(current_iter):,})에서 {grade}({gait_score}/13)입니다. "
-                f"양호하지만 목표 대비 소폭 미달이므로 추가 훈련 또는 가중치 미세 조정이 도움될 수 있습니다."
+                f"양호하지만 접촉 기반 지표가 약하다면 rear-driven 패턴일 가능성이 있습니다."
             )
         else:
             prose_parts.append(
@@ -883,10 +911,33 @@ def format_report(data, run_name, cycle_num):
     if vf_loss > 500:
         prose_parts.append(
             f"Value function loss가 {vf_loss:.1f}로 높습니다. "
-            f"보상 스케일이 과도하거나 gamma 조정이 필요할 수 있습니다."
+            f"보상 스케일 과도, 보상 항목 간 불균형, 또는 gamma 조정이 필요할 수 있습니다."
         )
     elif vf_loss < 5 and current_iter > 1000:
         prose_parts.append(f"VF loss {vf_loss:.1f}로 안정적인 학습이 이루어지고 있습니다.")
+
+    # 7) rear bias 경고
+    rear_metrics = ["rear_joint_velocity", "rear_swing", "rear_forward_stride", "rear_alternation"]
+    top5_names = [n for n, _ in active_positive[:5]]
+    rear_in_top = [n for n in top5_names if any(rm in n for rm in rear_metrics)]
+    if len(rear_in_top) >= 3:
+        prose_parts.append(
+            f"⚠️ TOP5 보상 중 {len(rear_in_top)}개가 뒷다리 계열입니다. "
+            f"rear-driven locomotion precursor 상태일 가능성이 높으며, "
+            f"실제 보행 여부는 영상으로 확인해야 합니다."
+        )
+
+    # 8) 접촉 이벤트 지표 신뢰성 경고
+    contact_metrics_zero = []
+    for cm in ["stride_length", "gait_cycle_period"]:
+        cv = rewards.get(cm, 0)
+        if abs(cv) < 0.001:
+            contact_metrics_zero.append(cm)
+    if contact_metrics_zero and current_iter > 2000:
+        prose_parts.append(
+            f"참고: {', '.join(contact_metrics_zero)}이(가) ~0입니다. "
+            f"접촉 이벤트 측정이 불안정하거나, 실제 stride가 미형성일 수 있습니다."
+        )
 
     # 산문 조합
     full_prose = " ".join(prose_parts)
