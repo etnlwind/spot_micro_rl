@@ -145,10 +145,18 @@ def shoulder_stance_symmetry(
 def shoulder_neutral_penalty(
     env: ManagerBasedRLEnv,
     shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_angles: list[float] | None = None,
 ) -> torch.Tensor:
-    """어깨가 중립(0)에서 벗어나면 페널티. 다리가 벌어지거나 오므라드는 걸 억제한다."""
+    """어깨가 타깃 각도에서 벗어나면 페널티.
+
+    V19: SpotMicro 기구학 반영 — 어깨 roll축(X)에서 음수=바깥 벌림.
+    target_angles가 None이면 기존처럼 0 기준, 지정하면 해당 각도 기준.
+    """
     asset = env.scene[shoulder_cfg.name]
     shoulder_angles = asset.data.joint_pos[:, shoulder_cfg.joint_ids]  # (num_envs, 4)
+    if target_angles is not None:
+        targets = torch.tensor(target_angles, device=shoulder_angles.device, dtype=shoulder_angles.dtype)
+        return torch.sum(torch.square(shoulder_angles - targets), dim=1)
     return torch.sum(torch.square(shoulder_angles), dim=1)
 
 
@@ -1285,7 +1293,7 @@ def reward_weight_curriculum(
             "joint_vel_l2": -0.05,              # default: -0.5 (10x 경감)
             "action_rate_l2": -0.3,             # default: -3
             "flat_orientation_l2": -1.0,         # default: -7
-            "shoulder_neutral": -1.0,           # default: -8
+            "shoulder_neutral": -1.0,           # default: -6 (V19: -8→-6)
             "dof_acc_l2": -5.0e-07,             # default: -5e-6
             # === V18.2 신규 ===
             "joint_oscillation": -5.0,           # V18.2: 과속 진동 페널티 (약함)
@@ -1311,7 +1319,7 @@ def reward_weight_curriculum(
             "joint_vel_l2": -0.5,                # V18.2: -0.2→-0.5 (떨기 비용 증가)
             "action_rate_l2": -1.0,
             "flat_orientation_l2": -3.0,
-            "shoulder_neutral": -4.0,
+            "shoulder_neutral": -3.0,            # V19: -4→-3 (자연스러운 타깃)
             "dof_acc_l2": -2.0e-06,
             # === V18.2 신규 ===
             "joint_oscillation": -15.0,          # V18.2: 과속 진동 페널티
@@ -1337,7 +1345,7 @@ def reward_weight_curriculum(
             "joint_vel_l2": -1.0,                # V18.2: -0.5→-1.0 (떨기 비용 최대)
             "action_rate_l2": -3.0,
             "flat_orientation_l2": -7.0,
-            "shoulder_neutral": -8.0,
+            "shoulder_neutral": -6.0,            # V19: -8→-6 (자연스러운 타깃)
             "dof_acc_l2": -5.0e-06,
             # === V18.2 신규 ===
             "joint_oscillation": -20.0,          # V18.2: 과속 진동 페널티 최대

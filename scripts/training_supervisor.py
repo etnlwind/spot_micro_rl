@@ -115,6 +115,7 @@ LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", LOG_SUBDIR)
 MONITOR_LOG = os.path.join(PROJECT_ROOT, "logs", "monitor_log.txt")
 ANALYZE_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "utils", "analyze_training.py")
 MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
+USER_STOP_FLAG = os.path.join(PROJECT_ROOT, "logs", "user_stop.flag")
 HEARTBEAT_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_heartbeat.pid")
 HEARTBEAT_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "training_heartbeat.py")
 SUPERVISOR_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_supervisor.pid")
@@ -314,6 +315,9 @@ def parse_analysis_grade(text: str) -> dict:
         return result
     # 종합 등급: X (label) (점수: N/13)
     m = re.search(r"종합\s+등급:\s*(\w)\s+\(([^)]+)\)\s+\(점수:\s*(\d+)/13\)", text)
+    if not m:
+        # 폴백: 점수만이라도 파싱 (깨진 한글 대응)
+        m = re.search(r"(\w)\s+\(([^)]+)\)\s+\([^:]*:\s*(\d+)/13\)", text)
     if m:
         result["GradeLetter"] = m.group(1)
         result["Grade"] = f"{m.group(1)} ({m.group(2)})"
@@ -326,7 +330,10 @@ def parse_analysis_grade(text: str) -> dict:
         result["Iter"] = int(m.group(1).replace(",", ""))
     m = re.search(r"Reward Trend:\s*(.+)", text)
     if m:
-        result["Trend"] = m.group(1).strip()
+        # cp949 깨진 이모지 문자 제거 (예: IMPROVING 뒤의 깨진 📈)
+        trend_raw = m.group(1).strip()
+        trend_raw = re.sub(r"[^\x20-\x7E가-힣()%+\-.\d]+", "", trend_raw).strip()
+        result["Trend"] = trend_raw
     return result
 
 
@@ -509,6 +516,27 @@ def remove_maintenance_flag():
 
 
 # ============================================================
+# USER STOP FLAG — 사용자 중단 시 heartbeat 자동재시작 방지
+# ============================================================
+
+def set_user_stop_flag():
+    """user_stop.flag 생성 — heartbeat가 supervisor를 재시작하지 않도록."""
+    os.makedirs(os.path.dirname(USER_STOP_FLAG), exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(USER_STOP_FLAG, "w", encoding="utf-8") as f:
+        f.write(ts)
+    write_log("User stop flag SET")
+
+
+def remove_user_stop_flag():
+    """user_stop.flag 제거 (supervisor 시작 시 호출)."""
+    try:
+        os.remove(USER_STOP_FLAG)
+    except OSError:
+        pass
+
+
+# ============================================================
 # HEARTBEAT WATCHDOG — heartbeat 프로세스 감시 + 재시작
 # ============================================================
 
@@ -573,6 +601,7 @@ def record_video(checkpoint_path: str, run_dir: str, clip_num: int) -> str | Non
     play_cmd = (
         f'conda activate env_isaaclab && '
         f'cd /d {PROJECT_ROOT} && '
+        f'set PYTHONIOENCODING=utf-8 && '
         f'{ISAAC_LAB} -p {play_script} '
         f'--task={TASK} --num_envs={PLAY_ENVS} '
         f'--checkpoint={checkpoint_path} --video --video_length={VIDEO_LENGTH}'
@@ -672,10 +701,10 @@ print(f'OK: {{count}} frames @ {{TARGET_FPS}}fps H.264 -> {{dst}}')
         with open(tmp_py, "w", encoding="utf-8") as f:
             f.write(py_code)
 
-        reencode_cmd = f'conda activate env_isaaclab && python "{tmp_py}"'
+        reencode_cmd = f'conda activate env_isaaclab && set PYTHONIOENCODING=utf-8 && python "{tmp_py}"'
         proc = subprocess.run(
             ["cmd", "/c", reencode_cmd],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, timeout=300,
         )
         try:
             os.remove(tmp_py)
@@ -744,6 +773,7 @@ def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, vid
     analysis_cmd = (
         f'conda activate env_isaaclab && '
         f'cd /d {PROJECT_ROOT} && '
+        f'set PYTHONIOENCODING=utf-8 && '
         f'{ISAAC_LAB} -p {ANALYZE_SCRIPT} '
         f'--run_dir {run_dir} --clip_num {clip_num}'
     )
@@ -820,6 +850,7 @@ def resume_training(run_dir: str, checkpoint_path: str):
     train_cmd = (
         f'conda activate env_isaaclab && '
         f'cd /d {PROJECT_ROOT} && '
+        f'set PYTHONIOENCODING=utf-8 && '
         f'{ISAAC_LAB} -p {train_script} '
         f'--task={TASK} --num_envs={TRAIN_ENVS} --headless '
         f'--max_iterations={MAX_ITERATIONS} '
@@ -898,6 +929,9 @@ def main():
 
     # PID 기록
     write_pid_file()
+
+    # 이전 user_stop.flag 제거 (재시작 시 정상 동작 보장)
+    remove_user_stop_flag()
 
     write_log("=========================================")
     write_log("V17.1 Training Supervisor (Python, Telegram Interactive)")
@@ -1080,6 +1114,7 @@ def main():
                             write_log("User requested STOP.")
                             send_telegram("🛑 사용자 요청으로 훈련 중단.")
                             ensure_gpu_clean(reason="user-stop")
+                            set_user_stop_flag()
                             break
 
                     # 점수 하락 + 낮은 점수 → 사용자에게 결정 요청
@@ -1091,6 +1126,7 @@ def main():
                             write_log("User requested STOP (score drop).")
                             send_telegram("🛑 사용자 요청으로 훈련 중단 (점수하락).")
                             ensure_gpu_clean(reason="user-stop")
+                            set_user_stop_flag()
                             break
 
                     # 정상 → 알림만

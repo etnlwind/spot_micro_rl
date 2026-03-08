@@ -58,7 +58,41 @@ _log_subdir = _env.get("LOG_SUBDIR", "spot_micro_flat")
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", _log_subdir)
 PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_heartbeat.pid")
 MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
+USER_STOP_FLAG = os.path.join(PROJECT_ROOT, "logs", "user_stop.flag")
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
+
+# TensorBoard remote access
+TAILSCALE_IP = _env.get("TAILSCALE_IP", "")
+TB_PORT = _env.get("TB_PORT", "6006")
+TB_URL = f"http://{TAILSCALE_IP}:{TB_PORT}" if TAILSCALE_IP else ""
+TB_CURRENT_LINK = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", f"{_log_subdir}_current")
+
+
+def update_tb_junction(run_dir: str):
+    """TensorBoard junction을 현재 런으로 업데이트."""
+    target = os.path.abspath(run_dir)
+    link = TB_CURRENT_LINK
+    # 현재 junction이 이미 같은 대상을 가리키면 스킵
+    if os.path.isdir(link):
+        try:
+            if os.path.realpath(link) == target:
+                return
+        except Exception:
+            pass
+        # 기존 junction 삭제
+        try:
+            os.rmdir(link)  # junction은 rmdir로 삭제 (내용물 삭제 안됨)
+        except Exception:
+            import shutil
+            shutil.rmtree(link, ignore_errors=True)
+    # 새 junction 생성
+    try:
+        import subprocess
+        subprocess.run(["cmd", "/c", "mklink", "/J", link, target],
+                       capture_output=True, check=True)
+        print(f"[TB] Junction updated: {os.path.basename(target)}")
+    except Exception as e:
+        print(f"[TB] Junction update failed: {e}")
 
 # Training version tag (env_cfg.py에서 읽음)
 def _read_train_version() -> str:
@@ -105,6 +139,110 @@ def send_telegram(text):
         except Exception as e:
             print(f"[TG ERROR] {e}")
         time.sleep(0.3)
+
+
+def send_telegram_photo(photo_bytes: bytes, caption: str = ""):
+    """텔레그램 이미지 전송 (PNG bytes, multipart/form-data)."""
+    import uuid
+    boundary = uuid.uuid4().hex
+    if TRAIN_VERSION and caption:
+        caption = f"[{TRAIN_VERSION}] {caption}"
+
+    body = b""
+    body += f"--{boundary}\r\n".encode()
+    body += b'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+    body += f"{TELEGRAM_CHAT_ID}\r\n".encode()
+    body += f"--{boundary}\r\n".encode()
+    body += b'Content-Disposition: form-data; name="caption"\r\n\r\n'
+    body += f"{caption}\r\n".encode("utf-8")
+    body += f"--{boundary}\r\n".encode()
+    body += b'Content-Disposition: form-data; name="photo"; filename="graph.png"\r\n'
+    body += b"Content-Type: image/png\r\n\r\n"
+    body += photo_bytes
+    body += f"\r\n--{boundary}--\r\n".encode()
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    req = urllib.request.Request(url, data=body)
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    try:
+        urllib.request.urlopen(req, timeout=30)
+    except Exception as e:
+        print(f"[TG PHOTO ERROR] {e}")
+
+
+def generate_training_graphs(data, run_name: str) -> bytes | None:
+    """핵심 훈련 지표 그래프를 생성하여 PNG bytes로 반환."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as ticker
+    except ImportError:
+        print("[GRAPH] matplotlib not available")
+        return None
+
+    # 그래프 설정: 2x2 레이아웃
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f"Training: {run_name}", fontsize=14, fontweight="bold")
+
+    def plot_metric(ax, tags_labels, title, ylabel):
+        for tag, label in tags_labels:
+            if tag in data and data[tag]:
+                steps = [s for s, v in data[tag]]
+                vals = [v for s, v in data[tag]]
+                ax.plot(steps, vals, label=label, linewidth=1.2)
+        ax.set_title(title, fontsize=11)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel(ylabel)
+        ax.legend(fontsize=8, loc="best")
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x/1000:.0f}k" if x >= 1000 else f"{x:.0f}"))
+
+    # 1) Reward + Episode Length
+    ax1 = axes[0, 0]
+    plot_metric(ax1, [
+        ("Train/mean_reward", "Mean Reward"),
+    ], "Reward & Episode Length", "Reward")
+    if "Train/mean_episode_length" in data:
+        ax1b = ax1.twinx()
+        steps = [s for s, v in data["Train/mean_episode_length"]]
+        vals = [v for s, v in data["Train/mean_episode_length"]]
+        ax1b.plot(steps, vals, color="orange", alpha=0.7, label="Ep Length", linewidth=1)
+        ax1b.set_ylabel("Episode Length", color="orange")
+        ax1b.legend(fontsize=8, loc="upper left")
+
+    # 2) Gait Rewards
+    plot_metric(axes[0, 1], [
+        ("Episode_Reward/trot_gait", "Trot Gait"),
+        ("Episode_Reward/diagonal_coupling", "Diagonal Coupling"),
+        ("Episode_Reward/foot_clearance", "Foot Clearance"),
+        ("Episode_Reward/stride_length", "Stride Length"),
+    ], "Gait Quality", "Reward")
+
+    # 3) Movement
+    plot_metric(axes[1, 0], [
+        ("Episode_Reward/forward_velocity", "Forward Vel"),
+        ("Episode_Reward/leg_lift", "Leg Lift"),
+        ("Episode_Reward/rear_swing", "Rear Swing"),
+        ("Episode_Reward/rear_forward_stride", "Rear Stride"),
+    ], "Movement & Legs", "Reward")
+
+    # 4) Losses + Penalties
+    ax4 = axes[1, 1]
+    plot_metric(ax4, [
+        ("Episode_Reward/shoulder_neutral", "Shoulder Neutral"),
+        ("Episode_Reward/joint_deviation", "Joint Deviation"),
+        ("Episode_Reward/flat_orientation_l2", "Orientation"),
+        ("Episode_Reward/action_rate_l2", "Action Rate"),
+    ], "Penalties", "Penalty (negative)")
+
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
 
 
 def find_latest_run():
@@ -621,10 +759,151 @@ def format_report(data, run_name, cycle_num):
         lines.append(f"  {marker} iter {target_iter:>6,}: {label} — {desc}")
     lines.append("")
 
+    # ════════════════════════════════════════════
+    # 🧑‍🔬 AI 산문 분석
+    # ════════════════════════════════════════════
+    lines.append(f"<b>🧑‍🔬 AI 분석 의견</b>")
+    prose_parts = []
+
+    # 1) 전체 흐름 평가
+    if current_iter < 500:
+        prose_parts.append(
+            f"아직 iter {int(current_iter):,}로 훈련 극초반입니다. "
+            f"현재 평균 보상 {current_reward:.1f}은 초기 탐색 단계에서 전형적인 수치이며, "
+            f"이 시점에서는 보상의 절대값보다 학습이 정상적으로 수렴 방향으로 움직이는지가 중요합니다."
+        )
+    elif current_iter < 3000:
+        if improvement > 50:
+            prose_parts.append(
+                f"iter {int(current_iter):,} 기준, 보상이 {early_avg:.1f}에서 {late_avg:.1f}로 {improvement:+.1f} 개선되어 "
+                f"빠른 학습 속도를 보이고 있습니다."
+            )
+        elif improvement > 0:
+            prose_parts.append(
+                f"iter {int(current_iter):,} 기준, 보상이 소폭({improvement:+.1f}) 개선 중입니다. "
+                f"아직 본격적인 보행 학습 이전 단계로, 기립 및 균형 확보에 집중하는 시기입니다."
+            )
+        else:
+            prose_parts.append(
+                f"iter {int(current_iter):,}인데 보상이 {improvement:+.1f}로 정체 또는 하락 중입니다. "
+                f"학습률이나 보상 가중치 재검토가 필요할 수 있습니다."
+            )
+    elif current_iter < 8000:
+        if gait_score >= 7:
+            prose_parts.append(
+                f"중반부(iter {int(current_iter):,})에서 걸음걸이 점수 {gait_score}/13({grade})로 "
+                f"보행 패턴이 잘 형성되고 있습니다. 이 추세라면 후반부에서 미세 조정이 가능할 것입니다."
+            )
+        elif gait_score >= 4:
+            prose_parts.append(
+                f"중반부(iter {int(current_iter):,})에서 걸음걸이 {grade}({gait_score}/13)입니다. "
+                f"기본적인 보행 패턴은 나타나고 있으나, 트로트 대각 패턴의 완성도를 높여야 합니다."
+            )
+        else:
+            prose_parts.append(
+                f"iter {int(current_iter):,}까지 왔지만 걸음걸이 {grade}({gait_score}/13)로 "
+                f"보행 패턴 형성이 더딥니다. 보상 구조 또는 커리큘럼 변경을 고려해볼 시점입니다."
+            )
+    else:
+        if gait_score >= 10:
+            prose_parts.append(
+                f"후반부(iter {int(current_iter):,})에서 {grade}({gait_score}/13) — 우수한 보행 품질입니다. "
+                f"남은 구간에서 안정성과 에너지 효율 최적화에 집중하면 됩니다."
+            )
+        elif gait_score >= 7:
+            prose_parts.append(
+                f"후반부(iter {int(current_iter):,})에서 {grade}({gait_score}/13)입니다. "
+                f"양호하지만 목표 대비 소폭 미달이므로 추가 훈련 또는 가중치 미세 조정이 도움될 수 있습니다."
+            )
+        else:
+            prose_parts.append(
+                f"iter {int(current_iter):,}까지 왔음에도 {grade}({gait_score}/13)입니다. "
+                f"현재 보상 구조로는 한계가 보이며, 근본적인 접근 변경이 필요할 수 있습니다."
+            )
+
+    # 2) 생존/안정성 평가
+    if survival_pct >= 80:
+        prose_parts.append(
+            f"생존율 {survival_pct:.0f}%로 매우 안정적이며, 대부분 timeout으로 에피소드가 종료됩니다."
+        )
+    elif survival_pct >= 40:
+        prose_parts.append(
+            f"생존율 {survival_pct:.0f}%로 어느 정도 버티고 있으나, "
+            f"아직 넘어짐이 {100-timeout_pct:.0f}%를 차지합니다."
+        )
+    elif survival_pct >= 10:
+        prose_parts.append(
+            f"생존율 {survival_pct:.0f}%로 짧게 서있지만 금방 넘어집니다. "
+            f"균형 및 자세 보상이 더 강화되어야 합니다."
+        )
+
+    # 3) 핵심 보상 동향
+    if improving_keys and declining_keys:
+        imp_names = ", ".join(n for n, _ in improving_keys[:3])
+        dec_names = ", ".join(n for n, _ in declining_keys[:3])
+        prose_parts.append(
+            f"세부적으로, {imp_names}은(는) 개선 추세인 반면 {dec_names}은(는) 하락 중입니다. "
+            f"하락 항목이 전체 보상에 미치는 영향을 모니터링해야 합니다."
+        )
+    elif improving_keys:
+        imp_names = ", ".join(n for n, _ in improving_keys[:3])
+        prose_parts.append(f"주요 보상 항목({imp_names}) 대부분이 개선 추세여서 긍정적입니다.")
+    elif declining_keys:
+        dec_names = ", ".join(n for n, _ in declining_keys[:3])
+        prose_parts.append(f"경고: {dec_names}이(가) 하락 중으로, 보상 간 충돌 가능성을 점검해야 합니다.")
+
+    # 4) 어깨 관련 (V19 핵심)
+    shoulder_val = rewards.get("shoulder_neutral", 0)
+    if abs(shoulder_val) < 0.2:
+        prose_parts.append(
+            f"V19의 핵심인 어깨 중립 페널티가 {shoulder_val:+.4f}로 매우 낮아, "
+            f"목표 splay 각도에 잘 수렴하고 있습니다. V18.3 대비 큰 개선입니다."
+        )
+    elif abs(shoulder_val) < 1.0:
+        prose_parts.append(
+            f"어깨 중립 페널티가 {shoulder_val:+.4f}로 아직 약간의 편차가 있습니다. "
+            f"학습이 진행되면 자연스럽게 줄어들 것으로 예상됩니다."
+        )
+    elif shoulder_val < -1.0:
+        prose_parts.append(
+            f"어깨 중립 페널티가 {shoulder_val:+.4f}로 여전히 큽니다. "
+            f"타겟 splay 각도가 로봇 구조에 맞는지 재확인이 필요합니다."
+        )
+
+    # 5) 부드러움/에너지 효율
+    if smooth_total < 15:
+        prose_parts.append("동작이 매우 부드러워 에너지 효율적인 학습이 진행되고 있습니다.")
+    elif smooth_total > 50:
+        prose_parts.append(
+            f"동작 거칠기({smooth_total:.1f})가 높아 떨림이나 급격한 관절 변화가 의심됩니다. "
+            f"action_rate 페널티 강화를 고려해볼 만합니다."
+        )
+
+    # 6) 학습 안정성 (VF loss)
+    if vf_loss > 500:
+        prose_parts.append(
+            f"Value function loss가 {vf_loss:.1f}로 높습니다. "
+            f"보상 스케일이 과도하거나 gamma 조정이 필요할 수 있습니다."
+        )
+    elif vf_loss < 5 and current_iter > 1000:
+        prose_parts.append(f"VF loss {vf_loss:.1f}로 안정적인 학습이 이루어지고 있습니다.")
+
+    # 산문 조합
+    full_prose = " ".join(prose_parts)
+    # 4096자 제한 대비 산문 길이 제한
+    if len(full_prose) > 800:
+        full_prose = full_prose[:797] + "..."
+    lines.append(f"  {full_prose}")
+    lines.append("")
+
     # 다음 리포트
     lines.append("")
     next_milestone = ((int(current_iter) // 100) + 1) * 100
     lines.append(f"⏰ 다음 리포트: iter {next_milestone:,}")
+
+    # TensorBoard URL
+    if TB_URL:
+        lines.append(f"🔗 TensorBoard: {TB_URL}")
 
     return "\n".join(lines)
 
@@ -672,6 +951,11 @@ def release_lock():
 def check_maintenance_mode():
     """Supervisor 유지보수 중인지 확인 (maintenance.flag 존재 여부)."""
     return os.path.isfile(MAINTENANCE_FLAG)
+
+
+def check_user_stop():
+    """사용자가 의도적으로 supervisor를 중단했는지 확인 (user_stop.flag 존재 여부)."""
+    return os.path.isfile(USER_STOP_FLAG)
 
 
 def check_training_alive():
@@ -809,7 +1093,9 @@ def main():
             try:
                 # ── Supervisor 워치독 (자동 재시작) ──
                 if not check_supervisor_alive():
-                    if not supervisor_alert_sent:
+                    if check_user_stop():
+                        print(f"[{now}] Supervisor stopped by user (user_stop.flag exists). Skipping auto-restart.")
+                    elif not supervisor_alert_sent:
                         print(f"[{now}] WARNING: Supervisor not alive! Attempting auto-restart...")
                         send_telegram("⚠️ <b>Training Supervisor 감지 불가!</b>\n자동 재시작 시도 중...")
                         if restart_supervisor():
@@ -847,6 +1133,9 @@ def main():
 
                 run_name = os.path.basename(run_dir)
 
+                # TensorBoard junction 업데이트 (런 변경 시 자동 반영)
+                update_tb_junction(run_dir)
+
                 # TensorBoard 읽기 (재시도 포함)
                 data = read_tfevents(run_dir)
                 if not data:
@@ -877,6 +1166,11 @@ def main():
                     print(f"\n[{now}] === Report #{cycle} (iter {current_iter}, milestone {current_milestone}) ===")
                     print(report)
                     send_telegram(report)
+                    # 그래프 이미지 전송
+                    graph_bytes = generate_training_graphs(data, run_name)
+                    if graph_bytes:
+                        send_telegram_photo(graph_bytes, f"📊 Training Graphs (iter {current_iter:,})")
+                        print(f"Graph sent for iter {current_iter}")
                     print(f"Report #{cycle} sent")
                     time.sleep(args.poll)
                     continue
@@ -893,6 +1187,11 @@ def main():
                     report = format_report(data, run_name, cycle)
                     print(report)
                     send_telegram(report)
+                    # 그래프 이미지 전송
+                    graph_bytes = generate_training_graphs(data, run_name)
+                    if graph_bytes:
+                        send_telegram_photo(graph_bytes, f"📊 Training Graphs (iter {current_iter:,})")
+                        print(f"Graph sent for iter {current_iter}")
                     print(f"Report #{cycle} sent")
                 else:
                     # milestone 미도달 → 조용히 대기
