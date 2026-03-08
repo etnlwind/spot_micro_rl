@@ -320,90 +320,91 @@ CONTACT_EVENT_METRICS = {"stride_length", "gait_cycle_period", "swing_stride",
 
 
 def gait_quality_score(rewards):
-    """걸음걸이 품질 종합 점수 (0-13).
+    """보행 품질 점수 (0-13).
 
-    실제 TensorBoard 값 범위에 맞춘 threshold 사용:
-      - standing_height: 성숙 ~0.25, trot_gait: 성숙 ~1.0
-      - forward_velocity: 성숙 ~1.9, foot_clearance: 성숙 ~2.0
-      - diagonal_coupling: 성숙 ~3.3, rear_joint_velocity: 성숙 ~20
-    접촉 이벤트 기반(stride/cycle)은 점수 미반영, 참고 표시만.
+    성숙 런 TensorBoard 값의 백분위 기준 threshold:
+      80-90% → 2pt, 40-50% → 1pt (trot는 0-3)
+    성숙 런 기준값: forward_velocity=1.87, foot_clearance=1.99,
+      diagonal_coupling=3.33, trot_gait=1.0, rear_joint_velocity=19.9,
+      standing_height=0.25
+    접촉 이벤트(stride/cycle)는 점수 미반영, 참고만.
     """
     score = 0
     details = []
 
-    # ── 핵심 운동학 지표 (점수 반영, 총 13점) ──
+    # ── 핵심 보행 지표 (총 13점) ──
 
-    # 1. 트로트 접촉 패턴 (0-3)
-    #    실측: 성숙 런 ~1.0, 초기 ~0.07
+    # 1. 트로트 패턴 (0-3) — 성숙 ~1.0
+    #    3pt: ≥0.9 (90%), 1pt: ≥0.4 (40%)
     trot = rewards.get("trot_gait", 0)
-    if trot > 0.8:
+    if trot >= 0.9:
         score += 3
-        details.append(f"트로트패턴 ✅✅✅ ({trot:.3f})")
-    elif trot > 0.3:
+        details.append(f"트로트 ✅✅✅ ({trot:.3f})")
+    elif trot >= 0.4:
         score += 1
-        details.append(f"트로트패턴 🟡 ({trot:.3f})")
+        details.append(f"트로트 🟡 ({trot:.3f})")
     else:
-        details.append(f"트로트패턴 ❌ ({trot:.4f})")
+        details.append(f"트로트 ❌ ({trot:.4f})")
 
-    # 2. 관절 커플링 (0-2) — joint-motion coupling, NOT footfall trot
-    #    실측: 성숙 ~3.3, 초기 ~0.17
+    # 2. 관절 커플링 (0-2) — 성숙 ~3.3, joint-motion coupling
+    #    2pt: ≥2.6 (80%), 1pt: ≥1.3 (40%)
     diag = rewards.get("diagonal_coupling", 0)
-    if diag > 2.5:
+    if diag >= 2.6:
         score += 2
         details.append(f"관절커플링 ✅✅ ({diag:.2f}) [운동학적]")
-    elif diag > 0.5:
+    elif diag >= 1.3:
         score += 1
         details.append(f"관절커플링 🟡 ({diag:.2f}) [운동학적]")
     else:
         details.append(f"관절커플링 ❌ ({diag:.3f})")
 
-    # 3. 뒷다리 활성화 (0-2) — 관절속도 기반
-    #    실측: 성숙 ~20, 초기 ~1.3
+    # 3. 뒷다리 활성화 (0-2) — 성숙 ~20
+    #    2pt: ≥16 (80%), 1pt: ≥8 (40%)
     rear_vel = rewards.get("rear_joint_velocity", 0)
-    if rear_vel > 10.0:
+    if rear_vel >= 16.0:
         score += 2
-        details.append(f"뒷다리활성 ✅✅ ({rear_vel:.1f})")
-    elif rear_vel > 3.0:
+        details.append(f"뒷다리 ✅✅ ({rear_vel:.1f})")
+    elif rear_vel >= 8.0:
         score += 1
-        details.append(f"뒷다리활성 🟡 ({rear_vel:.1f})")
+        details.append(f"뒷다리 🟡 ({rear_vel:.1f})")
     else:
-        details.append(f"뒷다리활성 ❌ ({rear_vel:.2f})")
+        details.append(f"뒷다리 ❌ ({rear_vel:.2f})")
 
-    # 4. 전진 속도 (0-2) — rear-gated forward velocity
-    #    실측: 성숙 ~1.9, 초기 ~0.03
+    # 4. 전진 속도 (0-2) — 성숙 ~1.87
+    #    2pt: ≥1.5 (80%), 1pt: ≥0.75 (40%)
     fwd = rewards.get("forward_velocity", 0)
-    if fwd > 1.0:
+    if fwd >= 1.5:
         score += 2
-        details.append(f"전진속도 ✅✅ ({fwd:.2f})")
-    elif fwd > 0.3:
+        details.append(f"전진 ✅✅ ({fwd:.2f})")
+    elif fwd >= 0.75:
         score += 1
-        details.append(f"전진속도 🟡 ({fwd:.2f})")
+        details.append(f"전진 🟡 ({fwd:.2f})")
     else:
-        details.append(f"전진속도 ❌ ({fwd:.3f})")
+        details.append(f"전진 ❌ ({fwd:.3f})")
 
-    # 5. 발 들어올리기 (0-2) — foot clearance
-    #    실측: 성숙 ~2.0, 초기 ~0.13
+    # 5. 발 들어올리기 (0-2) — 성숙 ~2.0
+    #    2pt: ≥1.6 (80%), 1pt: ≥0.8 (40%)
     fc = rewards.get("foot_clearance", 0)
-    if fc > 1.5:
+    if fc >= 1.6:
         score += 2
         details.append(f"발높이 ✅✅ ({fc:.2f})")
-    elif fc > 0.5:
+    elif fc >= 0.8:
         score += 1
         details.append(f"발높이 🟡 ({fc:.2f})")
     else:
         details.append(f"발높이 ❌ ({fc:.3f})")
 
-    # 6. 기립 안정성 (0-2) — 높이+수평 결합
-    #    실측: 성숙 ~0.25, 초기 ~0.18
+    # 6. 기립 안정성 (0-2) — 성숙 ~0.25
+    #    2pt: ≥0.20 (80%), 1pt: ≥0.10 (40%)
     height = rewards.get("standing_height", 0)
-    if height > 0.20:
+    if height >= 0.20:
         score += 2
-        details.append(f"기립안정 ✅✅ ({height:.3f})")
-    elif height > 0.10:
+        details.append(f"기립 ✅✅ ({height:.3f})")
+    elif height >= 0.10:
         score += 1
-        details.append(f"기립안정 🟡 ({height:.3f})")
+        details.append(f"기립 🟡 ({height:.3f})")
     else:
-        details.append(f"기립안정 ❌ ({height:.4f})")
+        details.append(f"기립 ❌ ({height:.4f})")
 
     # ── 접촉 이벤트 참고 (점수 미반영) ──
     cycle = rewards.get("gait_cycle_period", 0)
@@ -426,6 +427,94 @@ def gait_quality_score(rewards):
         grade = "🔴 F"
 
     return grade, score, details
+
+
+def motion_stability_score(rewards, gait_score):
+    """동작 안정성 점수 (0-10).
+
+    성숙 런 기준 penalty 크기로 평가. 값이 0에 가까울수록 안정.
+    보행 미형성(gait_score<3)이면 측정 무의미 (정지 상태는 항상 안정).
+    성숙 런 기준값: action_rate=-3.0, joint_vel=-4.8,
+      flat_orientation=-0.008, ang_vel=-0.37, lin_vel_z=-0.009
+    """
+    if gait_score < 3:
+        return "⚪ N/A", 0, ["보행 미형성 — 안정성 측정 무의미"], False
+
+    score = 0
+    details = []
+
+    # 1. 액션 부드러움 (0-2) — 성숙 ~-3.0
+    #    2pt: > -3.6 (120%), 1pt: > -6.0 (200%)
+    ar = rewards.get("action_rate_l2", 0)
+    if ar > -3.6:
+        score += 2
+        details.append(f"액션부드러움 ✅✅ ({ar:.2f})")
+    elif ar > -6.0:
+        score += 1
+        details.append(f"액션부드러움 🟡 ({ar:.2f})")
+    else:
+        details.append(f"액션부드러움 ❌ ({ar:.2f})")
+
+    # 2. 관절속도 억제 (0-2) — 성숙 ~-4.8
+    #    2pt: > -6.0 (125%), 1pt: > -10.0 (208%)
+    jv = rewards.get("joint_vel_l2", 0)
+    if jv > -6.0:
+        score += 2
+        details.append(f"관절속도 ✅✅ ({jv:.2f})")
+    elif jv > -10.0:
+        score += 1
+        details.append(f"관절속도 🟡 ({jv:.2f})")
+    else:
+        details.append(f"관절속도 ❌ ({jv:.2f})")
+
+    # 3. 자세 수평 (0-2) — 성숙 ~-0.008
+    #    2pt: > -0.015 (187%), 1pt: > -0.04 (500%)
+    fo = rewards.get("flat_orientation_l2", 0)
+    if fo > -0.015:
+        score += 2
+        details.append(f"자세수평 ✅✅ ({fo:.4f})")
+    elif fo > -0.04:
+        score += 1
+        details.append(f"자세수평 🟡 ({fo:.4f})")
+    else:
+        details.append(f"자세수평 ❌ ({fo:.4f})")
+
+    # 4. 각속도 안정 (0-2) — 성숙 ~-0.37
+    #    2pt: > -0.5 (135%), 1pt: > -1.0 (270%)
+    av = rewards.get("ang_vel_xy_l2", 0)
+    if av > -0.5:
+        score += 2
+        details.append(f"각속도 ✅✅ ({av:.3f})")
+    elif av > -1.0:
+        score += 1
+        details.append(f"각속도 🟡 ({av:.3f})")
+    else:
+        details.append(f"각속도 ❌ ({av:.3f})")
+
+    # 5. 수직 진동 억제 (0-2) — 성숙 ~-0.009
+    #    2pt: > -0.015 (167%), 1pt: > -0.03 (333%)
+    lv = rewards.get("lin_vel_z_l2", 0)
+    if lv > -0.015:
+        score += 2
+        details.append(f"수직진동 ✅✅ ({lv:.4f})")
+    elif lv > -0.03:
+        score += 1
+        details.append(f"수직진동 🟡 ({lv:.4f})")
+    else:
+        details.append(f"수직진동 ❌ ({lv:.4f})")
+
+    if score >= 8:
+        grade = "🌟 A"
+    elif score >= 6:
+        grade = "⭐ B"
+    elif score >= 4:
+        grade = "🟡 C"
+    elif score >= 2:
+        grade = "🟠 D"
+    else:
+        grade = "🔴 F"
+
+    return grade, score, details, True
 
 
 def format_report(data, run_name, cycle_num):
@@ -486,6 +575,9 @@ def format_report(data, run_name, cycle_num):
 
     # ── 걸음걸이 품질 ──
     grade, gait_score, gait_details = gait_quality_score(rewards)
+
+    # ── 동작 안정성 ──
+    stab_grade, stab_score, stab_details, stab_valid = motion_stability_score(rewards, gait_score)
 
     # ── 핵심 메트릭 추세 ──
     key_trends = []
@@ -602,11 +694,29 @@ def format_report(data, run_name, cycle_num):
     lines.append(f"  💀 종료: timeout {timeout_pct:.0f}% / fall {100-timeout_pct:.0f}%")
     lines.append("")
 
-    # 걸음걸이 품질 (운동학 지표 기반, 접촉 이벤트는 참고만)
-    lines.append(f"<b>🦿 걸음걸이 {grade} ({gait_score}/13)</b>")
-    lines.append(f"  ℹ️ 운동학 6개 지표 기준 (접촉 이벤트=참고 표시)")
+    # ════════════════════════════════════════════
+    # 3층 구조: 보행 품질 / 동작 안정성 / 접촉 참고
+    # ════════════════════════════════════════════
+
+    # 1층: 보행 품질
+    lines.append(f"<b>🦿 보행 품질 {grade} ({gait_score}/13)</b>")
     for d in gait_details:
         lines.append(f"  {d}")
+    lines.append("")
+
+    # 2층: 동작 안정성
+    if stab_valid:
+        lines.append(f"<b>🛡️ 동작 안정성 {stab_grade} ({stab_score}/10)</b>")
+        for d in stab_details:
+            lines.append(f"  {d}")
+    else:
+        lines.append(f"<b>🛡️ 동작 안정성 {stab_grade}</b>")
+        lines.append(f"  {stab_details[0]}")
+    lines.append("")
+
+    # 복합 요약 (Gait X / Stability Y)
+    if stab_valid:
+        lines.append(f"  📊 종합: Gait {grade} / Stability {stab_grade}")
     lines.append("")
 
     # 보행 보상 추세 (양수)
@@ -621,12 +731,9 @@ def format_report(data, run_name, cycle_num):
         lines.append(t)
     lines.append("")
 
-    # 동작 부드러움
+    # 동작 부드러움 (간략 — 상세는 안정성 점수에서)
     lines.append(f"<b>🔧 동작 품질</b>")
-    lines.append(f"  부드러움: {smooth_label} ({smooth_total:.1f})")
-    lines.append(f"    action_rate: {action_rate:.2f}")
-    lines.append(f"    joint_vel: {joint_vel:.2f}")
-    lines.append(f"    dof_acc: {dof_acc:.2f}")
+    lines.append(f"  {smooth_label} (action={action_rate:.1f} joint={joint_vel:.1f} acc={dof_acc:.1f})")
     lines.append("")
 
     # 학습 지표
@@ -717,6 +824,8 @@ def format_report(data, run_name, cycle_num):
     # ── 학습 단계 판별 (survival + 운동학 지표 결합) ──
     fwd_val = rewards.get("forward_velocity", 0)
     diag_val = rewards.get("diagonal_coupling", 0)
+    fc_val = rewards.get("foot_clearance", 0)
+    trot_val = rewards.get("trot_gait", 0)
     if survival_pct < 5:
         phase = "1단계: 기립 학습 초기"
         phase_icon = "🥚"
@@ -728,16 +837,30 @@ def format_report(data, run_name, cycle_num):
     elif survival_pct < 50:
         phase = "3단계: 관절 패턴 형성"
         phase_icon = "🐥"
-        phase_desc = "관절 리듬 출현 (실제 보행 여부는 영상 확인 필요)"
+        extras = []
+        if fc_val > 0.5:
+            extras.append(f"발들기 {fc_val:.1f}")
+        if trot_val > 0.3:
+            extras.append(f"트로트 {trot_val:.2f}")
+        if extras:
+            phase_desc = f"관절 리듬 출현 ({', '.join(extras)}) — 실제 보행 여부는 영상 확인 필요"
+        else:
+            phase_desc = "관절 리듬 출현 (실제 보행 여부는 영상 확인 필요)"
     elif survival_pct >= 50 and diag_val > 1.0 and fwd_val > 0.5:
+        kin_parts = [f"커플링 {diag_val:.1f}", f"전진 {fwd_val:.1f}"]
+        if fc_val > 0.8:
+            kin_parts.append(f"발들기 {fc_val:.1f}")
+        if trot_val > 0.5:
+            kin_parts.append(f"트로트 {trot_val:.2f}")
+        kin_str = " + ".join(kin_parts)
         if survival_pct >= 80:
             phase = "5단계: 안정화 + 운동학 활성"
             phase_icon = "🦮"
-            phase_desc = f"생존 {survival_pct:.0f}% + 커플링 {diag_val:.1f} + 전진 {fwd_val:.1f} — 영상 최종 확인"
+            phase_desc = f"생존 {survival_pct:.0f}% + {kin_str} — 영상 최종 확인"
         else:
             phase = "4단계: 보행 발달 후보"
             phase_icon = "🐕"
-            phase_desc = f"커플링 {diag_val:.1f} + 전진 {fwd_val:.1f} 활성 — rear-driven 가능성 있음 (영상 확인)"
+            phase_desc = f"{kin_str} 활성 — rear-driven 가능성 있음 (영상 확인)"
     elif survival_pct >= 80:
         phase = "5단계: 생존 안정화 (운동학 미확인)"
         phase_icon = "🦮"
@@ -853,37 +976,39 @@ def format_report(data, run_name, cycle_num):
                 f"학습률이나 보상 가중치 재검토가 필요할 수 있습니다."
             )
     elif current_iter < 8000:
+        stab_info = f", 안정성 {stab_grade}({stab_score}/10)" if stab_valid else ""
         if gait_score >= 8:
             prose_parts.append(
-                f"중반부(iter {int(current_iter):,})에서 운동학 점수 {gait_score}/13({grade})로 "
+                f"중반부(iter {int(current_iter):,})에서 보행 {grade}({gait_score}/13){stab_info}로 "
                 f"관절 패턴이 형성되고 있습니다. 단, 점수가 높아도 실제 footfall trot인지는 "
                 f"영상으로 확인해야 합니다."
             )
         elif gait_score >= 5:
             prose_parts.append(
-                f"중반부(iter {int(current_iter):,})에서 운동학 {grade}({gait_score}/13)입니다. "
+                f"중반부(iter {int(current_iter):,})에서 보행 {grade}({gait_score}/13){stab_info}입니다. "
                 f"관절 리듬은 나타나고 있으나, 전진속도·발높이가 아직 약할 수 있어 "
                 f"실제 보행 품질은 영상으로 판단해야 합니다."
             )
         else:
             prose_parts.append(
-                f"iter {int(current_iter):,}까지 왔지만 운동학 {grade}({gait_score}/13)로 "
+                f"iter {int(current_iter):,}까지 왔지만 보행 {grade}({gait_score}/13)로 "
                 f"관절 패턴 형성이 더딥니다. 보상 구조 또는 커리큘럼 변경을 고려해볼 시점입니다."
             )
     else:
+        stab_info = f", 안정성 {stab_grade}({stab_score}/10)" if stab_valid else ""
         if gait_score >= 11:
             prose_parts.append(
-                f"후반부(iter {int(current_iter):,})에서 {grade}({gait_score}/13) — 운동학 지표 기준 우수합니다. "
+                f"후반부(iter {int(current_iter):,})에서 보행 {grade}({gait_score}/13){stab_info} — 운동학 지표 기준 우수합니다. "
                 f"단, 이 점수는 관절·속도 수치 기반이며 실제 보행은 영상 확인 필수입니다."
             )
         elif gait_score >= 8:
             prose_parts.append(
-                f"후반부(iter {int(current_iter):,})에서 {grade}({gait_score}/13)입니다. "
+                f"후반부(iter {int(current_iter):,})에서 보행 {grade}({gait_score}/13){stab_info}입니다. "
                 f"양호하지만 전진속도 대비 뒷다리 활성이 지배적이라면 rear-driven 패턴일 가능성이 있습니다."
             )
         else:
             prose_parts.append(
-                f"iter {int(current_iter):,}까지 왔음에도 {grade}({gait_score}/13)입니다. "
+                f"iter {int(current_iter):,}까지 왔음에도 보행 {grade}({gait_score}/13){stab_info}입니다. "
                 f"현재 보상 구조로는 한계가 보이며, V20에서 근본적 접근 변경이 필요할 수 있습니다."
             )
 
@@ -936,8 +1061,15 @@ def format_report(data, run_name, cycle_num):
             f"타겟 splay 각도가 로봇 구조에 맞는지 재확인이 필요합니다."
         )
 
-    # 5) 부드러움/에너지 효율
-    if smooth_total < 15:
+    # 5) 부드러움/에너지 효율 + 안정성 점수 연계
+    if stab_valid and stab_score >= 8:
+        prose_parts.append("동작 안정성이 우수합니다. 부드럽고 효율적인 보행입니다.")
+    elif stab_valid and stab_score <= 4:
+        prose_parts.append(
+            f"동작 안정성 {stab_grade}({stab_score}/10)로 거칠어, "
+            f"action_rate/joint_vel 페널티 강화를 고려해볼 만합니다."
+        )
+    elif smooth_total < 15:
         prose_parts.append("동작이 매우 부드러워 에너지 효율적인 학습이 진행되고 있습니다.")
     elif smooth_total > 50:
         prose_parts.append(
