@@ -1380,6 +1380,25 @@ def check_user_stop():
     return os.path.isfile(USER_STOP_FLAG)
 
 
+def is_run_complete(run_dir: str | None) -> bool:
+    """주어진 런 디렉토리가 완료 상태인지 확인."""
+    if not run_dir or not os.path.isdir(run_dir):
+        return False
+
+    model_iters = []
+    try:
+        for name in os.listdir(run_dir):
+            if not (name.startswith("model_") and name.endswith(".pt")):
+                continue
+            match = re.match(r"model_(\d+)\.pt$", name)
+            if match:
+                model_iters.append(int(match.group(1)))
+    except OSError:
+        return False
+
+    return bool(model_iters) and max(model_iters) >= MAX_ITERATIONS
+
+
 def check_training_alive():
     """훈련 프로세스가 살아있는지 확인 (자기 자신 제외, training_heartbeat 제외)."""
     import subprocess
@@ -1514,9 +1533,13 @@ def main():
 
             try:
                 # ── Supervisor 워치독 (자동 재시작) ──
+                current_run_dir = args.run_dir if args.run_dir else find_latest_run()
+                run_complete = is_run_complete(current_run_dir)
                 if not check_supervisor_alive():
                     if check_user_stop():
                         print(f"[{now}] Supervisor stopped by user (user_stop.flag exists). Skipping auto-restart.")
+                    elif run_complete:
+                        print(f"[{now}] Completed run detected. Skipping supervisor auto-restart.")
                     elif not supervisor_alert_sent:
                         print(f"[{now}] WARNING: Supervisor not alive! Attempting auto-restart...")
                         send_telegram("⚠️ <b>Training Supervisor 감지 불가!</b>\n자동 재시작 시도 중...")
@@ -1547,7 +1570,7 @@ def main():
                     maintenance_logged = False  # 훈련 복귀 시 리셋
 
                 # 런 디렉토리 찾기
-                run_dir = args.run_dir if args.run_dir else find_latest_run()
+                run_dir = current_run_dir
                 if not run_dir or not os.path.isdir(run_dir):
                     print(f"Run dir not found: {run_dir}")
                     time.sleep(args.poll)

@@ -147,6 +147,11 @@ _prev_score = -1
 _heartbeat_alert_sent = False
 
 
+def is_training_complete(iter_num: int) -> bool:
+    """훈련이 완료 임계값에 도달했는지 반환."""
+    return iter_num >= MAX_ITERATIONS - 100
+
+
 def get_regular_video_interval(iteration: int) -> int:
     """iteration 구간별 정기 영상 간격(iter)을 반환."""
     if iteration < VIDEO_INTERVAL_EARLY_END:
@@ -1168,6 +1173,7 @@ def main():
     last_verdict = "🟢 계속 진행"
     next_regular_iter = VIDEO_INTERVAL_EARLY_ITER
     last_observed_checkpoint = ""
+    completed_run_signature = ""
 
     try:
         while True:
@@ -1195,17 +1201,27 @@ def main():
 
                 iter_num = get_checkpoint_iter(checkpoint)
                 kpi_snapshot = build_supervisor_kpi_snapshot(run_dir)
+                run_signature = f"{run_dir}|{checkpoint}|{iter_num}"
                 if not last_observed_checkpoint:
                     last_observed_checkpoint = checkpoint
                     last_verdict = kpi_snapshot["verdict"]
                     next_regular_iter = get_next_regular_trigger(iter_num)
                     last_clip_iter = max(0, iter_num - get_regular_video_interval(iter_num))
+                    if is_training_complete(iter_num):
+                        completed_run_signature = run_signature
                     write_log(
                         f"Supervisor armed at iter {iter_num} | "
                         f"{format_trigger_status(next_regular_iter, last_clip_iter, kpi_snapshot['verdict'], last_verdict)}"
                     )
 
-                if iter_num >= MAX_ITERATIONS - 100:
+                if completed_run_signature and run_signature == completed_run_signature:
+                    write_log(
+                        f"Completed run already handled: {os.path.basename(run_dir)} / "
+                        f"{os.path.basename(checkpoint)} (iter {iter_num})"
+                    )
+                    break
+
+                if is_training_complete(iter_num):
                     trigger_clip, trigger_reason = True, "final"
                 else:
                     trigger_clip, trigger_reason = should_capture_clip(
@@ -1240,7 +1256,8 @@ def main():
                 )
 
                 # 훈련 완료 체크
-                if iter_num >= MAX_ITERATIONS - 100:
+                if is_training_complete(iter_num):
+                    completed_run_signature = run_signature
                     write_log(f"===== TRAINING COMPLETE (iter {iter_num}) =====")
                     send_telegram(f"🏆 훈련 완료! (iter {iter_num}/{MAX_ITERATIONS})\n최종 분석 진행합니다...")
                     try:
