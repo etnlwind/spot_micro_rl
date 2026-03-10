@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 버전**: V20 — Soft-Ramp Curriculum (선형 보간 기반 단계적 가중치 전환)
+**현재 상태**: V20 학습 커리큘럼 + V21 운영/관측 체계
 
 ### 기술 스택
 
@@ -49,9 +49,12 @@ spot_micro_rl/
 ├── scripts/
 │   ├── rsl_rl/
 │   │   ├── train.py                    # 훈련 entry point
-│   │   └── play.py                     # 평가/비디오 entry point
-│   ├── training_supervisor.py          # 3시간 주기 자동 관리 (비디오+Telegram)
-│   ├── training_heartbeat.py           # TensorBoard 모니터링 + Telegram 리포트
+│   │   └── play.py                     # 평가/비디오 entry point (카메라 preset, contact CSV 지원)
+│   ├── training_supervisor.py          # iter milestone 기반 비디오 관리 + Telegram
+│   ├── training_heartbeat.py           # gait-quality-first KPI 모니터링 + Telegram
+│   ├── milestone_monitor.py            # V20 ramp milestone 자동 스냅샷/리포트
+│   ├── collect_checkpoint_diagnostics.py    # foot/toe/aggregate contact 진단 패키지
+│   ├── make_multiview_screenshot_pack.py    # 멀티뷰 스크린샷 ZIP 생성
 │   ├── analyze_v19.py                  # V19 훈련 분석 스크립트
 │   ├── analyze_v20.py                  # V20 훈련 분석 스크립트
 │   └── transfer_flat_to_rough.py       # Flat→Rough 전이학습 (48→102 obs dim)
@@ -59,6 +62,7 @@ spot_micro_rl/
 │   ├── MEMORY.md                       # AI 세션 핸드오프 문서
 │   ├── V19_ANALYSIS.md                 # V19 분석 리포트
 │   ├── V20_ANALYSIS.md                 # V20 분석 리포트
+│   ├── V21_ANALYSIS.md                 # V21 운영/관측 체계 리포트
 │   └── V01-V08_HISTORY.md ~ V18_HISTORY.md  # 버전별 히스토리
 ├── assets/robots/spot_micro/           # SpotMicro URDF
 ├── logs/rsl_rl/spot_micro_flat/        # 훈련 로그 + 체크포인트
@@ -111,6 +115,12 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/train.py \
   --task=Isaac-Velocity-Flat-SpotMicro-v0 \
   --num_envs=24576 --headless --max_iterations=15000 \
   --resume --load_run=<TIMESTAMP>
+
+# 예시: model_9600.pt 기준 재개
+C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/train.py \
+  --task=Isaac-Velocity-Flat-SpotMicro-v0 \
+  --num_envs=24576 --headless --max_iterations=15000 \
+  --resume --load_run=2026-03-10_07-43-51 --checkpoint=model_9600.pt
 ```
 
 ### 평가 (Play)
@@ -119,7 +129,20 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/train.py \
 C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
   --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=50 \
   --checkpoint=logs/rsl_rl/spot_micro_flat/<TIMESTAMP>/model_15000.pt
+
+# 단일 로봇 멀티뷰/접촉 CSV 예시
+C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
+  --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=1 \
+  --checkpoint=logs/rsl_rl/spot_micro_flat/<TIMESTAMP>/model_15000.pt \
+  --video --video_length=120 --camera_view=rear \
+  --save_contact_csv --contact_primary_mode=toe --headless
 ```
+
+주요 play 옵션:
+- `--camera_view`: `side`, `front`, `rear`, `top_oblique`
+- `--camera_zoom`: 단일 로봇 근접 촬영 거리 조정
+- `--save_contact_csv`: LF/RF/LR/RR 접촉 상태와 force CSV 저장
+- `--contact_primary_mode`: `foot`, `toe`, `aggregate`
 
 ### 모니터링
 
@@ -127,18 +150,35 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
 # TensorBoard
 python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat_current --port=6006
 
-# Heartbeat (100 iter마다 Telegram 리포트)
+# Heartbeat (gait-quality-first KPI를 100 iter마다 Telegram 리포트)
 python scripts/training_heartbeat.py --iter_step 100 --poll 30
 
-# Supervisor (3시간 주기: 비디오 녹화 → 분석 → Telegram)
+# Supervisor (iter milestone/판정 악화 시 비디오 녹화 → 분석 → Telegram)
 python scripts/training_supervisor.py
 ```
+
+### Heartbeat / Supervisor 역할 분담
+
+- `training_heartbeat.py`: TensorBoard 기반 상태 감시, `standing_height`, `forward_velocity`, `diagonal_coupling`, `trot_gait`, `rear_joint_velocity`, `foot_clearance`를 우선 KPI로 판정
+- `training_supervisor.py`: 훈련 일시중단, 멀티뷰 재생, 분석, Telegram 비디오 전송, 사용자 의사결정 처리
+- supervisor 정기 cadence:
+  - 초기 500 iter
+  - 중기 1000 iter
+  - 후기 1500 iter
+  - verdict 악화 시 urgent clip 허용
+
+### 현재 운영 기준
+
+- 학습 버전: `V20`
+- 운영/관측 버전: `V21`
+- 접촉 해석 기본값: `toe_link`
+- 참고 문서: `plan/V21_ANALYSIS.md`
 
 ---
 
 ## Reward Design
 
-### V20: Soft-Ramp Curriculum (현재)
+### V20: Soft-Ramp Curriculum (학습 버전)
 
 하드 phase switch 대신 **선형 보간**으로 가중치를 점진적으로 전환:
 
@@ -167,6 +207,11 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 - **음수**: `undesired_contacts`, `feet_below_knees`, `joint_vel_l2`, `dof_acc_l2`, `action_rate_l2`, `flat_orientation_l2`
 - **고정**: `leg_lift`, `rear_forward_stride` (phase 불변)
 
+V21 이후 운영 해석 원칙:
+- 운동학 KPI를 우선 확인
+- `stride_length`, `gait_cycle_period` 같은 접촉 이벤트 메트릭은 참고 계층으로 사용
+- flat 환경 contact 기준은 `foot_link`보다 `toe_link`를 우선 사용
+
 ### PPO 하이퍼파라미터
 
 | 파라미터 | 값 |
@@ -193,7 +238,8 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | V17.1 | 03-04~03-05 | Action rate + gait cycle + stride | ❌ 정지 함정 (35개 리워드 과부하) |
 | V18~V18.3 | 03-06~03-07 | 3-Phase 커리큘럼 (hard switch) | Phase 2 데드락 → V19로 개선 |
 | V19 | 03-08 | Phase 가중치 튜닝, hard switch | ❌ critic shock (value_loss 1000) |
-| **V20** | **03-08~** | **Soft-ramp 선형 보간 커리큘럼** | 🔄 훈련 중 |
+| **V20** | **03-08~** | **Soft-ramp 선형 보간 커리큘럼** | 🔄 학습 운영 중 |
+| **V21** | **03-10~** | **gait-quality-first 모니터링, iter cadence supervisor, toe contact 진단** | ✅ 운영 반영 |
 
 ### 핵심 교훈
 
@@ -216,7 +262,10 @@ python scripts/analyze_v19.py
 python scripts/analyze_v20.py
 ```
 
-분석 결과 MD: `plan/V19_ANALYSIS.md`, `plan/V20_ANALYSIS.md`
+분석/운영 문서:
+- `plan/V19_ANALYSIS.md`
+- `plan/V20_ANALYSIS.md`
+- `plan/V21_ANALYSIS.md`
 
 ---
 
