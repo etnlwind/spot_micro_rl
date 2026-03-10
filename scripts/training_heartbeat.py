@@ -165,7 +165,7 @@ def ensure_tensorboard() -> None:
         print(f"[{now}] [TB] TensorBoard restart error: {e}")
 
 
-# Training version tag (env_cfg.py에서 읽음)
+# Training / ops version tags
 def _read_train_version() -> str:
     cfg_path = os.path.join(
         PROJECT_ROOT, "source", "spot_micro_rl", "spot_micro_rl",
@@ -181,13 +181,23 @@ def _read_train_version() -> str:
         pass
     return _env.get("TRAIN_VERSION", "")
 
+
+def _read_ops_version() -> str:
+    for key in ("OPS_VERSION", "MONITOR_VERSION"):
+        value = os.environ.get(key) or _env.get(key, "")
+        if value:
+            return value
+    return "V21"
+
+
 TRAIN_VERSION = _read_train_version()
+OPS_VERSION = _read_ops_version()
 
 
 def send_telegram(text):
-    """텔레그램 메시지 전송 (최대 4096자 분할). TRAIN_VERSION 자동 prefix."""
-    if TRAIN_VERSION:
-        text = f"[{TRAIN_VERSION}] {text}"
+    """텔레그램 메시지 전송 (최대 4096자 분할). OPS_VERSION 자동 prefix."""
+    if OPS_VERSION:
+        text = f"[{OPS_VERSION}] {text}"
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chunks = []
     while len(text) > 4000:
@@ -216,8 +226,8 @@ def send_telegram_photo(photo_bytes: bytes, caption: str = ""):
     """텔레그램 이미지 전송 (PNG bytes, multipart/form-data)."""
     import uuid
     boundary = uuid.uuid4().hex
-    if TRAIN_VERSION and caption:
-        caption = f"[{TRAIN_VERSION}] {caption}"
+    if OPS_VERSION and caption:
+        caption = f"[{OPS_VERSION}] {caption}"
 
     body = b""
     body += f"--{boundary}\r\n".encode()

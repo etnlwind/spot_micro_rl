@@ -97,7 +97,7 @@ URGENT_VIDEO_GAP_ITER = int(_env.get("URGENT_VIDEO_GAP_ITER", "400"))
 # Video camera views for gait validation
 VIDEO_VIEWS = ["side", "front", "rear", "top_oblique"]
 
-# Training version tag (env_cfg.py에서 읽음 — 코드 변경 시 자동 반영)
+# Training / ops version tags
 def _read_train_version() -> str:
     """env_cfg.py에서 TRAIN_VERSION 상수를 파싱."""
     cfg_path = os.path.join(
@@ -114,7 +114,17 @@ def _read_train_version() -> str:
         pass
     return _env.get("TRAIN_VERSION", "")
 
+
+def _read_ops_version() -> str:
+    for key in ("OPS_VERSION", "MONITOR_VERSION"):
+        value = os.environ.get(key) or _env.get(key, "")
+        if value:
+            return value
+    return "V21"
+
+
 TRAIN_VERSION = _read_train_version()
+OPS_VERSION = _read_ops_version()
 
 # Curriculum Phase boundaries (must match rewards.py PHASE_WEIGHTS)
 PHASE1_END_ITER = int(_env.get("PHASE1_END_ITER", "2000"))
@@ -234,9 +244,9 @@ def write_log(msg: str):
 
 
 def send_telegram(msg: str):
-    """텔레그램 메시지 전송 (UTF-8 명시). TRAIN_VERSION 자동 prefix."""
-    if TRAIN_VERSION:
-        msg = f"[{TRAIN_VERSION}] {msg}"
+    """텔레그램 메시지 전송 (UTF-8 명시). OPS_VERSION 자동 prefix."""
+    if OPS_VERSION:
+        msg = f"[{OPS_VERSION}] {msg}"
     try:
         data = urllib.parse.urlencode({
             "chat_id": TELEGRAM_CHAT_ID,
