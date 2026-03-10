@@ -200,9 +200,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Terminations: base_contact 비활성화
         self.terminations.base_contact = None
 
+        toe_contact_sensor_cfg = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+        toe_body_cfg = SceneEntityCfg("robot", body_names=".*toe_link")
+
         # Rewards - body_names 패턴 업데이트
-        # feet_air_time: foot_link
-        self.rewards.feet_air_time.params["sensor_cfg"] = SceneEntityCfg("contact_forces", body_names=".*foot_link")
+        # feet_air_time: toe_link
+        self.rewards.feet_air_time.params["sensor_cfg"] = toe_contact_sensor_cfg
         self.rewards.feet_air_time.params["threshold"] = 0.1
         
         # undesired_contacts: base_link, shoulder_link, leg_link
@@ -307,7 +310,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.all_feet_on_ground,
             weight=0.0,
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
                 "threshold": 1.0,
             }
         )
@@ -317,7 +320,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.feet_below_knees,
             weight=-150.0,
             params={
-                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "foot_cfg": toe_body_cfg,
                 "knee_cfg": SceneEntityCfg("robot", body_names=".*leg_link"),
             }
         )
@@ -375,8 +378,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.foot_clearance_reward,
             weight=8.0,
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
-                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "target_clearance": 0.06,  # V17: 0.12→0.06 (작은 로봇 현실적 보폭)
                 "min_vel": 0.001,
@@ -388,7 +391,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.trot_gait_reward,
             weight=40.0,  # V16: 30→40 (trot 패턴 강화)
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "min_vel": 0.001,
             },
@@ -399,7 +402,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.same_side_penalty,
             weight=-30.0,  # V16: -20→-30 (비트로트 강력 억제)
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "min_vel": 0.001,
             },
@@ -410,7 +413,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.gait_contact_count_reward,
             weight=0.0,
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "min_vel": 0.05,
             },
@@ -421,8 +424,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.swing_stride_reward,
             weight=2.0,
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
-                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "min_vel": 0.001,
             },
@@ -433,8 +436,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.rear_swing_bonus,
             weight=15.0,  # V16: 7→15 (뒷발 리프트 강화)
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
-                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "target_clearance": 0.08,  # V15: 8cm 목표
                 "min_vel": 0.05,
@@ -453,7 +456,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.leg_lift_reward,
             weight=15.0,  # V16: 20→15 (diagonal coupling이 보완)
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
                 "leg_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_leg", "front_right_leg", "rear_left_leg", "rear_right_leg"]),
                 "target_angle": 0.6,  # ~34도
             },
@@ -492,7 +495,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.rear_alternation_reward,
             weight=30.0,  # V16: 20→30 (뒷다리 교대 강화)
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "contact_threshold": 1.0,
                 "min_vel": 0.05,
@@ -504,7 +507,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.rear_both_ground_penalty,
             weight=-80.0,  # V16: -50→-80 (뒷다리 고정 강력 처벌)
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "contact_threshold": 1.0,
                 "min_vel": 0.05,
@@ -516,8 +519,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.rear_forward_stride_reward,
             weight=10.0,
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
-                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "contact_threshold": 1.0,
                 "target_clearance": 0.06,
@@ -562,8 +565,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.gait_cycle_period_reward,
             weight=15.0,
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
                 "target_period_min": 0.3,
                 "target_period_max": 0.5,
                 "min_vel": 0.05,
@@ -578,9 +582,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.stride_length_reward,
             weight=12.0,
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
-                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
                 "target_stride": 0.06,
                 "min_vel": 0.05,
             },
@@ -594,8 +599,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.stance_propulsion_reward,
             weight=8.0,  # Phase 1 기본값, 커리큘럼에서 Phase별 조정
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link"),
-                "foot_cfg": SceneEntityCfg("robot", body_names=".*foot_link"),
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "contact_threshold": 1.0,
                 "target_push_vel": 0.3,

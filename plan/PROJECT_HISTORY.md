@@ -1,8 +1,61 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-02-26 10:10  
-**Project Status**: V15 학습 진행 중 (Flat from-scratch, 뒷다리 보상 내장)  
-**Current Iteration**: 78+ (flat terrain, from-scratch)
+**Last Updated**: 2026-03-10  
+**Project Status**: V20 학습 운영 중, V21 운영/관측 체계 정리 완료  
+**Current Iteration**: `logs/rsl_rl/spot_micro_flat/2026-03-10_07-43-51` 기준 10.8K 관측 완료
+
+---
+
+## 📌 Current Status Snapshot (V20/V21)
+
+### 학습 버전과 운영 버전 분리
+
+- **학습 버전 태그**: `TRAIN_VERSION = "V20"`
+- **운영/관측 버전**: **V21**
+
+V21은 새 reward curriculum 버전이라기보다, V20 훈련을 더 정확하게 읽고 안전하게 운영하기 위한 관측/운영 레이어 정비다.
+
+핵심 문서:
+
+- `plan/V20_ANALYSIS.md`: soft-ramp curriculum 자체 분석
+- `plan/V21_ANALYSIS.md`: heartbeat / supervisor / toe contact / diagnostics 정리
+
+### V21 핵심 변경
+
+1. heartbeat를 gait-quality-first KPI 체계로 재정렬
+2. supervisor가 heartbeat와 같은 KPI 언어로 영상 caption/요약을 생성
+3. supervisor 영상 수집 주기를 시간 기반에서 iteration 기반으로 전환
+4. flat contact 기준을 `foot_link`에서 `toe_link`로 전환
+5. `play.py`에 멀티뷰 카메라 preset과 contact CSV/JSON export 추가
+
+### Heartbeat / Supervisor 역할
+
+| 컴포넌트 | 역할 | 출력 |
+|----------|------|------|
+| `training_heartbeat.py` | 자주 보는 상태 감시, KPI 분류, 운영 판정 | 텍스트 + 그래프 |
+| `training_supervisor.py` | 훈련 일시중단, 멀티뷰 재생, 상세 분석, 사용자 의사결정 | 비디오 + 분석 요약 |
+
+### V21에서 우선 보는 KPI
+
+- `standing_height`
+- `forward_velocity`
+- `diagonal_coupling`
+- `trot_gait`
+- `rear_joint_velocity`
+- `foot_clearance`
+
+접촉 이벤트 기반 `stride_length`, `gait_cycle_period`는 참고 지표로 유지한다.
+
+### 현재 운영 기준
+
+- 실운영 검증 런: `2026-03-10_07-43-51`
+- 실운영 점검 체크포인트: `model_10800.pt`
+- 재개 우선 체크포인트: `model_9600.pt`
+- 영상 cadence 목표:
+  - 초기 500 iter
+  - 중기 1000 iter
+  - 후기 1500 iter
+  - verdict 악화 시 urgent clip
 
 ---
 

@@ -1,13 +1,13 @@
 # MEMORY.md — AI Session Handoff Document
 > **목적**: 새 세션에서 AI가 이 파일만 읽으면 프로젝트 컨텍스트를 즉시 복원할 수 있도록 작성.  
 > **갱신 시점**: 매 세션 종료 시, 또는 중요 의사결정 발생 시.  
-> **마지막 갱신**: 2026-03-06 (V18 3-Phase Curriculum 설계 및 구현)
+> **마지막 갱신**: 2026-03-10 (V21 운영/관측 체계 정비)
 
 ---
 
 ## 1. 프로젝트 한 줄 요약
 
-SpotMicro 4족 로봇이 **trot 걸음걸이**(대각 교대보행)로 걷도록 강화학습(PPO)으로 훈련. 현재 **V18 3-Phase Curriculum 구현 완료** — V17.1 "정지 함정" 문제 해결을 위해 STAND→WALK→TROT 단계적 커리큘럼 도입.
+SpotMicro 4족 로봇이 **trot 걸음걸이**(대각 교대보행)로 걷도록 강화학습(PPO)으로 훈련. 현재 학습 버전 태그는 **V20**이고, 운영/관측 체계는 **V21**로 정리됨. V21은 gait-quality-first KPI, heartbeat/supervisor 통합, toe contact 재해석이 핵심.
 
 ---
 
@@ -61,9 +61,24 @@ pip install -e source/spot_micro_rl --quiet
 
 ---
 
-## 5. 현재 상태 (V18 — 3-Phase Curriculum)
+## 5. 현재 상태 (V20 학습 + V21 운영)
 
-### 5.0 V17.1 훈련 분석 결과 (2026-03-06)
+### 5.0 V21 운영 정리 (2026-03-10)
+
+- 새 분석 문서: `plan/V21_ANALYSIS.md`
+- heartbeat는 reward 총합보다 gait 품질 KPI를 먼저 보고 Telegram에 전송
+- supervisor는 heartbeat와 같은 KPI 언어를 사용하고, 멀티뷰 영상(side/front/rear/top_oblique)을 전송
+- 영상 수집 cadence는 시간 기반이 아니라 iteration 기반으로 전환 중
+  - 초기 500 iter
+  - 중기 1000 iter
+  - 후기 1500 iter
+  - verdict 악화 시 urgent clip 허용
+- contact 해석은 flat 기준 `foot_link`에서 `toe_link`로 전환
+- `play.py`는 contact CSV/JSON export와 카메라 preset을 지원
+- 실운영 검증 런: `logs/rsl_rl/spot_micro_flat/2026-03-10_07-43-51`
+- 재개 후보 체크포인트: `model_9600.pt` 우선
+
+### 5.1 V17.1 훈련 분석 결과 (2026-03-06)
 
 V17.1은 iter 5,104/15,000에서 **"정지 함정(stillness trap)"** 에 빠짐:
 
@@ -77,7 +92,7 @@ V17.1은 iter 5,104/15,000에서 **"정지 함정(stillness trap)"** 에 빠짐:
 
 **근본 원인**: 35개 리워드 동시 활성화 → 페널티 합(-150 feet_below_knees, -100 undesired_contacts, -80 rear_both_ground)이 양수 보상 합보다 압도적 → 로봇이 "아무것도 안 하는 게 최선"이라 학습. 속도 게이팅된 양수 보상은 넘어지면 발동 불가 → 닭-달걀 문제.
 
-### 5.1 V18 설계: 3-Phase Reward Curriculum
+### 5.2 V18 설계: 3-Phase Reward Curriculum
 
 **핵심 전략**: Isaac Lab의 `CurriculumManager`를 이용해 훈련 단계별로 리워드 가중치를 동적으로 조절.
 
@@ -106,21 +121,21 @@ V17.1은 iter 5,104/15,000에서 **"정지 함정(stillness trap)"** 에 빠짐:
 | `stride_length` | 0 | 6 | **12** |
 | `foot_clearance` | 2 | 5 | **8** |
 
-### 5.2 V18 구현 파일
+### 5.3 V18 구현 파일
 
 | 파일 | 변경 내용 |
 |------|----------|
 | `mdp/rewards.py` | `reward_weight_curriculum()` 함수 추가 (~90줄) |
 | `env_cfg.py` | `SpotMicroRewardCurriculumCfg` 클래스 + `self.curriculum` 설정 |
 
-### 5.3 V18 PPO 하이퍼파라미터 (V15d와 동일)
+### 5.4 V18 PPO 하이퍼파라미터 (V15d와 동일)
 ```
 gamma=0.97, clip_param=0.1, lr=1e-4, schedule=fixed
 epochs=3, mini_batches=4, value_loss_coef=0.5, entropy=0.01
 network: [512, 256, 128] ELU, num_steps_per_env=48
 ```
 
-### 5.4 V18 훈련 명령어 (From Scratch)
+### 5.5 V18 훈련 명령어 (From Scratch)
 ```bash
 conda activate env_isaaclab
 cd D:\project\spot_micro_rl
@@ -132,7 +147,7 @@ C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\train.py \
 > **주의**: V18은 기존 체크포인트에서 resume 불가 — 반드시 from scratch 훈련.  
 > `common_step_counter`가 0에서 시작하므로 resume 시 Phase가 리셋됨.
 
-### 5.5 Play Test 명령어
+### 5.6 Play Test 명령어
 ```bash
 # 훈련 완료 후 (체크포인트 경로는 실제 타임스탬프로 교체)
 C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\play.py \

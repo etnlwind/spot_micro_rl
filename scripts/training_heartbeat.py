@@ -282,30 +282,30 @@ def generate_training_graphs(data, run_name: str) -> bytes | None:
         ax1b.set_ylabel("Episode Length", color="orange")
         ax1b.legend(fontsize=8, loc="upper left")
 
-    # 2) Gait Rewards
+    # 2) Primary gait KPIs
     plot_metric(axes[0, 1], [
+        ("Episode_Reward/standing_height", "Standing Height"),
+        ("Episode_Reward/forward_velocity", "Forward Velocity"),
         ("Episode_Reward/trot_gait", "Trot Gait"),
         ("Episode_Reward/diagonal_coupling", "Diagonal Coupling"),
-        ("Episode_Reward/foot_clearance", "Foot Clearance"),
-        ("Episode_Reward/stride_length", "Stride Length"),
-    ], "Gait Quality", "Reward")
+    ], "Primary Gait KPIs", "Reward")
 
-    # 3) Movement
+    # 3) Rear activation and clearance
     plot_metric(axes[1, 0], [
-        ("Episode_Reward/forward_velocity", "Forward Vel"),
+        ("Episode_Reward/rear_joint_velocity", "Rear Joint Velocity"),
+        ("Episode_Reward/foot_clearance", "Foot Clearance"),
         ("Episode_Reward/leg_lift", "Leg Lift"),
-        ("Episode_Reward/rear_swing", "Rear Swing"),
-        ("Episode_Reward/rear_forward_stride", "Rear Stride"),
-    ], "Movement & Legs", "Reward")
+        ("Episode_Reward/stride_length", "Stride Length [contact]"),
+    ], "Rear Activation", "Reward")
 
-    # 4) Losses + Penalties
+    # 4) Stability and penalties
     ax4 = axes[1, 1]
     plot_metric(ax4, [
-        ("Episode_Reward/shoulder_neutral", "Shoulder Neutral"),
-        ("Episode_Reward/joint_deviation", "Joint Deviation"),
+        ("Episode_Reward/undesired_contacts", "Undesired Contacts"),
+        ("Episode_Reward/feet_below_knees", "Feet Below Knees"),
         ("Episode_Reward/flat_orientation_l2", "Orientation"),
         ("Episode_Reward/action_rate_l2", "Action Rate"),
-    ], "Penalties", "Penalty (negative)")
+    ], "Stability & Penalties", "Penalty (negative)")
 
     plt.tight_layout()
 
@@ -388,6 +388,83 @@ INACTIVE_REWARDS = {"contact_count", "feet_on_ground", "forward_velocity_bootstr
                     "stationary_penalty", "leg_pose_symmetry"}
 CONTACT_EVENT_METRICS = {"stride_length", "gait_cycle_period", "swing_stride",
                          "rear_alternation", "rear_both_ground", "rear_forward_stride"}
+PRIMARY_KPI_THRESHOLDS = {
+    "standing_height": (0.08, 0.16),
+    "forward_velocity": (0.15, 0.45),
+    "diagonal_coupling": (0.30, 1.00),
+    "trot_gait": (0.10, 0.40),
+    "rear_joint_velocity": (2.0, 8.0),
+    "foot_clearance": (0.20, 0.80),
+}
+
+
+def classify_primary_kpi(metric_name, value):
+    """주요 KPI를 3단계로 분류합니다."""
+    warn_th, good_th = PRIMARY_KPI_THRESHOLDS[metric_name]
+    if value >= good_th:
+        return "🟢", "양호"
+    if value >= warn_th:
+        return "🟡", "형성중"
+    return "🔴", "미약"
+
+
+def evaluate_training_window(current_iter, survival_pct, bad_orient, rewards):
+    """초기 운영 판단용 verdict를 반환합니다."""
+    watched_metrics = [
+        "standing_height",
+        "forward_velocity",
+        "diagonal_coupling",
+        "trot_gait",
+        "rear_joint_velocity",
+        "foot_clearance",
+    ]
+    greens = []
+    yellows = []
+    reds = []
+    for metric_name in watched_metrics:
+        value = rewards.get(metric_name, 0.0)
+        _icon, status = classify_primary_kpi(metric_name, value)
+        if status == "양호":
+            greens.append(metric_name)
+        elif status == "형성중":
+            yellows.append(metric_name)
+        else:
+            reds.append(metric_name)
+
+    reasons = []
+    if current_iter <= 300:
+        verdict = "🔵 워밍업"
+        reasons.append("초기 탐색 구간이라 reward 총합보다 KPI 출현 여부만 확인")
+    elif current_iter <= 1000:
+        if survival_pct < 8 and bad_orient > 0.95 and len(greens) == 0 and len(yellows) < 2:
+            verdict = "🔴 중단 검토"
+            reasons.append(f"생존 {survival_pct:.1f}% / bad_orientation {bad_orient*100:.0f}%")
+            reasons.append("기립·전진·대각선 패턴이 동시에 약함")
+        elif survival_pct >= 15 and (len(greens) >= 1 or len(yellows) >= 3):
+            verdict = "🟢 계속 진행"
+            reasons.append(f"생존 {survival_pct:.1f}%로 초기 기준 통과")
+            reasons.append(f"주요 KPI {len(greens) + len(yellows)}개가 형성중 이상")
+        else:
+            verdict = "🟡 계속 관찰"
+            reasons.append(f"생존 {survival_pct:.1f}% / bad_orientation {bad_orient*100:.0f}%")
+            reasons.append("추가 200~300 iter 관찰 후 재판정 권장")
+    else:
+        if survival_pct >= 25 and len(greens) >= 2 and bad_orient < 0.90:
+            verdict = "🟢 계속 진행"
+            reasons.append(f"생존 {survival_pct:.1f}% + 핵심 KPI {len(greens)}개 양호")
+        elif survival_pct < 10 and len(greens) == 0 and len(yellows) < 2:
+            verdict = "🔴 중단 검토"
+            reasons.append("1k iter 이후에도 gait-quality KPI 형성이 부족")
+        else:
+            verdict = "🟡 계속 관찰"
+            reasons.append("지표는 일부 형성됐지만 gait 품질 확정 전")
+
+    if reds:
+        reasons.append("미약: " + ", ".join(reds[:3]))
+    if greens:
+        reasons.append("양호: " + ", ".join(greens[:3]))
+
+    return verdict, reasons, greens, yellows, reds
 
 
 def gait_quality_score(rewards):
@@ -622,10 +699,6 @@ def format_report(data, run_name, cycle_num):
     worst_reward = min(all_reward_values)
     best_iter = reward_vals[all_reward_values.index(best_reward)][0]
 
-    # 생존율
-    max_ep = 10.0 * 50  # 10s × 50Hz
-    survival_pct = (current_ep_len / max_ep) * 100
-
     # 종료 원인
     timeout_vals = data.get("Episode_Termination/time_out", [])
     bad_orient_vals = data.get("Episode_Termination/bad_orientation", [])
@@ -633,6 +706,16 @@ def format_report(data, run_name, cycle_num):
     bad_orient = bad_orient_vals[-1][1] if bad_orient_vals else 0
     total_term = timeout + bad_orient
     timeout_pct = (timeout / total_term * 100) if total_term > 0 else 0
+
+    # 생존율
+    max_ep = 10.0 * 50  # 기본값: 10s × 50Hz
+    if timeout > 0.95 and current_ep_len > 1:
+        max_ep = current_ep_len
+    elif ep_len_vals:
+        recent_max_ep = max(v for _, v in ep_len_vals[-50:])
+        if recent_max_ep > max_ep * 0.6:
+            max_ep = recent_max_ep
+    survival_pct = (current_ep_len / max_ep) * 100 if max_ep > 0 else 0
 
     # ── 보상 분석 ──
     rewards = {}
@@ -649,6 +732,29 @@ def format_report(data, run_name, cycle_num):
 
     # ── 동작 안정성 ──
     stab_grade, stab_score, stab_details, stab_valid = motion_stability_score(rewards, gait_score)
+
+    # ── gait-quality-first 운영 KPI ──
+    primary_kpi_defs = [
+        ("standing_height", "기립높이"),
+        ("forward_velocity", "전진속도"),
+        ("diagonal_coupling", "대각커플링"),
+        ("trot_gait", "트로트패턴"),
+        ("rear_joint_velocity", "뒷다리활성"),
+        ("foot_clearance", "발들기"),
+    ]
+    primary_kpi_lines = []
+    for metric_name, label in primary_kpi_defs:
+        tag = f"Episode_Reward/{metric_name}"
+        val = rewards.get(metric_name, 0.0)
+        icon, pct = get_trend(data.get(tag, [])) if tag in data else ("📊", 0.0)
+        state_icon, state_label = classify_primary_kpi(metric_name, val)
+        primary_kpi_lines.append(
+            f"  {state_icon} {label}: {val:+.4f} {icon} ({pct:+.1f}%) [{state_label}]"
+        )
+
+    decision_verdict, decision_reasons, _decision_greens, _decision_yellows, _decision_reds = evaluate_training_window(
+        current_iter, survival_pct, bad_orient, rewards
+    )
 
     # ── 핵심 메트릭 추세 ──
     key_trends = []
@@ -758,11 +864,25 @@ def format_report(data, run_name, cycle_num):
 
     # 핵심 지표
     lines.append(f"<b>🎯 핵심 지표</b>")
-    lines.append(f"  {reward_icon} Reward: {current_reward:.1f} (avg10: {avg_reward:.1f})")
+    lines.append(f"  {reward_icon} Reward: {current_reward:.1f} (avg10: {avg_reward:.1f}) [보조]")
     lines.append(f"  {ep_icon} Episode: {current_ep_len:.1f} steps (생존 {survival_pct:.1f}%)")
     lines.append(f"  🏆 Best: {best_reward:.1f} @iter {best_iter}")
     lines.append(f"  📉 Worst: {worst_reward:.1f}")
     lines.append(f"  💀 종료: timeout {timeout_pct:.0f}% / fall {100-timeout_pct:.0f}%")
+    lines.append("")
+
+    lines.append(f"<b>🚦 운영 판정</b>")
+    lines.append(f"  {decision_verdict}")
+    for reason in decision_reasons:
+        lines.append(f"  - {reason}")
+    lines.append("")
+
+    lines.append(f"<b>🧭 우선 KPI (gait quality first)</b>")
+    for kpi_line in primary_kpi_lines:
+        lines.append(kpi_line)
+    stride_val = rewards.get("stride_length", 0.0)
+    cycle_val = rewards.get("gait_cycle_period", 0.0)
+    lines.append(f"  📎 접촉참고: stride {stride_val:+.4f} / cycle {cycle_val:+.4f}")
     lines.append("")
 
     # ════════════════════════════════════════════

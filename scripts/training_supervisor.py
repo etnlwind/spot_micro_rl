@@ -1,5 +1,5 @@
 """Training Supervisor — Python 통합판 (V17.1)
-3시간마다 훈련 중단 → 영상 녹화 → 상세 분석 → 텔레그램 보고/의사결정 → 훈련 재개
+iteration milestone마다 훈련 중단 → 영상 녹화 → 상세 분석 → 텔레그램 보고/의사결정 → 훈련 재개
 
 [T1] 텔레그램 양방향 통신 — 진행상황 알림 + 의사결정 요청
 [T2] 10분 응답대기 → 타임아웃 시 자동 판단 (계속 진행)
@@ -86,6 +86,16 @@ TRAIN_ENVS = int(_env.get("TRAIN_ENVS", "24576"))
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
 VIDEO_FPS = int(_env.get("VIDEO_FPS", "15"))
 DECISION_TIMEOUT_SEC = int(_env.get("DECISION_TIMEOUT_SEC", "600"))
+SUPERVISOR_POLL_SECONDS = int(_env.get("SUPERVISOR_POLL_SECONDS", "60"))
+VIDEO_INTERVAL_EARLY_ITER = int(_env.get("VIDEO_INTERVAL_EARLY_ITER", "500"))
+VIDEO_INTERVAL_MID_ITER = int(_env.get("VIDEO_INTERVAL_MID_ITER", "1000"))
+VIDEO_INTERVAL_LATE_ITER = int(_env.get("VIDEO_INTERVAL_LATE_ITER", "1500"))
+VIDEO_INTERVAL_EARLY_END = int(_env.get("VIDEO_INTERVAL_EARLY_END", "1500"))
+VIDEO_INTERVAL_MID_END = int(_env.get("VIDEO_INTERVAL_MID_END", "6000"))
+URGENT_VIDEO_GAP_ITER = int(_env.get("URGENT_VIDEO_GAP_ITER", "400"))
+
+# Video camera views for gait validation
+VIDEO_VIEWS = ["side", "front", "rear", "top_oblique"]
 
 # Training version tag (env_cfg.py에서 읽음 — 코드 변경 시 자동 반영)
 def _read_train_version() -> str:
@@ -125,6 +135,66 @@ _tg_offset = 0
 _last_analysis_text = ""
 _prev_score = -1
 _heartbeat_alert_sent = False
+
+
+def get_regular_video_interval(iteration: int) -> int:
+    """iteration 구간별 정기 영상 간격(iter)을 반환."""
+    if iteration < VIDEO_INTERVAL_EARLY_END:
+        return VIDEO_INTERVAL_EARLY_ITER
+    if iteration < VIDEO_INTERVAL_MID_END:
+        return VIDEO_INTERVAL_MID_ITER
+    return VIDEO_INTERVAL_LATE_ITER
+
+
+def get_next_regular_trigger(iteration: int) -> int:
+    """현재 iteration 이후 다음 정기 영상 목표 iter를 계산."""
+    if iteration < VIDEO_INTERVAL_EARLY_END:
+        slot = (iteration // VIDEO_INTERVAL_EARLY_ITER) + 1
+        candidate = slot * VIDEO_INTERVAL_EARLY_ITER
+        if candidate <= VIDEO_INTERVAL_EARLY_END:
+            return candidate
+        iteration = VIDEO_INTERVAL_EARLY_END
+
+    if iteration < VIDEO_INTERVAL_MID_END:
+        slot = ((max(iteration, VIDEO_INTERVAL_EARLY_END) - VIDEO_INTERVAL_EARLY_END) // VIDEO_INTERVAL_MID_ITER) + 1
+        candidate = VIDEO_INTERVAL_EARLY_END + slot * VIDEO_INTERVAL_MID_ITER
+        if candidate <= VIDEO_INTERVAL_MID_END:
+            return candidate
+        iteration = VIDEO_INTERVAL_MID_END
+
+    slot = ((max(iteration, VIDEO_INTERVAL_MID_END) - VIDEO_INTERVAL_MID_END) // VIDEO_INTERVAL_LATE_ITER) + 1
+    return VIDEO_INTERVAL_MID_END + slot * VIDEO_INTERVAL_LATE_ITER
+
+
+def verdict_severity(verdict: str) -> int:
+    """운영 판정 문자열을 심각도로 변환."""
+    if "중단 검토" in verdict:
+        return 2
+    if "계속 관찰" in verdict:
+        return 1
+    return 0
+
+
+def should_capture_clip(current_iter: int, last_clip_iter: int, next_regular_iter: int, verdict: str, last_verdict: str) -> tuple[bool, str]:
+    """정기 주기 또는 판정 악화 기준으로 clip 캡처 여부를 결정."""
+    if current_iter >= next_regular_iter:
+        return True, f"regular-{get_regular_video_interval(current_iter)}iter"
+
+    current_severity = verdict_severity(verdict)
+    last_severity = verdict_severity(last_verdict)
+    if current_severity > last_severity and (current_iter - last_clip_iter) >= URGENT_VIDEO_GAP_ITER:
+        return True, f"urgent-{verdict}"
+
+    return False, ""
+
+
+def format_trigger_status(next_regular_iter: int, last_clip_iter: int, verdict: str, last_verdict: str) -> str:
+    """다음 정기/긴급 트리거 기준을 사람이 읽기 쉬운 문자열로 반환."""
+    urgent_state = "enabled" if verdict_severity(verdict) > verdict_severity(last_verdict) else "standby"
+    return (
+        f"next regular @{next_regular_iter} iter | "
+        f"urgent gap {URGENT_VIDEO_GAP_ITER} iter from last clip {last_clip_iter} ({urgent_state})"
+    )
 
 
 # ============================================================
@@ -334,6 +404,93 @@ def parse_analysis_grade(text: str) -> dict:
         trend_raw = m.group(1).strip()
         trend_raw = re.sub(r"[^\x20-\x7E가-힣()%+\-.\d]+", "", trend_raw).strip()
         result["Trend"] = trend_raw
+    return result
+
+
+def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
+    """Heartbeat와 동일한 KPI 언어로 supervisor용 요약을 생성."""
+    result = {
+        "iter": 0,
+        "reward": 0.0,
+        "survival_pct": 0.0,
+        "verdict": "⚪ KPI unavailable",
+        "reason": "TensorBoard 데이터를 읽지 못함",
+        "gait": "N/A",
+        "gait_score": 0,
+        "stability": "N/A",
+        "stability_score": 0,
+        "kpi_line": "기립높이 N/A | 전진속도 N/A | 대각커플링 N/A",
+        "caption_suffix": "⚪ KPI unavailable",
+    }
+    try:
+        try:
+            import training_heartbeat as heartbeat
+        except ImportError:
+            from scripts import training_heartbeat as heartbeat
+
+        data = heartbeat.read_tfevents(run_dir)
+        if not data:
+            return result
+
+        reward_vals = data.get("Train/mean_reward", [])
+        ep_len_vals = data.get("Train/mean_episode_length", [])
+        if not reward_vals:
+            return result
+
+        current_iter = int(reward_vals[-1][0])
+        current_reward = float(reward_vals[-1][1])
+        current_ep_len = float(ep_len_vals[-1][1]) if ep_len_vals else 0.0
+
+        timeout_vals = data.get("Episode_Termination/time_out", [])
+        bad_orient_vals = data.get("Episode_Termination/bad_orientation", [])
+        timeout = float(timeout_vals[-1][1]) if timeout_vals else 0.0
+        bad_orient = float(bad_orient_vals[-1][1]) if bad_orient_vals else 0.0
+
+        max_ep = 10.0 * 50
+        if timeout > 0.95 and current_ep_len > 1:
+            max_ep = current_ep_len
+        elif ep_len_vals:
+            recent_max_ep = max(v for _, v in ep_len_vals[-50:])
+            if recent_max_ep > max_ep * 0.6:
+                max_ep = recent_max_ep
+        survival_pct = (current_ep_len / max_ep) * 100 if max_ep > 0 else 0.0
+
+        rewards = {}
+        for tag, vals in data.items():
+            if tag.startswith("Episode_Reward/") and vals:
+                rewards[tag.replace("Episode_Reward/", "")] = float(vals[-1][1])
+
+        gait_grade, gait_score, _gait_details = heartbeat.gait_quality_score(rewards)
+        stab_grade, stab_score, _stab_details, stab_valid = heartbeat.motion_stability_score(rewards, gait_score)
+        verdict, reasons, _greens, _yellows, _reds = heartbeat.evaluate_training_window(
+            current_iter, survival_pct, bad_orient, rewards
+        )
+
+        primary_items = []
+        for metric_name, label in [
+            ("standing_height", "기립"),
+            ("forward_velocity", "전진"),
+            ("diagonal_coupling", "대각"),
+        ]:
+            icon, state = heartbeat.classify_primary_kpi(metric_name, rewards.get(metric_name, 0.0))
+            primary_items.append(f"{icon}{label} {state}")
+
+        stability_label = f"{stab_grade} {stab_score}/10" if stab_valid else stab_grade
+        result.update({
+            "iter": current_iter,
+            "reward": current_reward,
+            "survival_pct": survival_pct,
+            "verdict": verdict,
+            "reason": reasons[0] if reasons else "",
+            "gait": gait_grade,
+            "gait_score": gait_score,
+            "stability": stab_grade,
+            "stability_score": stab_score,
+            "kpi_line": " | ".join(primary_items),
+            "caption_suffix": f"{verdict} | Gait {gait_grade} {gait_score}/13 | Stability {stability_label}",
+        })
+    except Exception as e:
+        write_log(f"KPI snapshot err: {e}")
     return result
 
 
@@ -592,47 +749,67 @@ def restart_heartbeat():
 # ============================================================
 
 def record_video(checkpoint_path: str, run_dir: str, clip_num: int) -> str | None:
-    """영상 녹화: play.py 실행 → 최신 mp4 탐색 → re-encode → 경로 반환."""
+    """멀티뷰 영상 녹화: side/front/rear/top_oblique 순차 캡처.
+
+    반환값은 side view 경로(기존 호출부 호환용).
+    """
     cp_name = os.path.basename(checkpoint_path)
     iter_num = get_checkpoint_iter(checkpoint_path)
     write_log(f"Recording clip #{clip_num} from: {cp_name}")
 
     play_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "play.py")
-    play_cmd = (
-        f'conda activate env_isaaclab && '
-        f'cd /d {PROJECT_ROOT} && '
-        f'set PYTHONIOENCODING=utf-8 && '
-        f'{ISAAC_LAB} -p {play_script} '
-        f'--task={TASK} --num_envs={PLAY_ENVS} '
-        f'--checkpoint={checkpoint_path} --video --video_length={VIDEO_LENGTH}'
-    )
-    write_log(f"play_cmd: {play_cmd}")
-    proc = subprocess.Popen(["cmd", "/c", play_cmd])
+    side_video_path = None
+    any_video = False
 
-    timeout = 480
-    elapsed = 0
-    while proc.poll() is None and elapsed < timeout:
-        time.sleep(10)
-        elapsed += 10
-        if elapsed % 60 == 0:
-            write_log(f"  Recording... {elapsed}s")
+    for view_name in VIDEO_VIEWS:
+        write_log(f"Recording view: {view_name}")
+        pre_videos = set(glob.glob(os.path.join(run_dir, "videos", "play", "*.mp4")))
 
-    if proc.poll() is None:
-        write_log(f"WARNING: Play timed out ({timeout}s), killing PID {proc.pid}")
-        try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
-        except Exception:
-            pass
+        play_cmd = (
+            f'conda activate env_isaaclab && '
+            f'cd /d {PROJECT_ROOT} && '
+            f'set PYTHONIOENCODING=utf-8 && '
+            f'{ISAAC_LAB} -p {play_script} '
+            f'--task={TASK} --num_envs={PLAY_ENVS} '
+            f'--checkpoint={checkpoint_path} --video --video_length={VIDEO_LENGTH} '
+            f'--camera_view={view_name}'
+        )
+        write_log(f"play_cmd({view_name}): {play_cmd}")
+        proc = subprocess.Popen(["cmd", "/c", play_cmd])
 
-    ensure_gpu_clean(reason="post-recording")
+        timeout = 480
+        elapsed = 0
+        while proc.poll() is None and elapsed < timeout:
+            time.sleep(10)
+            elapsed += 10
+            if elapsed % 60 == 0:
+                write_log(f"  Recording {view_name}... {elapsed}s")
 
-    # 최신 mp4 찾기
-    video_glob = os.path.join(run_dir, "videos", "play", "*.mp4")
-    videos = sorted(glob.glob(video_glob), key=os.path.getmtime)
-    if videos:
-        latest_video = videos[-1]
+        if proc.poll() is None:
+            write_log(f"WARNING: Play timed out for {view_name} ({timeout}s), killing PID {proc.pid}")
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
+            except Exception:
+                pass
+
+        ensure_gpu_clean(reason=f"post-recording-{view_name}")
+
+        # 신규 생성 파일 우선 탐색
+        post_videos = set(glob.glob(os.path.join(run_dir, "videos", "play", "*.mp4")))
+        created = sorted(list(post_videos - pre_videos), key=os.path.getmtime)
+        if created:
+            latest_video = created[-1]
+        else:
+            # fallback: 최신 파일
+            videos = sorted(list(post_videos), key=os.path.getmtime)
+            latest_video = videos[-1] if videos else None
+
+        if not latest_video:
+            write_log(f"WARNING: No video file found for view={view_name}")
+            continue
+
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        new_name = f"clip_{clip_num}_iter{iter_num}_{ts}.mp4"
+        new_name = f"clip_{clip_num}_iter{iter_num}_{view_name}_{ts}.mp4"
         dest_path = os.path.join(run_dir, "videos", new_name)
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         shutil.copy2(latest_video, dest_path)
@@ -643,9 +820,22 @@ def record_video(checkpoint_path: str, run_dir: str, clip_num: int) -> str | Non
         reencoded = reencode_video(dest_path, VIDEO_FPS)
         if reencoded:
             dest_path = reencoded
-        return dest_path
 
-    write_log("WARNING: No video file found!")
+        any_video = True
+        if view_name == "side":
+            side_video_path = dest_path
+
+    if any_video:
+        if side_video_path:
+            return side_video_path
+        # side 실패 시 첫 번째 view 파일을 반환하도록 최신 clip 파일 선택
+        candidates = sorted(
+            glob.glob(os.path.join(run_dir, "videos", f"clip_{clip_num}_iter{iter_num}_*.mp4")),
+            key=os.path.getmtime,
+        )
+        return candidates[0] if candidates else None
+
+    write_log("WARNING: No video file found across all views!")
     return None
 
 
@@ -834,7 +1024,7 @@ def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, vid
 # TRAINING RESUME
 # ============================================================
 
-def resume_training(run_dir: str, checkpoint_path: str):
+def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int | None = None):
     """훈련을 재개: train.py 실행 → 프로세스 감지 확인."""
     run_name = os.path.basename(run_dir)
     cp_name = os.path.basename(checkpoint_path)
@@ -896,7 +1086,10 @@ def resume_training(run_dir: str, checkpoint_path: str):
     if gpu_mem > 0:
         write_log(f"GPU after resume: {gpu_mem}MB")
 
-    write_log(f"Next check in {INTERVAL_MINUTES} min.")
+    if next_regular_iter is not None:
+        write_log(f"Next regular clip target: iter {next_regular_iter}")
+    else:
+        write_log(f"Supervisor poll active: every {SUPERVISOR_POLL_SECONDS}s")
 
 
 # ============================================================
@@ -907,7 +1100,7 @@ def main():
     global _last_analysis_text, _prev_score, _heartbeat_alert_sent
 
     parser = argparse.ArgumentParser(description="Training Supervisor (Python)")
-    parser.add_argument("--interval", type=int, default=0, help="Override INTERVAL_MINUTES")
+    parser.add_argument("--interval", type=int, default=0, help="Legacy override for INTERVAL_MINUTES (startup note only)")
     parser.add_argument("--video_length", type=int, default=0, help="Override VIDEO_LENGTH")
     parser.add_argument("--train_envs", type=int, default=0, help="Override TRAIN_ENVS")
     parser.add_argument("--play_envs", type=int, default=0, help="Override PLAY_ENVS")
@@ -936,7 +1129,13 @@ def main():
     write_log("=========================================")
     write_log("V17.1 Training Supervisor (Python, Telegram Interactive)")
     write_log("Phase에러격리 | GPU메모리기준 | 분석타임아웃")
-    write_log(f"Interval: {INTERVAL_MINUTES}min | Video: {VIDEO_LENGTH}steps")
+    write_log(
+        "Cadence: "
+        f"{VIDEO_INTERVAL_EARLY_ITER} iter (<{VIDEO_INTERVAL_EARLY_END}), "
+        f"{VIDEO_INTERVAL_MID_ITER} iter (<{VIDEO_INTERVAL_MID_END}), "
+        f"{VIDEO_INTERVAL_LATE_ITER} iter (late)"
+    )
+    write_log(f"Poll: {SUPERVISOR_POLL_SECONDS}s | Video: {VIDEO_LENGTH}steps")
     write_log(f"Train: {TRAIN_ENVS} envs | Play: {PLAY_ENVS} envs")
     write_log("=========================================")
 
@@ -944,7 +1143,8 @@ def main():
     send_telegram(
         f"🤖 SpotMicro Training Supervisor 시작\n\n"
         f"⚙️ 설정\n"
-        f"├ Interval: {INTERVAL_MINUTES}min\n"
+        f"├ Poll: {SUPERVISOR_POLL_SECONDS}초\n"
+        f"├ Clip cadence: {VIDEO_INTERVAL_EARLY_ITER}/{VIDEO_INTERVAL_MID_ITER}/{VIDEO_INTERVAL_LATE_ITER} iter\n"
         f"├ Envs: {TRAIN_ENVS}\n"
         f"├ Video: {VIDEO_LENGTH}steps\n"
         f"├ Max: {MAX_ITERATIONS} iter\n"
@@ -954,18 +1154,15 @@ def main():
     )
 
     clip_num = 0
+    last_clip_iter = 0
+    last_verdict = "🟢 계속 진행"
+    next_regular_iter = VIDEO_INTERVAL_EARLY_ITER
+    last_observed_checkpoint = ""
 
     try:
         while True:
-            # ── 인터벌 대기 (60초 단위로 Heartbeat 워치독 체크) ──
-            sleep_total = INTERVAL_MINUTES * 60
-            sleep_elapsed = 0
-            write_log(f"Sleeping {INTERVAL_MINUTES} min (heartbeat watchdog active)...")
-
-            while sleep_elapsed < sleep_total:
-                chunk = min(60, sleep_total - sleep_elapsed)
-                time.sleep(chunk)
-                sleep_elapsed += chunk
+            try:
+                time.sleep(SUPERVISOR_POLL_SECONDS)
 
                 # Heartbeat 워치독
                 if not test_heartbeat_alive():
@@ -979,29 +1176,56 @@ def main():
                         write_log("Heartbeat recovered.")
                         _heartbeat_alert_sent = False
 
-            clip_num += 1
-            write_log("")
-            write_log(f"########## CLIP #{clip_num} ##########")
-
-            video_path = None
-            run_dir = None
-            checkpoint = None
-
-            try:
                 run_dir = get_latest_run_dir()
                 if not run_dir:
-                    write_log("ERROR: No run found!")
                     continue
                 checkpoint = get_latest_checkpoint(run_dir)
                 if not checkpoint:
-                    write_log("ERROR: No checkpoint!")
                     continue
+
                 iter_num = get_checkpoint_iter(checkpoint)
-                write_log(f"Found: {os.path.basename(run_dir)} / {os.path.basename(checkpoint)} (iter {iter_num})")
+                kpi_snapshot = build_supervisor_kpi_snapshot(run_dir)
+                if not last_observed_checkpoint:
+                    last_observed_checkpoint = checkpoint
+                    last_verdict = kpi_snapshot["verdict"]
+                    next_regular_iter = get_next_regular_trigger(iter_num)
+                    last_clip_iter = max(0, iter_num - get_regular_video_interval(iter_num))
+                    write_log(
+                        f"Supervisor armed at iter {iter_num} | "
+                        f"{format_trigger_status(next_regular_iter, last_clip_iter, kpi_snapshot['verdict'], last_verdict)}"
+                    )
+
+                if iter_num >= MAX_ITERATIONS - 100:
+                    trigger_clip, trigger_reason = True, "final"
+                else:
+                    trigger_clip, trigger_reason = should_capture_clip(
+                        iter_num, last_clip_iter, next_regular_iter, kpi_snapshot["verdict"], last_verdict
+                    )
+
+                checkpoint_changed = checkpoint != last_observed_checkpoint
+                if checkpoint_changed:
+                    write_log(
+                        f"Observed checkpoint: {os.path.basename(run_dir)} / {os.path.basename(checkpoint)} "
+                        f"(iter {iter_num}) | verdict={kpi_snapshot['verdict']} | "
+                        f"{format_trigger_status(next_regular_iter, last_clip_iter, kpi_snapshot['verdict'], last_verdict)}"
+                    )
+                    last_observed_checkpoint = checkpoint
+
+                if not trigger_clip:
+                    last_verdict = kpi_snapshot["verdict"]
+                    continue
+
+                clip_num += 1
+                write_log("")
+                write_log(f"########## CLIP #{clip_num} ##########")
+                write_log(f"Trigger: {trigger_reason}")
+
+                video_path = None
                 progress_pct = round((iter_num / MAX_ITERATIONS) * 100, 1)
                 send_telegram(
                     f"🎬 Clip #{clip_num} 시작\n"
                     f"├ 📍 Iter: {iter_num} / {MAX_ITERATIONS} ({progress_pct}%)\n"
+                    f"├ Trigger: {trigger_reason}\n"
                     f"└ 📂 {os.path.basename(run_dir)} / {os.path.basename(checkpoint)}"
                 )
 
@@ -1016,7 +1240,10 @@ def main():
                     try:
                         video_path = record_video(checkpoint, run_dir, clip_num)
                         if video_path and os.path.isfile(video_path):
-                            send_telegram_video(video_path, f"🏆 최종 영상 | Iter {iter_num} / {MAX_ITERATIONS}")
+                            send_telegram_video(
+                                video_path,
+                                f"🏆 최종 영상 | Iter {iter_num} / {MAX_ITERATIONS} | {kpi_snapshot['caption_suffix']}"
+                            )
                     except Exception as e:
                         write_log(f"Video err: {e}")
                     _last_analysis_text = ""
@@ -1035,13 +1262,20 @@ def main():
                             f"📊 등급: {grade['Grade']}\n"
                             f"🎯 점수: {grade['Score']}/13\n"
                             f"💰 Reward: {grade['Reward']}\n"
-                            f"📈 Trend: {grade['Trend']}\n\n"
+                            f"📈 Trend: {grade['Trend']}\n"
+                            f"🚦 운영 판정: {kpi_snapshot['verdict']}\n"
+                            f"🧭 KPI: {kpi_snapshot['kpi_line']}\n"
+                            f"🦿 Gait: {kpi_snapshot['gait']} ({kpi_snapshot['gait_score']}/13)\n"
+                            f"🛡 Stability: {kpi_snapshot['stability']} ({kpi_snapshot['stability_score']}/10)\n\n"
                             f"✅ 모니터 종료"
                         )
                     except Exception:
                         send_telegram("✅ 훈련 완료. 모니터 종료.")
                     write_log("===== MONITOR FINISHED =====")
                     break
+
+                last_clip_iter = iter_num
+                next_regular_iter = get_next_regular_trigger(iter_num)
 
                 # ── Maintenance Flag ON ──
                 set_maintenance_flag()
@@ -1064,7 +1298,7 @@ def main():
                     if video_path and os.path.isfile(video_path):
                         send_telegram_video(
                             video_path,
-                            f"🎬 Clip #{clip_num} | Iter {iter_num} / {MAX_ITERATIONS} ({progress_pct}%)"
+                            f"🎬 Clip #{clip_num} | Iter {iter_num} / {MAX_ITERATIONS} ({progress_pct}%) | {kpi_snapshot['caption_suffix']}"
                         )
                 except Exception as e:
                     write_log(f"P2 err: {e} (skip)")
@@ -1102,7 +1336,12 @@ def main():
                         f"📍 Iter: {grade_iter} / {MAX_ITERATIONS} ({p_pct}%)\n"
                         f"💰 Reward: {grade['Reward']}\n"
                         f"{trend_icon} Trend: {grade['Trend']}\n"
-                        f"{grade_icon} 등급: {grade['Grade']} ({grade['Score']}/13점)"
+                        f"{grade_icon} 등급: {grade['Grade']} ({grade['Score']}/13점)\n"
+                        f"🚦 운영 판정: {kpi_snapshot['verdict']}\n"
+                        f"🧭 KPI: {kpi_snapshot['kpi_line']}\n"
+                        f"🦿 Gait: {kpi_snapshot['gait']} ({kpi_snapshot['gait_score']}/13)\n"
+                        f"🛡 Stability: {kpi_snapshot['stability']} ({kpi_snapshot['stability_score']}/10)\n"
+                        f"📝 핵심: {kpi_snapshot['reason']}"
                     )
 
                     # 등급 D/F → 사용자에게 결정 요청
@@ -1155,9 +1394,10 @@ def main():
                 send_telegram(
                     f"▶️ P5/5: 훈련 재개 중... (iter {iter_num}~)\n"
                     f"📋 Curriculum Phase {phase_num} ({phase_name})\n"
-                    f"다음 체크: {INTERVAL_MINUTES}분 후"
+                    f"다음 정기 clip 목표: iter {next_regular_iter}"
                 )
-                resume_training(run_dir, checkpoint)
+                resume_training(run_dir, checkpoint, next_regular_iter=next_regular_iter)
+                last_verdict = kpi_snapshot["verdict"]
 
                 # ── Maintenance Flag OFF ──
                 remove_maintenance_flag()

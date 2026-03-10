@@ -8,6 +8,8 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import csv
+import json
 import sys
 
 from isaaclab.app import AppLauncher
@@ -19,6 +21,38 @@ import cli_args  # isort: skip
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--camera_view",
+    type=str,
+    default="side",
+    choices=["side", "front", "rear", "top_oblique"],
+    help="Camera view preset for video recording.",
+)
+parser.add_argument(
+    "--camera_zoom",
+    type=float,
+    default=1.0,
+    help="Camera distance scale (<1.0 = closer, >1.0 = farther).",
+)
+parser.add_argument(
+    "--save_contact_csv",
+    action="store_true",
+    default=False,
+    help="Save per-step foot contact states (LF/RF/LR/RR) to CSV during video recording.",
+)
+parser.add_argument(
+    "--contact_threshold",
+    type=float,
+    default=1.0,
+    help="Contact force threshold used to binarize contact state.",
+)
+parser.add_argument(
+    "--contact_primary_mode",
+    type=str,
+    default="toe",
+    choices=["foot", "toe", "aggregate"],
+    help="Primary contact mode used for compatibility CSV columns LF/RF/LR/RR.",
+)
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -80,6 +114,135 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import spot_micro_rl.tasks  # noqa: F401
 
 
+CONTACT_LIMB_ORDER = ("LF", "RF", "LR", "RR")
+CONTACT_MODE_ORDER = ("foot", "toe", "aggregate")
+CONTACT_LIMB_PATTERNS = {
+    "LF": ("front_left_",),
+    "RF": ("front_right_",),
+    "LR": ("rear_left_",),
+    "RR": ("rear_right_",),
+}
+
+
+def _camera_offsets(view_name: str, zoom: float = 1.0):
+    """Return (eye_offset, lookat_offset) relative to robot base position."""
+    offsets = {
+        "side": ((2.6, -0.45, 0.62), (0.0, 0.0, 0.26)),
+        "front": ((0.0, 2.0, 0.50), (0.0, 0.0, 0.28)),
+        "rear": ((0.0, -2.0, 0.50), (0.0, 0.0, 0.28)),
+        "top_oblique": ((1.25, 1.25, 1.35), (0.0, 0.0, 0.22)),
+    }
+    eye_off, look_off = offsets.get(view_name, offsets["side"])
+    zoom = max(0.2, float(zoom))
+    eye_scaled = (eye_off[0] * zoom, eye_off[1] * zoom, eye_off[2] * zoom)
+    return eye_scaled, look_off
+
+
+def _apply_camera_view_preset(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, view_name: str):
+    """Apply camera pose preset for consistent gait evaluation videos."""
+    # Initial pose before stepping. Runtime follow logic keeps robot centered.
+    eye, lookat = _camera_offsets(view_name, args_cli.camera_zoom)
+    if hasattr(env_cfg, "viewer") and env_cfg.viewer is not None:
+        env_cfg.viewer.eye = eye
+        env_cfg.viewer.lookat = lookat
+    print(f"[INFO] Camera view preset: {view_name} | eye={eye} lookat={lookat}")
+
+
+def _get_contact_body_names(contact_sensor):
+    """Return sensor body names or deterministic placeholders."""
+    body_names = list(getattr(contact_sensor, "body_names", []) or [])
+    if not body_names:
+        body_count = int(contact_sensor.data.net_forces_w_history.shape[2])
+        body_names = [f"body_{i}" for i in range(body_count)]
+    return body_names
+
+
+def _resolve_contact_body_map(contact_sensor):
+    """Resolve LF/RF/LR/RR mappings for foot, toe, and aggregate modes."""
+    body_names = _get_contact_body_names(contact_sensor)
+    lower_names = [n.lower() for n in body_names]
+    mappings = {mode: {} for mode in CONTACT_MODE_ORDER}
+
+    for limb, fragments in CONTACT_LIMB_PATTERNS.items():
+        foot_indices = [
+            index for index, name in enumerate(lower_names)
+            if "foot" in name and any(fragment in name for fragment in fragments)
+        ]
+        toe_indices = [
+            index for index, name in enumerate(lower_names)
+            if "toe" in name and any(fragment in name for fragment in fragments)
+        ]
+        mappings["foot"][limb] = {
+            "indices": foot_indices[:1],
+            "names": [body_names[index] for index in foot_indices[:1]],
+        }
+        mappings["toe"][limb] = {
+            "indices": toe_indices[:1],
+            "names": [body_names[index] for index in toe_indices[:1]],
+        }
+        aggregate_indices = sorted(set(foot_indices[:1] + toe_indices[:1]))
+        mappings["aggregate"][limb] = {
+            "indices": aggregate_indices,
+            "names": [body_names[index] for index in aggregate_indices],
+        }
+
+    return mappings, body_names
+
+
+def _collapse_contact_force(body_forces: torch.Tensor, indices: list[int], mode: str) -> float:
+    """Collapse per-body forces into one limb force."""
+    if not indices:
+        return 0.0
+    selected = body_forces[indices]
+    if mode == "aggregate":
+        return float(selected.sum().item())
+    return float(selected.max().item())
+
+
+def _build_contact_csv_header():
+    header = ["step", "LF", "RF", "LR", "RR", "LF_force", "RF_force", "LR_force", "RR_force"]
+    for mode in CONTACT_MODE_ORDER:
+        for limb in CONTACT_LIMB_ORDER:
+            header.append(f"{limb}_{mode}")
+        for limb in CONTACT_LIMB_ORDER:
+            header.append(f"{limb}_{mode}_force")
+    return header
+
+
+def _build_contact_csv_row(step: int, body_forces: torch.Tensor, contact_map: dict, threshold: float, primary_mode: str):
+    row = [step]
+    mode_contacts = {}
+    mode_forces = {}
+
+    for mode in CONTACT_MODE_ORDER:
+        mode_contacts[mode] = {}
+        mode_forces[mode] = {}
+        for limb in CONTACT_LIMB_ORDER:
+            indices = contact_map[mode][limb]["indices"]
+            force_value = _collapse_contact_force(body_forces, indices, mode)
+            mode_forces[mode][limb] = force_value
+            mode_contacts[mode][limb] = int(force_value > threshold)
+
+    for limb in CONTACT_LIMB_ORDER:
+        row.append(mode_contacts[primary_mode][limb])
+    for limb in CONTACT_LIMB_ORDER:
+        row.append(f"{mode_forces[primary_mode][limb]:.4f}")
+    for mode in CONTACT_MODE_ORDER:
+        for limb in CONTACT_LIMB_ORDER:
+            row.append(mode_contacts[mode][limb])
+        for limb in CONTACT_LIMB_ORDER:
+            row.append(f"{mode_forces[mode][limb]:.4f}")
+    return row
+
+
+def _print_contact_mapping(contact_map: dict):
+    for mode in CONTACT_MODE_ORDER:
+        print(f"[INFO] Contact mapping mode={mode}")
+        for limb in CONTACT_LIMB_ORDER:
+            mapping = contact_map[mode][limb]
+            print(f"  {limb}: indices={mapping['indices']} names={mapping['names']}")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -121,6 +284,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _w, _h = (int(x) for x in _res_str.split("x"))
         env_cfg.viewer.resolution = (_w, _h)
         print(f"[INFO] Video resolution: {_w}x{_h}")
+        _apply_camera_view_preset(env_cfg, args_cli.camera_view)
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -184,6 +348,50 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    camera_follow_error_logged = False
+    follow_camera = args_cli.video and (args_cli.num_envs == 1)
+    contact_csv_fp = None
+    contact_csv_writer = None
+    contact_sensor = None
+    contact_map = None
+    contact_meta_path = None
+
+    if args_cli.video and args_cli.save_contact_csv:
+        try:
+            contact_sensor = env.unwrapped.scene.sensors.get("contact_forces", None)
+            if contact_sensor is not None:
+                contact_map, body_names = _resolve_contact_body_map(contact_sensor)
+                csv_dir = os.path.join(log_dir, "videos", "play")
+                os.makedirs(csv_dir, exist_ok=True)
+                csv_path = os.path.join(csv_dir, f"contact_states_{args_cli.camera_view}.csv")
+                contact_csv_fp = open(csv_path, "w", newline="", encoding="utf-8")
+                contact_csv_writer = csv.writer(contact_csv_fp)
+                contact_csv_writer.writerow(_build_contact_csv_header())
+                print(f"[INFO] Contact CSV: {csv_path}")
+                _print_contact_mapping(contact_map)
+
+                contact_meta_path = os.path.join(csv_dir, f"contact_meta_{args_cli.camera_view}.json")
+                contact_meta = {
+                    "camera_view": args_cli.camera_view,
+                    "contact_threshold": float(args_cli.contact_threshold),
+                    "primary_contact_mode": args_cli.contact_primary_mode,
+                    "sensor_name": "contact_forces",
+                    "contact_modes": contact_map,
+                    "sensor_body_names": body_names,
+                    "raw_force_definition": {
+                        "foot": "max over selected foot_link bodies of max-history ||net_forces_w||",
+                        "toe": "max over selected toe_link bodies of max-history ||net_forces_w||",
+                        "aggregate": "sum of selected foot_link+toe_link body forces after max-history reduction",
+                    },
+                }
+                with open(contact_meta_path, "w", encoding="utf-8") as mf:
+                    json.dump(contact_meta, mf, indent=2, ensure_ascii=False)
+                print(f"[INFO] Contact meta: {contact_meta_path}")
+            else:
+                print("[WARN] contact_forces sensor not found. CSV export disabled.")
+        except Exception as err:
+            print(f"[WARN] Contact CSV init failed: {err}")
+            contact_csv_writer = None
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -195,8 +403,48 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs, _, dones, _ = env.step(actions)
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
+
+        # Keep single-robot recordings centered by following base position.
+        if follow_camera:
+            try:
+                robot = env.unwrapped.scene["robot"]
+                base_pos = robot.data.root_pos_w[0]
+                eye_off, look_off = _camera_offsets(args_cli.camera_view, args_cli.camera_zoom)
+                eye = (
+                    float(base_pos[0]) + eye_off[0],
+                    float(base_pos[1]) + eye_off[1],
+                    float(base_pos[2]) + eye_off[2],
+                )
+                lookat = (
+                    float(base_pos[0]) + look_off[0],
+                    float(base_pos[1]) + look_off[1],
+                    float(base_pos[2]) + look_off[2],
+                )
+                env.unwrapped.sim.set_camera_view(eye, lookat)
+            except Exception as err:
+                if not camera_follow_error_logged:
+                    print(f"[WARN] Camera follow disabled due to runtime error: {err}")
+                    camera_follow_error_logged = True
+                follow_camera = False
         if args_cli.video:
             timestep += 1
+
+            # Write contact state aligned to recorded timestep.
+            if contact_csv_writer is not None and contact_sensor is not None and contact_map is not None:
+                try:
+                    forces = contact_sensor.data.net_forces_w_history[0, :, :, :].norm(dim=-1).max(dim=0)[0]
+                    contact_csv_writer.writerow(
+                        _build_contact_csv_row(
+                            timestep,
+                            forces,
+                            contact_map,
+                            float(args_cli.contact_threshold),
+                            args_cli.contact_primary_mode,
+                        )
+                    )
+                except Exception as err:
+                    print(f"[WARN] Contact CSV write failed at step {timestep}: {err}")
+
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
@@ -205,6 +453,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    # close file handle before simulator shutdown
+    if contact_csv_fp is not None:
+        try:
+            contact_csv_fp.close()
+        except Exception:
+            pass
 
     # close the simulator
     env.close()

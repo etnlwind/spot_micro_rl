@@ -19,6 +19,16 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
+def _contact_force_peak(contact_sensor: ContactSensor, body_ids) -> torch.Tensor:
+    """Return per-body peak contact force over the available sensor history window."""
+    return contact_sensor.data.net_forces_w_history[:, :, body_ids, :].norm(dim=-1).max(dim=1)[0]
+
+
+def _contact_state(contact_sensor: ContactSensor, body_ids, threshold: float) -> torch.Tensor:
+    """Return boolean contact state from peak contact force over sensor history."""
+    return _contact_force_peak(contact_sensor, body_ids) > threshold
+
+
 def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Penalize joint position deviation from a target value."""
     # extract the used quantities (to enable type-hinting)
@@ -207,9 +217,7 @@ def all_feet_on_ground(
 ) -> torch.Tensor:
     """발이 바닥에 닿아있는 비율. 4개 다 닿으면 1.0, 3개면 0.75, 0개면 0.0."""
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0] > threshold
-    )
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, threshold)
     # 각 발의 접촉 비율 (0~1)
     return contacts.float().mean(dim=1)
 
@@ -241,10 +249,7 @@ def foot_clearance_reward(
     """스윙 중인 발이 일정 높이 이상 들려야 보상. 전진 없이 발만 드는 건 방지."""
     # 접촉 감지
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    )  # (num_envs, num_feet), True = 접촉 중
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)  # (num_envs, num_feet), True = 접촉 중
 
     # 발 높이 (지면 기준)
     asset = env.scene[foot_cfg.name]
@@ -306,10 +311,7 @@ def trot_gait_reward(
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     # 각 발의 접촉 여부: FL(0), FR(1), RL(2), RR(3)
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    ).float()
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()
 
     # 대각선 페어 A: FL(0) + RR(3)
     diag_a_sync = 1.0 - torch.abs(contacts[:, 0] - contacts[:, 3])
@@ -353,10 +355,7 @@ def same_side_penalty(
     서있을 때는 4발 접지가 정상이므로 전진 중에만 적용.
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    ).float()  # (num_envs, 4) - FL(0), FR(1), RL(2), RR(3)
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()  # (num_envs, 4) - FL(0), FR(1), RL(2), RR(3)
 
     # --- 바운딩 감지: 앞다리끼리 / 뒷다리끼리 동기화 ---
     front_same = 1.0 - torch.abs(contacts[:, 0] - contacts[:, 1])
@@ -390,10 +389,7 @@ def gait_contact_count_reward(
     2개 = 1.0점, 3또는 1개 = 0.5점, 0또는 4개 = 0점.
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    ).float()
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()
 
     num_contacts = contacts.sum(dim=1)  # 0~4
     # 2개일 때 최대, 0이나 4일 때 0
@@ -422,10 +418,7 @@ def swing_stride_reward(
     """
     # 접촉 감지
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    )  # (num_envs, num_feet), True = 접촉
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)  # (num_envs, num_feet), True = 접촉
 
     # 발의 월드 속도
     asset = env.scene[foot_cfg.name]
@@ -477,10 +470,7 @@ def rear_swing_bonus(
     """
     # 접촉 감지 (4발 모두)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    )  # (num_envs, 4)
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)  # (num_envs, 4)
 
     # 뒷발 높이
     asset = env.scene[foot_cfg.name]
@@ -556,10 +546,7 @@ def leg_lift_reward(
     """
     # 접촉 감지 → 스윙 마스크
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    )
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)
     swing_mask = ~contacts
 
     # leg 관절 각도
@@ -619,10 +606,7 @@ def rear_alternation_reward(
     하나는 접지, 하나는 스윙 상태일 때 보상한다.
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    ).float()  # (num_envs, 4)
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()  # (num_envs, 4)
 
     # 뒷다리 접촉 상태 차이: 다르면 1.0 (교대 중)
     rear_diff = torch.abs(contacts[:, 2] - contacts[:, 3])
@@ -648,10 +632,7 @@ def rear_both_ground_penalty(
     안 돼서 동시 접지 자체에 직접 페널티를 줌.
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    ).float()  # (num_envs, 4)
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()  # (num_envs, 4)
 
     # 뒷다리 둘 다 접지일 때만 1.0
     rear_both = contacts[:, 2] * contacts[:, 3]
@@ -682,10 +663,7 @@ def rear_forward_stride_reward(
     """
     # 접촉 감지
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    )  # (num_envs, 4)
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)  # (num_envs, 4)
 
     # 뒷발 스윙 마스크 (인덱스 2, 3)
     rear_swing = ~contacts[:, 2:]  # (num_envs, 2)
@@ -953,10 +931,7 @@ def stance_propulsion_reward(
     """
     # 1) 접촉 감지 → 스탠스 마스크
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    stance_mask = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    ).float()  # (num_envs, 4), 1.0 = 접촉 중 (스탠스)
+    stance_mask = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()  # (num_envs, 4), 1.0 = 접촉 중 (스탠스)
 
     # 2) 발의 월드 속도
     foot_asset = env.scene[foot_cfg.name]
@@ -1031,6 +1006,7 @@ def gait_cycle_period_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
     target_period_min: float = 0.3,
     target_period_max: float = 0.5,
     min_vel: float = 0.05,
@@ -1052,10 +1028,7 @@ def gait_cycle_period_reward(
         min_vel: 전진 속도 게이팅 문턱값
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    # 접촉 힘 크기 (num_envs, 4)
-    net_forces = contact_sensor.data.net_forces_w_history[:, 0, sensor_cfg.body_ids]
-    contact_force = torch.norm(net_forces, dim=-1)  # (num_envs, 4)
-    is_contact = (contact_force > 1.0).float()  # 1N 이상이면 접촉
+    is_contact = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()
 
     num_envs = is_contact.shape[0]
     num_feet = is_contact.shape[1]
@@ -1133,6 +1106,7 @@ def stride_length_reward(
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
     foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
     target_stride: float = 0.06,
     min_vel: float = 0.05,
 ) -> torch.Tensor:
@@ -1153,9 +1127,7 @@ def stride_length_reward(
         min_vel: 전진 속도 게이팅 문턱값
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    net_forces = contact_sensor.data.net_forces_w_history[:, 0, sensor_cfg.body_ids]
-    contact_force = torch.norm(net_forces, dim=-1)  # (num_envs, 4)
-    is_contact = (contact_force > 1.0).float()
+    is_contact = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()
 
     asset: Articulation = env.scene[foot_cfg.name]
     foot_pos_xy = asset.data.body_pos_w[:, foot_cfg.body_ids, :2]  # (num_envs, 4, 2)
