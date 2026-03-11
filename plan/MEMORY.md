@@ -1,13 +1,13 @@
 # MEMORY.md — AI Session Handoff Document
 > **목적**: 새 세션에서 AI가 이 파일만 읽으면 프로젝트 컨텍스트를 즉시 복원할 수 있도록 작성.  
 > **갱신 시점**: 매 세션 종료 시, 또는 중요 의사결정 발생 시.  
-> **마지막 갱신**: 2026-03-10 (V21 운영/관측 체계 정비)
+> **마지막 갱신**: 2026-03-11 (V22 운영/아티팩트 체계 완료, V23 준비)
 
 ---
 
 ## 1. 프로젝트 한 줄 요약
 
-SpotMicro 4족 로봇이 **trot 걸음걸이**(대각 교대보행)로 걷도록 강화학습(PPO)으로 훈련. 현재 학습 버전 태그는 **V20**이고, 운영/관측 체계는 **V21**로 정리됨. V21은 gait-quality-first KPI, heartbeat/supervisor 통합, toe contact 재해석이 핵심.
+SpotMicro 4족 로봇이 **trot 걸음걸이**(대각 교대보행)로 걷도록 강화학습(PPO)으로 훈련. 현재 학습 버전 태그는 **V20**이고, 운영/아티팩트 체계는 **V22**까지 정리됨. V22는 V21의 gait-quality-first 모니터링 위에 멀티뷰 영상, heartbeat workbook, ZIP artifact, front-view 포함 패키징을 얹은 운영 레이어다. 다음 작업은 **V23 학습 전략 준비**다.
 
 ---
 
@@ -61,9 +61,20 @@ pip install -e source/spot_micro_rl --quiet
 
 ---
 
-## 5. 현재 상태 (V20 학습 + V21 운영)
+## 5. 현재 상태 (V20 학습 + V22 운영)
 
-### 5.0 V21 운영 정리 (2026-03-10)
+### 5.0 V22 운영 정리 (2026-03-11)
+
+- 새 문서: `plan/V22_ANALYSIS.md`, `plan/V23_PLAN.md`
+- supervisor 최종 패키지는 `overview / side / front / rear / top` 5개 시점을 전송
+- top view에서는 command 화살표를 숨기고, side/front/rear/top 단일 로봇 시점을 일관되게 저장
+- heartbeat는 `heartbeat_reports.jsonl`에 구조화 기록을 남김
+- artifact ZIP은 `heartbeat_history.xlsx`를 포함하고, `Overview / Trends / RawData` 탭과 차트를 생성
+- 과거 런에는 JSONL이 없을 수 있으므로 TensorBoard scalar fallback으로 workbook을 재구성
+- 실전 검증 런: `logs/rsl_rl/spot_micro_flat/2026-03-11_02-39-01`
+- 최신 검증 아티팩트: `clip_1005_iter15000_20260311_132732.zip`
+
+### 5.1 V21 운영 정리 (2026-03-10)
 
 - 새 분석 문서: `plan/V21_ANALYSIS.md`
 - heartbeat는 reward 총합보다 gait 품질 KPI를 먼저 보고 Telegram에 전송
@@ -78,7 +89,7 @@ pip install -e source/spot_micro_rl --quiet
 - 실운영 검증 런: `logs/rsl_rl/spot_micro_flat/2026-03-10_07-43-51`
 - 재개 후보 체크포인트: `model_9600.pt` 우선
 
-### 5.1 V17.1 훈련 분석 결과 (2026-03-06)
+### 5.2 V17.1 훈련 분석 결과 (2026-03-06)
 
 V17.1은 iter 5,104/15,000에서 **"정지 함정(stillness trap)"** 에 빠짐:
 
@@ -92,7 +103,7 @@ V17.1은 iter 5,104/15,000에서 **"정지 함정(stillness trap)"** 에 빠짐:
 
 **근본 원인**: 35개 리워드 동시 활성화 → 페널티 합(-150 feet_below_knees, -100 undesired_contacts, -80 rear_both_ground)이 양수 보상 합보다 압도적 → 로봇이 "아무것도 안 하는 게 최선"이라 학습. 속도 게이팅된 양수 보상은 넘어지면 발동 불가 → 닭-달걀 문제.
 
-### 5.2 V18 설계: 3-Phase Reward Curriculum
+### 5.3 V18 설계: 3-Phase Reward Curriculum
 
 **핵심 전략**: Isaac Lab의 `CurriculumManager`를 이용해 훈련 단계별로 리워드 가중치를 동적으로 조절.
 
@@ -121,21 +132,21 @@ V17.1은 iter 5,104/15,000에서 **"정지 함정(stillness trap)"** 에 빠짐:
 | `stride_length` | 0 | 6 | **12** |
 | `foot_clearance` | 2 | 5 | **8** |
 
-### 5.3 V18 구현 파일
+### 5.4 V18 구현 파일
 
 | 파일 | 변경 내용 |
 |------|----------|
 | `mdp/rewards.py` | `reward_weight_curriculum()` 함수 추가 (~90줄) |
 | `env_cfg.py` | `SpotMicroRewardCurriculumCfg` 클래스 + `self.curriculum` 설정 |
 
-### 5.4 V18 PPO 하이퍼파라미터 (V15d와 동일)
+### 5.5 V18 PPO 하이퍼파라미터 (V15d와 동일)
 ```
 gamma=0.97, clip_param=0.1, lr=1e-4, schedule=fixed
 epochs=3, mini_batches=4, value_loss_coef=0.5, entropy=0.01
 network: [512, 256, 128] ELU, num_steps_per_env=48
 ```
 
-### 5.5 V18 훈련 명령어 (From Scratch)
+### 5.6 V18 훈련 명령어 (From Scratch)
 ```bash
 conda activate env_isaaclab
 cd D:\project\spot_micro_rl
@@ -147,7 +158,7 @@ C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\train.py \
 > **주의**: V18은 기존 체크포인트에서 resume 불가 — 반드시 from scratch 훈련.  
 > `common_step_counter`가 0에서 시작하므로 resume 시 Phase가 리셋됨.
 
-### 5.6 Play Test 명령어
+### 5.7 Play Test 명령어
 ```bash
 # 훈련 완료 후 (체크포인트 경로는 실제 타임스탬프로 교체)
 C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\play.py \

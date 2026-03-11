@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V20 학습 커리큘럼 + V21 운영/관측 체계
+**현재 상태**: V20 학습 커리큘럼 + V22 운영/아티팩트 체계, V23 준비 중
 
 ### 기술 스택
 
@@ -63,6 +63,8 @@ spot_micro_rl/
 │   ├── V19_ANALYSIS.md                 # V19 분석 리포트
 │   ├── V20_ANALYSIS.md                 # V20 분석 리포트
 │   ├── V21_ANALYSIS.md                 # V21 운영/관측 체계 리포트
+│   ├── V22_ANALYSIS.md                 # V22 멀티뷰/워크북/ZIP 아티팩트 리포트
+│   ├── V23_PLAN.md                     # V23 준비 문서
 │   └── V01-V08_HISTORY.md ~ V18_HISTORY.md  # 버전별 히스토리
 ├── assets/robots/spot_micro/           # SpotMicro URDF
 ├── logs/rsl_rl/spot_micro_flat/        # 훈련 로그 + 체크포인트
@@ -139,7 +141,7 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
 ```
 
 주요 play 옵션:
-- `--camera_view`: `side`, `front`, `rear`, `top_oblique`
+- `--camera_view`: `overview`, `side`, `front`, `rear`, `top`, `top_oblique`
 - `--camera_zoom`: 단일 로봇 근접 촬영 거리 조정
 - `--save_contact_csv`: LF/RF/LR/RR 접촉 상태와 force CSV 저장
 - `--contact_primary_mode`: `foot`, `toe`, `aggregate`
@@ -170,9 +172,12 @@ python scripts/training_supervisor.py
 ### 현재 운영 기준
 
 - 학습 버전: `V20`
-- 운영/관측 버전: `V21`
+- 운영/아티팩트 버전: `V22`
+- 다음 준비 버전: `V23`
 - 접촉 해석 기본값: `toe_link`
 - 참고 문서: `plan/V21_ANALYSIS.md`
+- 참고 문서: `plan/V22_ANALYSIS.md`
+- 준비 문서: `plan/V23_PLAN.md`
 
 ---
 
@@ -240,6 +245,7 @@ V21 이후 운영 해석 원칙:
 | V19 | 03-08 | Phase 가중치 튜닝, hard switch | ❌ critic shock (value_loss 1000) |
 | **V20** | **03-08~** | **Soft-ramp 선형 보간 커리큘럼** | 🔄 학습 운영 중 |
 | **V21** | **03-10~** | **gait-quality-first 모니터링, iter cadence supervisor, toe contact 진단** | ✅ 운영 반영 |
+| **V22** | **03-11~** | **멀티뷰 비디오 패키지, heartbeat workbook, ZIP artifact, top/front view 정리** | ✅ 검증 완료 |
 
 ### 핵심 교훈
 
@@ -266,6 +272,8 @@ python scripts/analyze_v20.py
 - `plan/V19_ANALYSIS.md`
 - `plan/V20_ANALYSIS.md`
 - `plan/V21_ANALYSIS.md`
+- `plan/V22_ANALYSIS.md`
+- `plan/V23_PLAN.md`
 
 ---
 

@@ -1,32 +1,35 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-03-10  
-**Project Status**: V20 학습 운영 중, V21 운영/관측 체계 정리 완료  
-**Current Iteration**: `logs/rsl_rl/spot_micro_flat/2026-03-10_07-43-51` 기준 10.8K 관측 완료
+**Last Updated**: 2026-03-11  
+**Project Status**: V20 학습 결과 검증 완료, V22 운영/아티팩트 체계 정리 완료, V23 준비 시작  
+**Current Iteration**: `logs/rsl_rl/spot_micro_flat/2026-03-11_02-39-01` 기준 15.0K 최종 검증 완료
 
 ---
 
-## 📌 Current Status Snapshot (V20/V21)
+## 📌 Current Status Snapshot (V20/V22, V23 준비)
 
 ### 학습 버전과 운영 버전 분리
 
 - **학습 버전 태그**: `TRAIN_VERSION = "V20"`
-- **운영/관측 버전**: **V21**
+- **운영/아티팩트 버전**: **V22**
+- **다음 준비 버전**: **V23**
 
-V21은 새 reward curriculum 버전이라기보다, V20 훈련을 더 정확하게 읽고 안전하게 운영하기 위한 관측/운영 레이어 정비다.
+V22는 새 reward curriculum 버전이라기보다, V20 훈련 결과를 더 정확하게 읽고 재검토하기 위한 운영/아티팩트 레이어 정비다. V23은 다시 학습 전략 쪽 의사결정으로 넘어가기 위한 준비 단계다.
 
 핵심 문서:
 
 - `plan/V20_ANALYSIS.md`: soft-ramp curriculum 자체 분석
 - `plan/V21_ANALYSIS.md`: heartbeat / supervisor / toe contact / diagnostics 정리
+- `plan/V22_ANALYSIS.md`: 멀티뷰 영상 패키지 / workbook / ZIP artifact 정리
+- `plan/V23_PLAN.md`: 다음 학습 버전 준비 문서
 
-### V21 핵심 변경
+### V22 핵심 변경
 
 1. heartbeat를 gait-quality-first KPI 체계로 재정렬
 2. supervisor가 heartbeat와 같은 KPI 언어로 영상 caption/요약을 생성
-3. supervisor 영상 수집 주기를 시간 기반에서 iteration 기반으로 전환
-4. flat contact 기준을 `foot_link`에서 `toe_link`로 전환
-5. `play.py`에 멀티뷰 카메라 preset과 contact CSV/JSON export 추가
+3. supervisor 멀티뷰 패키지를 `overview / side / front / rear / top`로 확장
+4. artifact ZIP에 `heartbeat_history.xlsx`와 정지 프레임 묶음을 포함
+5. 과거 런에도 TensorBoard fallback으로 workbook을 복구 가능하게 정리
 
 ### Heartbeat / Supervisor 역할
 
@@ -48,14 +51,10 @@ V21은 새 reward curriculum 버전이라기보다, V20 훈련을 더 정확하�
 
 ### 현재 운영 기준
 
-- 실운영 검증 런: `2026-03-10_07-43-51`
-- 실운영 점검 체크포인트: `model_10800.pt`
-- 재개 우선 체크포인트: `model_9600.pt`
-- 영상 cadence 목표:
-  - 초기 500 iter
-  - 중기 1000 iter
-  - 후기 1500 iter
-  - verdict 악화 시 urgent clip
+- 실운영 검증 런: `2026-03-11_02-39-01`
+- 최종 체크포인트: `model_15000.pt`
+- 최신 검증 ZIP: `clip_1005_iter15000_20260311_132732.zip`
+- V23 준비 문서: `plan/V23_PLAN.md`
 
 ---
 

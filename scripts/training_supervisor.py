@@ -550,7 +550,7 @@ def _read_ops_version() -> str:
         value = os.environ.get(key) or _env.get(key, "")
         if value:
             return value
-    return "V21"
+    return "V22"
 
 
 TRAIN_VERSION = _read_train_version()
