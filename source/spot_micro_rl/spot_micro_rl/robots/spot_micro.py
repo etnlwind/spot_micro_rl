@@ -48,17 +48,17 @@ SPOT_MICRO_CFG = ArticulationCfg(
         joint_pos={
             # leg=-0.5: upper leg 약간 기울임, foot=+1.2: 무릎 구부림
             # 높이 약 0.19m의 자연스러운 서있는 자세
-            # V19: 어깨 -0.1 rad (~5.7° outward splay) — SpotMicro 곤충형 기구학 반영
-            "front_left_shoulder": -0.1,
+            # V23: 어깨 과도 벌림을 줄인 phase-1 posture target
+            "front_left_shoulder": -0.04,
             "front_left_leg": -0.5,
             "front_left_foot": 1.2,
-            "front_right_shoulder": -0.1,
+            "front_right_shoulder": -0.04,
             "front_right_leg": -0.5,
             "front_right_foot": 1.2,
-            "rear_left_shoulder": -0.1,
+            "rear_left_shoulder": -0.04,
             "rear_left_leg": -0.5,
             "rear_left_foot": 1.2,
-            "rear_right_shoulder": -0.1,
+            "rear_right_shoulder": -0.04,
             "rear_right_leg": -0.5,
             "rear_right_foot": 1.2,
         },

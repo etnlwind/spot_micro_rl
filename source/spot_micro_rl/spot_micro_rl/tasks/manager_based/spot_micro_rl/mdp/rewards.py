@@ -170,6 +170,44 @@ def shoulder_neutral_penalty(
     return torch.sum(torch.square(shoulder_angles), dim=1)
 
 
+def stance_width_penalty(
+    env: ManagerBasedRLEnv,
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    front_max_width: float = 0.19,
+    rear_max_width: float = 0.21,
+    tolerance: float = 0.05,
+) -> torch.Tensor:
+    """Penalize overly wide left-right stance in the robot body frame.
+
+    V23 phase-1 only suppresses the too-wide failure mode. The metric is computed
+    in the body frame using yaw-only rotation so turning direction does not distort
+    the width estimate.
+    """
+    asset = env.scene[foot_cfg.name]
+    robot = env.scene[asset_cfg.name]
+
+    foot_pos_xy = asset.data.body_pos_w[:, foot_cfg.body_ids, :2]
+    root_pos_xy = robot.data.root_pos_w[:, :2].unsqueeze(1)
+    rel_xy = foot_pos_xy - root_pos_xy
+
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    cos_yaw = torch.cos(yaw).unsqueeze(1)
+    sin_yaw = torch.sin(yaw).unsqueeze(1)
+
+    body_y = -sin_yaw * rel_xy[:, :, 0] + cos_yaw * rel_xy[:, :, 1]
+
+    front_width = torch.abs(body_y[:, 0] - body_y[:, 1])
+    rear_width = torch.abs(body_y[:, 2] - body_y[:, 3])
+
+    front_excess = torch.clamp(front_width - front_max_width, min=0.0)
+    rear_excess = torch.clamp(rear_width - rear_max_width, min=0.0)
+
+    return torch.square(front_excess / (tolerance + 1e-6)) + torch.square(rear_excess / (tolerance + 1e-6))
+
+
 def leg_pose_symmetry(
     env: ManagerBasedRLEnv,
     front_leg_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -1226,6 +1264,7 @@ _CURRICULUM_PHASE_WEIGHTS: dict[int, dict[str, float]] = {
         "action_rate_l2": -0.3,
         "flat_orientation_l2": -1.0,
         "shoulder_neutral": -1.0,
+        "stance_width_penalty": 0.0,
         "dof_acc_l2": -5.0e-07,
         "joint_oscillation": -5.0,
         "stance_propulsion": 8.0,
@@ -1249,6 +1288,7 @@ _CURRICULUM_PHASE_WEIGHTS: dict[int, dict[str, float]] = {
         "action_rate_l2": -1.0,
         "flat_orientation_l2": -3.0,
         "shoulder_neutral": -3.0,
+        "stance_width_penalty": -1.0,
         "dof_acc_l2": -2.0e-06,
         "joint_oscillation": -15.0,
         "stance_propulsion": 15.0,
@@ -1272,6 +1312,7 @@ _CURRICULUM_PHASE_WEIGHTS: dict[int, dict[str, float]] = {
         "action_rate_l2": -3.0,
         "flat_orientation_l2": -7.0,
         "shoulder_neutral": -6.0,
+        "stance_width_penalty": -2.5,
         "dof_acc_l2": -5.0e-06,
         "joint_oscillation": -20.0,
         "stance_propulsion": 20.0,

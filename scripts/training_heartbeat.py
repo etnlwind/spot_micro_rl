@@ -435,6 +435,7 @@ def build_report_record(data: dict, run_name: str, cycle_num: int, report_kind: 
 
     gait_grade, gait_score, _gait_details = gait_quality_score(rewards)
     stab_grade, stab_score, _stab_details, stab_valid = motion_stability_score(rewards, gait_score)
+    posture_grade, posture_score, posture_details = posture_style_score(rewards)
     verdict, reasons, greens, yellows, reds = evaluate_training_window(current_iter, survival_pct or 0.0, bad_orient, rewards)
 
     primary_metrics = {}
@@ -447,6 +448,9 @@ def build_report_record(data: dict, run_name: str, cycle_num: int, report_kind: 
         "foot_clearance",
         "stride_length",
         "gait_cycle_period",
+        "shoulder_neutral",
+        "shoulder_symmetry",
+        "stance_width_penalty",
     ):
         primary_metrics[metric_name] = _safe_float(rewards.get(metric_name, 0.0))
 
@@ -480,14 +484,26 @@ def build_report_record(data: dict, run_name: str, cycle_num: int, report_kind: 
         "vel_err_yaw": _latest_scalar(data, "Metrics/base_velocity/error_vel_yaw"),
         "gait_grade": gait_grade,
         "gait_score": int(gait_score),
+        "gait_score_kind": "canonical",
+        "gait_score_estimated": None,
         "stability_grade": stab_grade,
         "stability_score": int(stab_score),
+        "stability_score_kind": "canonical",
+        "stability_score_estimated": None,
         "stability_valid": bool(stab_valid),
+        "posture_style_grade": posture_grade,
+        "posture_style_score": int(posture_score),
+        "posture_style_score_kind": "canonical",
+        "posture_style_score_estimated": None,
+        "posture_style_details": posture_details,
         "verdict": verdict,
         "reasons": reasons,
         "green_count": len(greens),
         "yellow_count": len(yellows),
         "red_count": len(reds),
+        "survival_pct_kind": "canonical",
+        "survival_pct_derived": None,
+        "fallback_source": "heartbeat_jsonl",
         "primary_metrics": primary_metrics,
         "penalties": penalties,
     }
@@ -578,6 +594,23 @@ PRIMARY_KPI_THRESHOLDS = {
 def classify_primary_kpi(metric_name, value):
     """주요 KPI를 3단계로 분류합니다."""
     warn_th, good_th = PRIMARY_KPI_THRESHOLDS[metric_name]
+    if value >= good_th:
+        return "🟢", "양호"
+    if value >= warn_th:
+        return "🟡", "형성중"
+    return "🔴", "미약"
+
+
+def classify_posture_metric(metric_name, value):
+    """V23 posture-style 지표를 3단계로 분류합니다."""
+    thresholds = {
+        "shoulder_neutral": (-0.60, -0.20),
+        "shoulder_symmetry": (-0.40, -0.10),
+        "stance_width_penalty": (-0.60, -0.15),
+        "standing_height": (0.10, 0.18),
+        "flat_orientation_l2": (-0.04, -0.015),
+    }
+    warn_th, good_th = thresholds[metric_name]
     if value >= good_th:
         return "🟢", "양호"
     if value >= warn_th:
@@ -842,6 +875,41 @@ def motion_stability_score(rewards, gait_score):
     return grade, score, details, True
 
 
+def posture_style_score(rewards):
+    """V23 phase-1 posture/style score (0-10)."""
+    score = 0
+    details = []
+
+    metrics = [
+        ("shoulder_neutral", "어깨중립"),
+        ("shoulder_symmetry", "어깨대칭"),
+        ("stance_width_penalty", "스탠스폭"),
+        ("standing_height", "기립높이"),
+        ("flat_orientation_l2", "자세수평"),
+    ]
+    for metric_name, label in metrics:
+        value = rewards.get(metric_name, 0.0)
+        icon, state = classify_posture_metric(metric_name, value)
+        if state == "양호":
+            score += 2
+        elif state == "형성중":
+            score += 1
+        details.append(f"{label} {icon} ({value:+.4f})")
+
+    if score >= 8:
+        grade = "🌟 A"
+    elif score >= 6:
+        grade = "⭐ B"
+    elif score >= 4:
+        grade = "🟡 C"
+    elif score >= 2:
+        grade = "🟠 D"
+    else:
+        grade = "🔴 F"
+
+    return grade, score, details
+
+
 def format_report(data, run_name, cycle_num):
     """상세 분석 리포트를 포맷합니다."""
     now = datetime.datetime.now().strftime("%H:%M:%S")
@@ -909,6 +977,9 @@ def format_report(data, run_name, cycle_num):
 
     # ── 동작 안정성 ──
     stab_grade, stab_score, stab_details, stab_valid = motion_stability_score(rewards, gait_score)
+
+    # ── posture/style ──
+    posture_grade, posture_score, posture_details = posture_style_score(rewards)
 
     # ── gait-quality-first 운영 KPI ──
     primary_kpi_defs = [
@@ -1085,6 +1156,11 @@ def format_report(data, run_name, cycle_num):
     # 복합 요약 (Gait X / Stability Y)
     if stab_valid:
         lines.append(f"  📊 종합: Gait {grade} / Stability {stab_grade}")
+    lines.append("")
+
+    lines.append(f"<b>🧍 posture/style {posture_grade} ({posture_score}/10)</b>")
+    for d in posture_details:
+        lines.append(f"  {d}")
     lines.append("")
 
     # 보행 보상 추세 (양수)

@@ -161,12 +161,15 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
     columns = [
         ("timestamp", "timestamp"),
         ("report_kind", "report_kind"),
+        ("fallback_source", "fallback_source"),
         ("cycle_num", "cycle_num"),
         ("iteration", "iteration"),
         ("milestone", "milestone"),
         ("mean_reward", "mean_reward"),
         ("mean_episode_length", "mean_episode_length"),
         ("survival_pct", "survival_pct"),
+        ("survival_pct_kind", "survival_pct_kind"),
+        ("survival_pct_derived", "survival_pct_derived"),
         ("timeout", "timeout"),
         ("bad_orientation", "bad_orientation"),
         ("value_function_loss", "value_function_loss"),
@@ -176,8 +179,16 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
         ("vel_err_yaw", "vel_err_yaw"),
         ("gait_grade", "gait_grade"),
         ("gait_score", "gait_score"),
+        ("gait_score_kind", "gait_score_kind"),
+        ("gait_score_estimated", "gait_score_estimated"),
         ("stability_grade", "stability_grade"),
         ("stability_score", "stability_score"),
+        ("stability_score_kind", "stability_score_kind"),
+        ("stability_score_estimated", "stability_score_estimated"),
+        ("posture_style_grade", "posture_style_grade"),
+        ("posture_style_score", "posture_style_score"),
+        ("posture_style_score_kind", "posture_style_score_kind"),
+        ("posture_style_score_estimated", "posture_style_score_estimated"),
         ("verdict", "verdict"),
         ("green_count", "green_count"),
         ("yellow_count", "yellow_count"),
@@ -190,6 +201,9 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
         ("foot_clearance", ("primary_metrics", "foot_clearance")),
         ("stride_length", ("primary_metrics", "stride_length")),
         ("gait_cycle_period", ("primary_metrics", "gait_cycle_period")),
+        ("shoulder_neutral", ("primary_metrics", "shoulder_neutral")),
+        ("shoulder_symmetry", ("primary_metrics", "shoulder_symmetry")),
+        ("stance_width_penalty", ("primary_metrics", "stance_width_penalty")),
         ("joint_vel_l2", ("penalties", "joint_vel_l2")),
         ("action_rate_l2", ("penalties", "action_rate_l2")),
         ("dof_acc_l2", ("penalties", "dof_acc_l2")),
@@ -208,6 +222,8 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
         ("trot_gait", "트로트 패턴", "트로트 패턴 보상이 실제로 성장하는지 확인합니다."),
         ("gait_score", "보행 점수", "heartbeat가 계산한 보행 품질 종합 점수입니다."),
         ("stability_score", "안정성 점수", "행동 거칠기와 자세 흔들림을 포함한 동작 안정성입니다."),
+        ("posture_style_score", "포즈 점수", "V23 posture-first 기준에서 어깨, 스탠스폭, 기립자세를 종합한 점수입니다."),
+        ("stance_width_penalty", "스탠스폭 페널티", "body-frame 기준으로 너무 넓은 spider stance를 얼마나 억제했는지 봅니다."),
         ("joint_vel_l2", "관절 속도 패널티", "절대값이 너무 커지면 진동성 행동 가능성이 큽니다."),
         ("action_rate_l2", "행동 변화 패널티", "정책 출력이 너무 출렁이는지 확인합니다."),
         ("flat_orientation_l2", "자세 기울기 패널티", "상체가 기울어져 균형이 무너지는지 보여줍니다."),
@@ -218,8 +234,19 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
             node = record.get(accessor[0], {}) or {}
             return node.get(accessor[1]) if isinstance(node, dict) else None
         value = record.get(accessor)
+        if value is None and isinstance(accessor, str):
+            fallback_map = {
+                "survival_pct": "survival_pct_derived",
+                "gait_score": "gait_score_estimated",
+                "stability_score": "stability_score_estimated",
+                "posture_style_score": "posture_style_score_estimated",
+            }
+            alt_key = fallback_map.get(accessor)
+            if alt_key:
+                value = record.get(alt_key)
         if isinstance(value, list):
             return " | ".join(str(item) for item in value)
+        return value
 
     def _as_number(value):
         if value is None or isinstance(value, bool):
@@ -282,6 +309,9 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
                 "foot_clearance",
                 "stride_length",
                 "gait_cycle_period",
+                "shoulder_neutral",
+                "shoulder_symmetry",
+                "stance_width_penalty",
             ):
                 primary_metrics[metric_name] = _get_scalar(f"Episode_Reward/{metric_name}", step)
 
@@ -296,16 +326,32 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
             ):
                 penalties[metric_name] = _get_scalar(f"Episode_Reward/{metric_name}", step)
 
+            max_ep = 10.0 * 50
+            if timeout and timeout > 0.95 and episode_length and episode_length > 1:
+                max_ep = episode_length
+            survival_pct_derived = (episode_length / max_ep) * 100 if episode_length and max_ep > 0 else None
+
+            reward_snapshot = {**primary_metrics, **penalties}
+            gait_grade_estimated, gait_score_estimated, _ = heartbeat.gait_quality_score(reward_snapshot)
+            stability_grade_estimated, stability_score_estimated, _stab_details, _stab_valid = heartbeat.motion_stability_score(
+                reward_snapshot,
+                gait_score_estimated,
+            )
+            posture_grade_estimated, posture_score_estimated, _ = heartbeat.posture_style_score(reward_snapshot)
+
             fallback_records.append(
                 {
                     "timestamp": f"iter_{step}",
                     "report_kind": "tensorboard_fallback",
+                    "fallback_source": "tensorboard_scalars",
                     "cycle_num": cycle_num,
                     "iteration": step,
                     "milestone": step,
                     "mean_reward": reward_value,
                     "mean_episode_length": episode_length,
                     "survival_pct": None,
+                    "survival_pct_kind": "derived",
+                    "survival_pct_derived": survival_pct_derived,
                     "timeout": timeout,
                     "bad_orientation": bad_orientation,
                     "value_function_loss": _get_scalar("Loss/value_function", step),
@@ -315,14 +361,25 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
                     "vel_err_yaw": _get_scalar("Metrics/base_velocity/error_vel_yaw", step),
                     "gait_grade": None,
                     "gait_score": None,
+                    "gait_score_kind": "estimated",
+                    "gait_score_estimated": gait_score_estimated,
                     "stability_grade": None,
                     "stability_score": None,
+                    "stability_score_kind": "estimated",
+                    "stability_score_estimated": stability_score_estimated,
+                    "posture_style_grade": None,
+                    "posture_style_score": None,
+                    "posture_style_score_kind": "estimated",
+                    "posture_style_score_estimated": posture_score_estimated,
                     "verdict": "TensorBoard fallback",
                     "green_count": None,
                     "yellow_count": None,
                     "red_count": None,
                     "primary_metrics": primary_metrics,
                     "penalties": penalties,
+                    "gait_grade_estimated": gait_grade_estimated,
+                    "stability_grade_estimated": stability_grade_estimated,
+                    "posture_style_grade_estimated": posture_grade_estimated,
                     "reasons": ["heartbeat JSONL 없음, TensorBoard 스칼라에서 재구성"],
                 }
             )
@@ -379,8 +436,18 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
     overview_sheet["B11"] = latest.get("iteration")
     overview_sheet["A12"] = "현재 판정"
     overview_sheet["B12"] = latest.get("verdict")
+    gait_label = latest.get("gait_grade") or latest.get("gait_grade_estimated") or "N/A"
+    gait_score = _resolve(latest, "gait_score")
+    stability_label = latest.get("stability_grade") or latest.get("stability_grade_estimated") or "N/A"
+    stability_score = _resolve(latest, "stability_score")
+    posture_label = latest.get("posture_style_grade") or latest.get("posture_style_grade_estimated") or "N/A"
+    posture_score = _resolve(latest, "posture_style_score")
     overview_sheet["A13"] = "현재 보행/안정성"
-    overview_sheet["B13"] = f"{latest.get('gait_grade')} ({latest.get('gait_score')}) / {latest.get('stability_grade')} ({latest.get('stability_score')})"
+    overview_sheet["B13"] = f"{gait_label} ({gait_score}) / {stability_label} ({stability_score})"
+    overview_sheet["A14"] = "현재 posture/style"
+    overview_sheet["B14"] = f"{posture_label} ({posture_score})"
+    overview_sheet["A15"] = "데이터 출처"
+    overview_sheet["B15"] = latest.get("fallback_source")
 
     overview_sheet["D6"] = "현재 핵심 해석"
     overview_sheet["D6"].font = Font(bold=True)
@@ -395,7 +462,7 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
     overview_sheet["E10"] = " | ".join(latest.get("reasons") or [])
     overview_sheet["E10"].alignment = Alignment(wrap_text=True)
 
-    metric_table_row = 16
+    metric_table_row = 18
     headers = ["지표", "현재값", "변화", "최고/최저 참고", "의미"]
     for col_index, header in enumerate(headers, start=1):
         cell = overview_sheet.cell(metric_table_row, col_index, header)
@@ -420,9 +487,9 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
         overview_sheet.cell(row, 5, description)
         overview_sheet.cell(row, 5).alignment = Alignment(wrap_text=True)
         overview_sheet.cell(row, 1).fill = emphasis_fill
-        if metric_name in {"forward_velocity", "diagonal_coupling", "foot_clearance", "gait_score", "stability_score"}:
+        if metric_name in {"forward_velocity", "diagonal_coupling", "foot_clearance", "gait_score", "stability_score", "posture_style_score"}:
             overview_sheet.cell(row, 2).fill = good_fill
-        if metric_name in {"joint_vel_l2", "action_rate_l2", "flat_orientation_l2"}:
+        if metric_name in {"joint_vel_l2", "action_rate_l2", "flat_orientation_l2", "stance_width_penalty"}:
             overview_sheet.cell(row, 2).fill = warn_fill
 
     # Trends sheet
@@ -451,6 +518,8 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
         "trot_gait",
         "gait_score",
         "stability_score",
+        "posture_style_score",
+        "stance_width_penalty",
         "joint_vel_l2",
         "action_rate_l2",
         "flat_orientation_l2",
@@ -480,8 +549,8 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
 
     _add_chart("Reward / Survival", "value", [2, 3], "O6")
     _add_chart("Gait Quality Core", "score / reward", [5, 6, 7, 8], "O22")
-    _add_chart("Gait / Stability Score", "score", [9, 10], "O38")
-    _add_chart("Penalty Watch", "penalty", [11, 12, 13], "O54")
+    _add_chart("Gait / Stability / Posture Score", "score", [9, 10, 11], "O38")
+    _add_chart("Penalty Watch", "penalty", [12, 13, 14, 15], "O54")
 
     # RawData sheet
     raw_sheet.merge_cells("A1:F1")
@@ -951,6 +1020,7 @@ def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
 
         gait_grade, gait_score, _gait_details = heartbeat.gait_quality_score(rewards)
         stab_grade, stab_score, _stab_details, stab_valid = heartbeat.motion_stability_score(rewards, gait_score)
+        posture_grade, posture_score, _posture_details = heartbeat.posture_style_score(rewards)
         verdict, reasons, _greens, _yellows, _reds = heartbeat.evaluate_training_window(
             current_iter, survival_pct, bad_orient, rewards
         )
@@ -975,8 +1045,8 @@ def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
             "gait_score": gait_score,
             "stability": stab_grade,
             "stability_score": stab_score,
-            "kpi_line": " | ".join(primary_items),
-            "caption_suffix": f"{verdict} | Gait {gait_grade} {gait_score}/13 | Stability {stability_label}",
+            "kpi_line": " | ".join(primary_items + [f"🧍포즈 {posture_grade} {posture_score}/10"]),
+            "caption_suffix": f"{verdict} | Gait {gait_grade} {gait_score}/13 | Stability {stability_label} | Posture {posture_grade} {posture_score}/10",
         })
     except Exception as e:
         write_log(f"KPI snapshot err: {e}")

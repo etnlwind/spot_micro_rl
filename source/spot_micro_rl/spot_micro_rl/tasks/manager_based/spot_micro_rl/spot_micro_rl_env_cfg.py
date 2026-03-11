@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V20"
+TRAIN_VERSION = "V23"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -345,15 +345,28 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             }
         )
 
-        # V19: 어깨 기구학 타깃 (SpotMicro는 곤충형 — 약간의 splay가 자연스러움)
-        # 어깨 roll축(X): 음수=바깥 벌림, -0.1 rad ≈ 5.7° outward splay
+        # V23: 어깨 기구학 타깃 재정렬
+        # 어깨 roll축(X): 음수=바깥 벌림, phase-1은 과도한 splay를 줄인 posture-first 설정 사용
         self.rewards.shoulder_neutral = RewTerm(
             func=custom_mdp.shoulder_neutral_penalty,
-            weight=-6.0,  # V19: -8→-6 (자연스러운 타깃이라 압력 완화)
+            weight=-4.0,
             params={
                 "shoulder_cfg": SceneEntityCfg("robot", joint_names=["front_left_shoulder", "front_right_shoulder", "rear_left_shoulder", "rear_right_shoulder"]),
-                "target_angles": [-0.1, -0.1, -0.1, -0.1],  # V19: 4개 어깨 모두 약간 바깥 벌림
+                "target_angles": [-0.04, -0.04, -0.04, -0.04],
             }
+        )
+
+        # V23: body-frame 기준 너무 넓은 stance 억제
+        self.rewards.stance_width_penalty = RewTerm(
+            func=custom_mdp.stance_width_penalty,
+            weight=-2.5,
+            params={
+                "foot_cfg": toe_body_cfg,
+                "asset_cfg": SceneEntityCfg("robot"),
+                "front_max_width": 0.19,
+                "rear_max_width": 0.21,
+                "tolerance": 0.05,
+            },
         )
 
         # 높이 비례 보상
