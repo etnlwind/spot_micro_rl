@@ -154,6 +154,18 @@ def _apply_camera_view_preset(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | D
     print(f"[INFO] Camera view preset: {view_name} | eye={eye} lookat={lookat}")
 
 
+def _configure_view_specific_visuals(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, view_name: str):
+    """Adjust per-view debug visuals without affecting training configs."""
+    if view_name != "top":
+        return
+
+    commands = getattr(env_cfg, "commands", None)
+    base_velocity = getattr(commands, "base_velocity", None) if commands is not None else None
+    if base_velocity is not None and hasattr(base_velocity, "debug_vis"):
+        base_velocity.debug_vis = False
+        print("[INFO] Top view: disabled base_velocity debug visualization")
+
+
 def _get_contact_body_names(contact_sensor):
     """Return sensor body names or deterministic placeholders."""
     body_names = list(getattr(contact_sensor, "body_names", []) or [])
@@ -290,6 +302,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _w, _h = (int(x) for x in _res_str.split("x"))
         env_cfg.viewer.resolution = (_w, _h)
         print(f"[INFO] Video resolution: {_w}x{_h}")
+        _configure_view_specific_visuals(env_cfg, args_cli.camera_view)
         _apply_camera_view_preset(env_cfg, args_cli.camera_view)
 
     # create isaac environment

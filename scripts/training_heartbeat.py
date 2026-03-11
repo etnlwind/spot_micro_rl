@@ -15,6 +15,7 @@ import urllib.parse
 import json
 import traceback
 import io
+import math
 
 # Windows cp949 콘솔에서 이모지 깨짐 방지
 if sys.stdout.encoding != "utf-8":
@@ -67,6 +68,7 @@ TB_PORT = _env.get("TB_PORT", "6006")
 TB_URL = f"http://{TAILSCALE_IP}:{TB_PORT}" if TAILSCALE_IP else ""
 TB_CURRENT_LINK = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", f"{_log_subdir}_current")
 FINAL_REPORT_MARKER_NAME = "heartbeat_final_report.sent"
+HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
 
 
 def update_tb_junction(run_dir: str):
@@ -378,6 +380,151 @@ def read_tfevents(run_dir, retries=3):
             if attempt < retries - 1:
                 time.sleep(2)
     return None
+
+
+def get_heartbeat_history_path(run_dir: str) -> str:
+    """Heartbeat 히스토리 JSONL 파일 경로를 반환합니다."""
+    return os.path.join(run_dir, HEARTBEAT_HISTORY_JSONL)
+
+
+def _safe_float(value, digits: int = 6):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return round(numeric, digits)
+
+
+def _latest_scalar(data: dict, tag: str):
+    values = data.get(tag, [])
+    if not values:
+        return None
+    return _safe_float(values[-1][1])
+
+
+def build_report_record(data: dict, run_name: str, cycle_num: int, report_kind: str = "milestone") -> dict | None:
+    """텔레그램 리포트와 별개로 저장할 heartbeat 구조화 레코드를 생성합니다."""
+    reward_vals = data.get("Train/mean_reward", [])
+    if not reward_vals:
+        return None
+
+    ep_len_vals = data.get("Train/mean_episode_length", [])
+    current_iter = int(reward_vals[-1][0])
+    current_reward = _safe_float(reward_vals[-1][1])
+    current_ep_len = _safe_float(ep_len_vals[-1][1]) if ep_len_vals else 0.0
+    current_milestone = max(0, (current_iter // 100) * 100)
+
+    timeout = _latest_scalar(data, "Episode_Termination/time_out") or 0.0
+    bad_orient = _latest_scalar(data, "Episode_Termination/bad_orientation") or 0.0
+
+    max_ep = 10.0 * 50
+    if timeout > 0.95 and current_ep_len and current_ep_len > 1:
+        max_ep = current_ep_len
+    elif ep_len_vals:
+        recent_max_ep = max(float(v) for _, v in ep_len_vals[-50:])
+        if recent_max_ep > max_ep * 0.6:
+            max_ep = recent_max_ep
+    survival_pct = _safe_float((current_ep_len / max_ep) * 100 if max_ep > 0 else 0.0)
+
+    rewards = {}
+    for tag, vals in data.items():
+        if tag.startswith("Episode_Reward/") and vals:
+            rewards[tag.replace("Episode_Reward/", "")] = float(vals[-1][1])
+
+    gait_grade, gait_score, _gait_details = gait_quality_score(rewards)
+    stab_grade, stab_score, _stab_details, stab_valid = motion_stability_score(rewards, gait_score)
+    verdict, reasons, greens, yellows, reds = evaluate_training_window(current_iter, survival_pct or 0.0, bad_orient, rewards)
+
+    primary_metrics = {}
+    for metric_name in (
+        "standing_height",
+        "forward_velocity",
+        "diagonal_coupling",
+        "trot_gait",
+        "rear_joint_velocity",
+        "foot_clearance",
+        "stride_length",
+        "gait_cycle_period",
+    ):
+        primary_metrics[metric_name] = _safe_float(rewards.get(metric_name, 0.0))
+
+    penalties = {}
+    for metric_name in (
+        "joint_vel_l2",
+        "action_rate_l2",
+        "dof_acc_l2",
+        "ang_vel_xy_l2",
+        "flat_orientation_l2",
+        "same_side_penalty",
+    ):
+        penalties[metric_name] = _safe_float(rewards.get(metric_name, 0.0))
+
+    record = {
+        "run_name": run_name,
+        "report_kind": report_kind,
+        "cycle_num": int(cycle_num),
+        "iteration": current_iter,
+        "milestone": current_milestone,
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "mean_reward": current_reward,
+        "mean_episode_length": current_ep_len,
+        "survival_pct": survival_pct,
+        "timeout": _safe_float(timeout),
+        "bad_orientation": _safe_float(bad_orient),
+        "value_function_loss": _latest_scalar(data, "Loss/value_function"),
+        "surrogate_loss": _latest_scalar(data, "Loss/surrogate"),
+        "noise_std": _latest_scalar(data, "Policy/mean_noise_std"),
+        "vel_err_xy": _latest_scalar(data, "Metrics/base_velocity/error_vel_xy"),
+        "vel_err_yaw": _latest_scalar(data, "Metrics/base_velocity/error_vel_yaw"),
+        "gait_grade": gait_grade,
+        "gait_score": int(gait_score),
+        "stability_grade": stab_grade,
+        "stability_score": int(stab_score),
+        "stability_valid": bool(stab_valid),
+        "verdict": verdict,
+        "reasons": reasons,
+        "green_count": len(greens),
+        "yellow_count": len(yellows),
+        "red_count": len(reds),
+        "primary_metrics": primary_metrics,
+        "penalties": penalties,
+    }
+    return record
+
+
+def append_report_record(run_dir: str, record: dict | None) -> None:
+    """Heartbeat 레코드를 JSONL로 누적 저장합니다."""
+    if not run_dir or not record:
+        return
+    history_path = get_heartbeat_history_path(run_dir)
+    try:
+        with open(history_path, "a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as err:
+        print(f"[HEARTBEAT] Failed to append report history: {err}")
+
+
+def load_report_history(run_dir: str) -> list[dict]:
+    """저장된 heartbeat 레코드를 로드합니다."""
+    history_path = get_heartbeat_history_path(run_dir)
+    records = []
+    if not os.path.isfile(history_path):
+        return records
+    try:
+        with open(history_path, "r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except Exception as err:
+        print(f"[HEARTBEAT] Failed to read report history: {err}")
+    return records
 
 
 def get_trend(values, window=50):
@@ -1373,6 +1520,7 @@ def send_final_heartbeat_report(run_dir: str, cycle_num: int = 0, force: bool = 
     current_iter = int(reward_vals[-1][0])
     run_name = os.path.basename(run_dir)
     final_report = format_report(data, run_name, cycle_num)
+    append_report_record(run_dir, build_report_record(data, run_name, cycle_num, report_kind="final"))
     final_header = (
         "🏁 <b>훈련 종료 Final Heartbeat</b>\n"
         f"📁 Run: <code>{run_name}</code>\n"
@@ -1685,6 +1833,7 @@ def main():
                     # 첫 번째 리포트는 즉시 전송
                     cycle += 1
                     report = format_report(data, run_name, cycle)
+                    append_report_record(run_dir, build_report_record(data, run_name, cycle, report_kind="startup"))
                     header = f"🤖 <b>Training Heartbeat 시작</b> (PID {os.getpid()})\n"
                     header += f"📊 매 {args.iter_step} iter마다 리포트\n"
                     header += "━" * 30 + "\n\n"
@@ -1711,6 +1860,7 @@ def main():
 
                     # 리포트 생성 & 전송
                     report = format_report(data, run_name, cycle)
+                    append_report_record(run_dir, build_report_record(data, run_name, cycle, report_kind="milestone"))
                     print(report)
                     send_telegram(report)
                     # 그래프 이미지 전송

@@ -133,6 +133,393 @@ def get_video_capture_specs(play_envs: int) -> list[dict]:
         },
     ]
 
+
+def export_heartbeat_history_xlsx(run_dir: str, out_path: str) -> str | None:
+    """Heartbeat JSONL 히스토리를 요약/트렌드/원본 탭이 있는 XLSX로 내보냅니다."""
+    try:
+        try:
+            import training_heartbeat as heartbeat
+        except ImportError:
+            from scripts import training_heartbeat as heartbeat
+
+        records = heartbeat.load_report_history(run_dir)
+        from openpyxl import Workbook
+        from openpyxl.chart import LineChart, Reference
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except Exception as err:
+        write_log(f"Heartbeat history load failed: {err}")
+        return None
+
+    columns = [
+        ("timestamp", "timestamp"),
+        ("report_kind", "report_kind"),
+        ("cycle_num", "cycle_num"),
+        ("iteration", "iteration"),
+        ("milestone", "milestone"),
+        ("mean_reward", "mean_reward"),
+        ("mean_episode_length", "mean_episode_length"),
+        ("survival_pct", "survival_pct"),
+        ("timeout", "timeout"),
+        ("bad_orientation", "bad_orientation"),
+        ("value_function_loss", "value_function_loss"),
+        ("surrogate_loss", "surrogate_loss"),
+        ("noise_std", "noise_std"),
+        ("vel_err_xy", "vel_err_xy"),
+        ("vel_err_yaw", "vel_err_yaw"),
+        ("gait_grade", "gait_grade"),
+        ("gait_score", "gait_score"),
+        ("stability_grade", "stability_grade"),
+        ("stability_score", "stability_score"),
+        ("verdict", "verdict"),
+        ("green_count", "green_count"),
+        ("yellow_count", "yellow_count"),
+        ("red_count", "red_count"),
+        ("standing_height", ("primary_metrics", "standing_height")),
+        ("forward_velocity", ("primary_metrics", "forward_velocity")),
+        ("diagonal_coupling", ("primary_metrics", "diagonal_coupling")),
+        ("trot_gait", ("primary_metrics", "trot_gait")),
+        ("rear_joint_velocity", ("primary_metrics", "rear_joint_velocity")),
+        ("foot_clearance", ("primary_metrics", "foot_clearance")),
+        ("stride_length", ("primary_metrics", "stride_length")),
+        ("gait_cycle_period", ("primary_metrics", "gait_cycle_period")),
+        ("joint_vel_l2", ("penalties", "joint_vel_l2")),
+        ("action_rate_l2", ("penalties", "action_rate_l2")),
+        ("dof_acc_l2", ("penalties", "dof_acc_l2")),
+        ("ang_vel_xy_l2", ("penalties", "ang_vel_xy_l2")),
+        ("flat_orientation_l2", ("penalties", "flat_orientation_l2")),
+        ("same_side_penalty", ("penalties", "same_side_penalty")),
+        ("reasons", "reasons"),
+    ]
+    key_metric_specs = [
+        ("mean_reward", "평균 보상", "전반적인 학습 성과의 요약값입니다."),
+        ("survival_pct", "생존율", "넘어지지 않고 버틴 비율로 안정성을 빠르게 보여줍니다."),
+        ("mean_episode_length", "평균 에피소드 길이", "버티는 시간 증가 여부를 보여줍니다."),
+        ("forward_velocity", "전진 속도 보상", "실제 전진 보행 의지가 살아나는지 보는 핵심 지표입니다."),
+        ("diagonal_coupling", "대각 커플링", "트로트 리듬 형성 여부를 보는 핵심 보행 지표입니다."),
+        ("foot_clearance", "발 들기", "다리가 바닥에 끌리지 않고 충분히 들리는지 보여줍니다."),
+        ("trot_gait", "트로트 패턴", "트로트 패턴 보상이 실제로 성장하는지 확인합니다."),
+        ("gait_score", "보행 점수", "heartbeat가 계산한 보행 품질 종합 점수입니다."),
+        ("stability_score", "안정성 점수", "행동 거칠기와 자세 흔들림을 포함한 동작 안정성입니다."),
+        ("joint_vel_l2", "관절 속도 패널티", "절대값이 너무 커지면 진동성 행동 가능성이 큽니다."),
+        ("action_rate_l2", "행동 변화 패널티", "정책 출력이 너무 출렁이는지 확인합니다."),
+        ("flat_orientation_l2", "자세 기울기 패널티", "상체가 기울어져 균형이 무너지는지 보여줍니다."),
+    ]
+
+    def _resolve(record: dict, accessor):
+        if isinstance(accessor, tuple):
+            node = record.get(accessor[0], {}) or {}
+            return node.get(accessor[1]) if isinstance(node, dict) else None
+        value = record.get(accessor)
+        if isinstance(value, list):
+            return " | ".join(str(item) for item in value)
+
+    def _as_number(value):
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _series_values(name: str) -> list[float | None]:
+        values = []
+        accessor = next((accessor for column_name, accessor in columns if column_name == name), None)
+        for record in records:
+            values.append(_as_number(_resolve(record, accessor)))
+        return values
+
+    def _delta_text(values: list[float | None], higher_is_better: bool = True) -> str:
+        filtered = [value for value in values if value is not None]
+        if len(filtered) < 2:
+            return "변화 데이터 부족"
+        delta = filtered[-1] - filtered[0]
+        if abs(delta) < 1e-9:
+            return "변화 거의 없음"
+        direction = "개선" if (delta > 0) == higher_is_better else "악화"
+        return f"{direction} ({delta:+.3f})"
+
+    def _record_from_tensorboard() -> list[dict]:
+        data = heartbeat.read_tfevents(run_dir)
+        if not data:
+            return []
+
+        reward_vals = data.get("Train/mean_reward", [])
+        if not reward_vals:
+            return []
+
+        scalar_maps = {
+            tag: {int(step): value for step, value in values}
+            for tag, values in data.items()
+        }
+
+        def _get_scalar(tag: str, step: int):
+            return scalar_maps.get(tag, {}).get(step)
+
+        fallback_records = []
+        for cycle_num, (step, reward_value) in enumerate(reward_vals, start=1):
+            step = int(step)
+            episode_length = _get_scalar("Train/mean_episode_length", step)
+            timeout = _get_scalar("Episode_Termination/time_out", step)
+            bad_orientation = _get_scalar("Episode_Termination/bad_orientation", step)
+
+            primary_metrics = {}
+            for metric_name in (
+                "standing_height",
+                "forward_velocity",
+                "diagonal_coupling",
+                "trot_gait",
+                "rear_joint_velocity",
+                "foot_clearance",
+                "stride_length",
+                "gait_cycle_period",
+            ):
+                primary_metrics[metric_name] = _get_scalar(f"Episode_Reward/{metric_name}", step)
+
+            penalties = {}
+            for metric_name in (
+                "joint_vel_l2",
+                "action_rate_l2",
+                "dof_acc_l2",
+                "ang_vel_xy_l2",
+                "flat_orientation_l2",
+                "same_side_penalty",
+            ):
+                penalties[metric_name] = _get_scalar(f"Episode_Reward/{metric_name}", step)
+
+            fallback_records.append(
+                {
+                    "timestamp": f"iter_{step}",
+                    "report_kind": "tensorboard_fallback",
+                    "cycle_num": cycle_num,
+                    "iteration": step,
+                    "milestone": step,
+                    "mean_reward": reward_value,
+                    "mean_episode_length": episode_length,
+                    "survival_pct": None,
+                    "timeout": timeout,
+                    "bad_orientation": bad_orientation,
+                    "value_function_loss": _get_scalar("Loss/value_function", step),
+                    "surrogate_loss": _get_scalar("Loss/surrogate", step),
+                    "noise_std": _get_scalar("Policy/mean_noise_std", step),
+                    "vel_err_xy": _get_scalar("Metrics/base_velocity/error_vel_xy", step),
+                    "vel_err_yaw": _get_scalar("Metrics/base_velocity/error_vel_yaw", step),
+                    "gait_grade": None,
+                    "gait_score": None,
+                    "stability_grade": None,
+                    "stability_score": None,
+                    "verdict": "TensorBoard fallback",
+                    "green_count": None,
+                    "yellow_count": None,
+                    "red_count": None,
+                    "primary_metrics": primary_metrics,
+                    "penalties": penalties,
+                    "reasons": ["heartbeat JSONL 없음, TensorBoard 스칼라에서 재구성"],
+                }
+            )
+        return fallback_records
+
+    if not records:
+        records = _record_from_tensorboard()
+    if not records:
+        return None
+
+    title_fill = PatternFill("solid", fgColor="1F4E78")
+    subtitle_fill = PatternFill("solid", fgColor="D9EAF7")
+    header_fill = PatternFill("solid", fgColor="DDEBF7")
+    emphasis_fill = PatternFill("solid", fgColor="FFF2CC")
+    good_fill = PatternFill("solid", fgColor="E2F0D9")
+    warn_fill = PatternFill("solid", fgColor="FCE4D6")
+
+    workbook = Workbook()
+    overview_sheet = workbook.active
+    overview_sheet.title = "Overview"
+    trends_sheet = workbook.create_sheet("Trends")
+    raw_sheet = workbook.create_sheet("RawData")
+
+    latest = records[-1]
+    first = records[0]
+
+    # Overview sheet
+    overview_sheet.merge_cells("A1:F1")
+    overview_sheet["A1"] = "SpotMicro Heartbeat Summary"
+    overview_sheet["A1"].font = Font(size=16, bold=True, color="FFFFFF")
+    overview_sheet["A1"].fill = title_fill
+    overview_sheet["A1"].alignment = Alignment(horizontal="center")
+
+    overview_sheet.merge_cells("A2:F4")
+    overview_sheet["A2"] = (
+        "이 탭은 보행 평가에서 중요한 지표만 먼저 보이도록 정리한 요약 탭입니다. "
+        "전진, 대각 커플링, 발 들기, 보행/안정성 점수처럼 gait quality 판단에 직접 쓰는 값들을 우선 배치했습니다. "
+        "아래 표의 '의미' 열을 보면 AI나 사람이 각 지표를 왜 보는지 바로 이해할 수 있습니다."
+    )
+    overview_sheet["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+
+    overview_sheet["A6"] = "런 개요"
+    overview_sheet["A6"].font = Font(bold=True)
+    overview_sheet["A6"].fill = subtitle_fill
+    overview_sheet["A7"] = "Run"
+    overview_sheet["B7"] = os.path.basename(run_dir)
+    overview_sheet["A8"] = "첫 리포트 시각"
+    overview_sheet["B8"] = first.get("timestamp")
+    overview_sheet["A9"] = "마지막 리포트 시각"
+    overview_sheet["B9"] = latest.get("timestamp")
+    overview_sheet["A10"] = "리포트 수"
+    overview_sheet["B10"] = len(records)
+    overview_sheet["A11"] = "현재 Iter"
+    overview_sheet["B11"] = latest.get("iteration")
+    overview_sheet["A12"] = "현재 판정"
+    overview_sheet["B12"] = latest.get("verdict")
+    overview_sheet["A13"] = "현재 보행/안정성"
+    overview_sheet["B13"] = f"{latest.get('gait_grade')} ({latest.get('gait_score')}) / {latest.get('stability_grade')} ({latest.get('stability_score')})"
+
+    overview_sheet["D6"] = "현재 핵심 해석"
+    overview_sheet["D6"].font = Font(bold=True)
+    overview_sheet["D6"].fill = subtitle_fill
+    overview_sheet["D7"] = "좋은 신호"
+    overview_sheet["E7"] = f"green {latest.get('green_count', 0)}"
+    overview_sheet["D8"] = "주의 신호"
+    overview_sheet["E8"] = f"yellow {latest.get('yellow_count', 0)}"
+    overview_sheet["D9"] = "위험 신호"
+    overview_sheet["E9"] = f"red {latest.get('red_count', 0)}"
+    overview_sheet["D10"] = "판정 사유"
+    overview_sheet["E10"] = " | ".join(latest.get("reasons") or [])
+    overview_sheet["E10"].alignment = Alignment(wrap_text=True)
+
+    metric_table_row = 16
+    headers = ["지표", "현재값", "변화", "최고/최저 참고", "의미"]
+    for col_index, header in enumerate(headers, start=1):
+        cell = overview_sheet.cell(metric_table_row, col_index, header)
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+
+    for row_offset, (metric_name, label, description) in enumerate(key_metric_specs, start=1):
+        row = metric_table_row + row_offset
+        values = _series_values(metric_name)
+        latest_value = next((value for value in reversed(values) if value is not None), None)
+        filtered = [value for value in values if value is not None]
+        best_ref = "-"
+        if filtered:
+            if metric_name in {"joint_vel_l2", "action_rate_l2", "flat_orientation_l2"}:
+                best_ref = f"최소절대 {min(filtered, key=lambda item: abs(item)):.3f}"
+            else:
+                best_ref = f"최고 {max(filtered):.3f}"
+        overview_sheet.cell(row, 1, label)
+        overview_sheet.cell(row, 2, latest_value)
+        overview_sheet.cell(row, 3, _delta_text(values, higher_is_better=metric_name not in {"joint_vel_l2", "action_rate_l2", "flat_orientation_l2"}))
+        overview_sheet.cell(row, 4, best_ref)
+        overview_sheet.cell(row, 5, description)
+        overview_sheet.cell(row, 5).alignment = Alignment(wrap_text=True)
+        overview_sheet.cell(row, 1).fill = emphasis_fill
+        if metric_name in {"forward_velocity", "diagonal_coupling", "foot_clearance", "gait_score", "stability_score"}:
+            overview_sheet.cell(row, 2).fill = good_fill
+        if metric_name in {"joint_vel_l2", "action_rate_l2", "flat_orientation_l2"}:
+            overview_sheet.cell(row, 2).fill = warn_fill
+
+    # Trends sheet
+    trends_sheet.merge_cells("A1:G1")
+    trends_sheet["A1"] = "Trend Charts"
+    trends_sheet["A1"].font = Font(size=16, bold=True, color="FFFFFF")
+    trends_sheet["A1"].fill = title_fill
+    trends_sheet["A1"].alignment = Alignment(horizontal="center")
+
+    trends_sheet.merge_cells("A2:G4")
+    trends_sheet["A2"] = (
+        "이 탭은 중요한 보행 평가 지표의 시간 변화만 따로 모아 보여줍니다. "
+        "보상 총합보다 forward_velocity, diagonal_coupling, foot_clearance, gait/stability score가 더 눈에 띄도록 배치했습니다. "
+        "raw 로그는 아래 차트용 표와 RawData 탭에 모두 남겨져 있습니다."
+    )
+    trends_sheet["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+
+    trend_columns = [
+        "iteration",
+        "mean_reward",
+        "survival_pct",
+        "mean_episode_length",
+        "forward_velocity",
+        "diagonal_coupling",
+        "foot_clearance",
+        "trot_gait",
+        "gait_score",
+        "stability_score",
+        "joint_vel_l2",
+        "action_rate_l2",
+        "flat_orientation_l2",
+    ]
+    trend_header_row = 6
+    for col_index, name in enumerate(trend_columns, start=1):
+        cell = trends_sheet.cell(trend_header_row, col_index, name)
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+    for row_index, record in enumerate(records, start=trend_header_row + 1):
+        for col_index, name in enumerate(trend_columns, start=1):
+            accessor = next((accessor for column_name, accessor in columns if column_name == name), None)
+            trends_sheet.cell(row_index, col_index, _resolve(record, accessor))
+
+    def _add_chart(title: str, y_axis: str, data_cols: list[int], anchor: str):
+        chart = LineChart()
+        chart.title = title
+        chart.y_axis.title = y_axis
+        chart.x_axis.title = "Iteration"
+        chart.height = 7
+        chart.width = 15
+        data = Reference(trends_sheet, min_col=min(data_cols), max_col=max(data_cols), min_row=trend_header_row, max_row=trend_header_row + len(records))
+        cats = Reference(trends_sheet, min_col=1, min_row=trend_header_row + 1, max_row=trend_header_row + len(records))
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(cats)
+        trends_sheet.add_chart(chart, anchor)
+
+    _add_chart("Reward / Survival", "value", [2, 3], "O6")
+    _add_chart("Gait Quality Core", "score / reward", [5, 6, 7, 8], "O22")
+    _add_chart("Gait / Stability Score", "score", [9, 10], "O38")
+    _add_chart("Penalty Watch", "penalty", [11, 12, 13], "O54")
+
+    # RawData sheet
+    raw_sheet.merge_cells("A1:F1")
+    raw_sheet["A1"] = "Raw Heartbeat Records"
+    raw_sheet["A1"].font = Font(size=16, bold=True, color="FFFFFF")
+    raw_sheet["A1"].fill = title_fill
+    raw_sheet["A1"].alignment = Alignment(horizontal="center")
+
+    raw_sheet.merge_cells("A2:F4")
+    raw_sheet["A2"] = (
+        "이 탭은 heartbeat가 저장한 원본 레코드를 거의 그대로 펼쳐놓은 탭입니다. "
+        "데이터량이 많아서 요약 가독성은 낮지만, 세부 분석이나 후처리를 위해 모든 컬럼을 분리해 두었습니다. "
+        "요약 판단은 Overview와 Trends를 먼저 보고, 상세 확인이 필요할 때만 이 탭을 보시면 됩니다."
+    )
+    raw_sheet["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+
+    raw_header_row = 6
+    for col_index, (column_name, _) in enumerate(columns, start=1):
+        cell = raw_sheet.cell(raw_header_row, col_index, column_name)
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+    for row_index, record in enumerate(records, start=raw_header_row + 1):
+        for col_index, (_, accessor) in enumerate(columns, start=1):
+            raw_sheet.cell(row_index, col_index, _resolve(record, accessor))
+
+    for sheet in (overview_sheet, trends_sheet, raw_sheet):
+        sheet.freeze_panes = "A6"
+        for column_cells in sheet.columns:
+            column_length = 0
+            column_letter = get_column_letter(column_cells[0].column)
+            for cell in column_cells:
+                value = "" if cell.value is None else str(cell.value)
+                column_length = max(column_length, min(len(value), 40))
+            sheet.column_dimensions[column_letter].width = max(12, column_length + 2)
+
+    overview_sheet.column_dimensions["E"].width = 52
+    overview_sheet.column_dimensions["B"].width = 18
+    trends_sheet.column_dimensions["A"].width = 14
+    raw_sheet.column_dimensions["AL"].width = 50
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    workbook.save(out_path)
+    return out_path
+
+
 # Training / ops version tags
 def _read_train_version() -> str:
     """env_cfg.py에서 TRAIN_VERSION 상수를 파싱."""
@@ -1149,9 +1536,17 @@ def create_clip_artifact_zip(
         "zip_frame_count": ZIP_FRAME_COUNT,
         "videos": {},
         "frames": {},
+        "heartbeat_history_xlsx": None,
         "kpi_snapshot": kpi_snapshot,
         "analysis": grade,
     }
+
+    heartbeat_xlsx_path = export_heartbeat_history_xlsx(
+        run_dir,
+        os.path.join(metrics_root, "heartbeat_history.xlsx"),
+    )
+    if heartbeat_xlsx_path:
+        manifest["heartbeat_history_xlsx"] = os.path.basename(heartbeat_xlsx_path)
 
     for spec in get_video_capture_specs(PLAY_ENVS):
         video_path = captured_videos.get(spec["key"])
