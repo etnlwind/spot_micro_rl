@@ -67,6 +67,7 @@ MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
 SHOW_APPROX_TIMELINE = str(_env.get("SHOW_APPROX_TIMELINE", "0")).strip().lower() in {"1", "true", "yes", "on"}
 MIN_SUPERVISOR_RESTART_INTERVAL_SEC = int(_env.get("MIN_SUPERVISOR_RESTART_INTERVAL_SEC", "120"))
 TRAINING_MISSING_GRACE_SEC = int(_env.get("TRAINING_MISSING_GRACE_SEC", "600"))
+TRAINING_ACTIVITY_STALE_SEC = int(_env.get("TRAINING_ACTIVITY_STALE_SEC", "180"))
 
 # TensorBoard remote access
 TAILSCALE_IP = _env.get("TAILSCALE_IP", "")
@@ -1723,24 +1724,45 @@ def _looks_like_training_cmdline(cmdline: str) -> bool:
     cmd_lower = cmdline.lower()
     if "training_heartbeat" in cmd_lower or "training_supervisor" in cmd_lower or "live_monitor" in cmd_lower:
         return False
-    return "scripts\\rsl_rl\\train.py" in cmd_lower or "scripts/rsl_rl/train.py" in cmd_lower
+    if "play.py" in cmd_lower or "analyze_training" in cmd_lower:
+        return False
+    return (
+        "scripts\\rsl_rl\\train.py" in cmd_lower
+        or "scripts/rsl_rl/train.py" in cmd_lower
+        or ("train.py" in cmd_lower and "spot_micro" in cmd_lower)
+    )
 
 
-def check_training_alive():
-    """실제 rsl_rl train.py 프로세스가 살아있는지 확인."""
+def get_run_activity_marker(run_dir):
+    """Return latest events file mtime/size for lightweight liveness checks."""
+    if not run_dir or not os.path.isdir(run_dir):
+        return (0.0, 0)
+    event_files = [path for path in os.listdir(run_dir) if path.startswith("events")]
+    if not event_files:
+        return (0.0, 0)
+    latest_path = max((os.path.join(run_dir, name) for name in event_files), key=os.path.getmtime)
+    try:
+        stat = os.stat(latest_path)
+        return (stat.st_mtime, stat.st_size)
+    except OSError:
+        return (0.0, 0)
+
+def check_training_alive(run_dir=None):
+    """실제 rsl_rl train.py 또는 최근 events 갱신 여부로 생존 확인."""
     my_pid = os.getpid()
     try:
         for proc in _iter_processes_safe(["pid", "name", "cmdline"]):
             try:
                 if proc.info["pid"] == my_pid:
                     continue
-                if proc.info["name"] and "python" not in proc.info["name"].lower():
-                    continue
                 cmdline = " ".join(proc.info["cmdline"] or [])
                 if _looks_like_training_cmdline(cmdline):
                     return True
             except (psutil.Error, PermissionError, OSError):
                 pass
+        marker_mtime, _marker_size = get_run_activity_marker(run_dir)
+        if marker_mtime > 0 and (time.time() - marker_mtime) <= TRAINING_ACTIVITY_STALE_SEC:
+            return True
         return False
     except Exception:
         # 오류 시 보수적으로 True 반환 (훈련 있다고 가정)
@@ -1862,7 +1884,7 @@ def main():
                 current_run_dir = args.run_dir if args.run_dir else find_latest_run()
                 run_complete = is_run_complete(current_run_dir)
                 # ── 훈련 프로세스 확인 ──
-                training_alive = check_training_alive()
+                training_alive = check_training_alive(current_run_dir)
                 if not training_alive:
                     # 유지보수 모드인지 확인
                     if check_maintenance_mode():

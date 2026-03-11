@@ -106,6 +106,7 @@ REMOTE_SAFE_COMMIT_MAX_FILES = int(_env.get("REMOTE_SAFE_COMMIT_MAX_FILES", "12"
 TRAIN_START_TIMEOUT_SEC = int(_env.get("TRAIN_START_TIMEOUT_SEC", "150"))
 UNEXPECTED_TRAIN_STOP_GRACE_SEC = int(_env.get("UNEXPECTED_TRAIN_STOP_GRACE_SEC", "90"))
 SUPERVISOR_RECOVERY_COOLDOWN_SEC = int(_env.get("SUPERVISOR_RECOVERY_COOLDOWN_SEC", "180"))
+TRAINING_ACTIVITY_STALE_SEC = int(_env.get("TRAINING_ACTIVITY_STALE_SEC", "180"))
 
 
 def _resolve_conda_activate_bat() -> str | None:
@@ -1804,7 +1805,7 @@ def start_fresh_training(task_name: str | None = None, train_envs: int | None = 
     write_log("Waiting for fresh training init (60s)...")
     time.sleep(60)
 
-    if not test_training_alive():
+    if not test_training_alive(get_latest_run_dir()):
         write_log("WARNING: Fresh training process not detected!")
         send_telegram("⚠️ 새 훈련 시작 후 프로세스 감지 실패! 확인 필요")
 
@@ -1957,17 +1958,89 @@ def _normalize_command(text: str) -> str:
     return token
 
 
+def _iter_process_cmdlines() -> list[tuple[int, str, str]]:
+    """Return (pid, process_name, cmdline) for processes with a readable command line."""
+    result = []
+    for proc in _iter_processes_safe(["pid", "name", "cmdline"]):
+        try:
+            cmdline = " ".join(proc.info["cmdline"] or [])
+            if not cmdline:
+                continue
+            result.append((proc.info["pid"], proc.info.get("name") or "", cmdline))
+        except (psutil.Error, PermissionError, OSError):
+            pass
+    return result
+
+
+def _looks_like_training_cmdline(cmdline: str) -> bool:
+    """훈련 런처/본체로 보이는 cmdline인지 판별."""
+    cmdline_l = cmdline.lower()
+    if "training_heartbeat" in cmdline_l or "training_supervisor" in cmdline_l:
+        return False
+    if "play.py" in cmdline_l or "analyze_training" in cmdline_l:
+        return False
+    return (
+        "scripts\\rsl_rl\\train.py" in cmdline_l
+        or "scripts/rsl_rl/train.py" in cmdline_l
+        or ("train.py" in cmdline_l and "spot_micro" in cmdline_l)
+    )
+
+
+def get_run_activity_marker(run_dir: str | None) -> tuple[float, int]:
+    """events 파일의 최신 mtime/size를 반환."""
+    if not run_dir or not os.path.isdir(run_dir):
+        return (0.0, 0)
+    event_files = [path for path in glob.glob(os.path.join(run_dir, "events*")) if os.path.isfile(path)]
+    if not event_files:
+        return (0.0, 0)
+    latest = max(event_files, key=os.path.getmtime)
+    try:
+        stat = os.stat(latest)
+        return (stat.st_mtime, stat.st_size)
+    except OSError:
+        return (0.0, 0)
+
+
+def has_recent_run_activity(run_dir: str | None, stale_after_sec: int = TRAINING_ACTIVITY_STALE_SEC) -> tuple[bool, int | None]:
+    """최근 events 파일 갱신이 있으면 훈련 활성으로 간주."""
+    marker_mtime, _marker_size = get_run_activity_marker(run_dir)
+    if marker_mtime <= 0:
+        return (False, None)
+    age_sec = max(0, int(time.time() - marker_mtime))
+    return (age_sec <= stale_after_sec, age_sec)
+
+
+def has_run_activity_advanced(run_dir: str | None, baseline_marker: tuple[float, int]) -> bool:
+    """resume 직전 대비 events 파일이 실제로 전진했는지 확인."""
+    baseline_mtime, baseline_size = baseline_marker
+    current_mtime, current_size = get_run_activity_marker(run_dir)
+    if current_mtime <= 0:
+        return False
+    if current_mtime > baseline_mtime + 0.5:
+        return True
+    return current_size > baseline_size
+
+
 def get_training_process_pids() -> list[int]:
-    pids = []
-    for pid, cmdline in _get_python_pids_with_cmdline():
-        cmdline_l = cmdline.lower()
-        if "scripts\\rsl_rl\\train.py" in cmdline_l or "scripts/rsl_rl/train.py" in cmdline_l:
-            pids.append(pid)
-    return sorted(set(pids))
+    return sorted({
+        pid
+        for pid, _name, cmdline in _iter_process_cmdlines()
+        if _looks_like_training_cmdline(cmdline)
+    })
 
 
-def test_training_alive() -> bool:
-    return bool(get_training_process_pids())
+def get_training_status(run_dir: str | None = None) -> dict:
+    pids = get_training_process_pids()
+    if pids:
+        return {"alive": True, "source": "process", "pids": pids, "activity_age_sec": None}
+    recent_activity, age_sec = has_recent_run_activity(run_dir)
+    if recent_activity:
+        return {"alive": True, "source": "events", "pids": [], "activity_age_sec": age_sec}
+    return {"alive": False, "source": "none", "pids": [], "activity_age_sec": age_sec}
+
+
+def test_training_alive(run_dir: str | None = None) -> bool:
+    return bool(get_training_status(run_dir)["alive"])
 
 
 def format_status_message(run_dir: str | None = None, checkpoint: str | None = None) -> str:
@@ -1975,15 +2048,22 @@ def format_status_message(run_dir: str | None = None, checkpoint: str | None = N
     checkpoint = checkpoint or (get_latest_checkpoint(run_dir) if run_dir else None)
     iter_num = get_checkpoint_iter(checkpoint) if checkpoint else 0
     gpu_mem = get_gpu_memory_mb()
-    training_pids = get_training_process_pids()
+    training_status = get_training_status(run_dir)
     heartbeat_alive = test_heartbeat_alive()
     pause_state = "paused" if is_telegram_paused() else "running"
     chat_status = _get_chat_storage_status()
     runtime_state = load_supervisor_state()
+    if training_status["source"] == "process":
+        training_line = f"alive {training_status['pids']}"
+    elif training_status["source"] == "events":
+        age = training_status["activity_age_sec"]
+        training_line = f"alive (recent events, {age}s ago)"
+    else:
+        training_line = "stopped"
     lines = [
         "📡 Supervisor 상태",
         f"- mode: {pause_state}",
-        f"- training: {'alive' if training_pids else 'stopped'} {training_pids if training_pids else ''}",
+        f"- training: {training_line}",
         f"- heartbeat: {'alive' if heartbeat_alive else 'missing'}",
         f"- supervisor_pid: {os.getpid()}",
         f"- gpu_mem_mb: {gpu_mem}",
@@ -2143,7 +2223,7 @@ def handle_telegram_command(text: str, run_dir: str | None = None, checkpoint: s
     if command in {"/pause", "pause"}:
         already_paused = is_telegram_paused()
         set_telegram_pause_flag()
-        if test_training_alive():
+        if test_training_alive(run_dir):
             send_telegram("⏸️ Telegram pause 요청 수신. 학습 프로세스를 정지합니다.")
             set_maintenance_flag()
             try:
@@ -2158,7 +2238,7 @@ def handle_telegram_command(text: str, run_dir: str | None = None, checkpoint: s
         return True, "pause"
 
     if command in {"/resume", "resume"}:
-        if test_training_alive():
+        if test_training_alive(run_dir):
             remove_telegram_pause_flag()
             send_telegram("▶️ 이미 학습 프로세스가 실행 중입니다. pause 플래그만 해제했습니다.")
             return True, "resume-already-running"
@@ -2682,21 +2762,32 @@ def restart_heartbeat():
         return False
 
 
-def wait_for_training_start(timeout_sec: int = TRAIN_START_TIMEOUT_SEC, poll_sec: int = 5) -> list[int]:
-    """train.py 프로세스가 실제로 올라올 때까지 대기."""
+def wait_for_training_start(
+    run_dir: str | None = None,
+    baseline_marker: tuple[float, int] | None = None,
+    timeout_sec: int = TRAIN_START_TIMEOUT_SEC,
+    poll_sec: int = 5,
+) -> dict:
+    """훈련 프로세스 또는 events 갱신이 감지될 때까지 대기."""
     deadline = time.time() + timeout_sec
     next_progress_log = 0.0
+    baseline_marker = baseline_marker or (0.0, 0)
     while time.time() < deadline:
-        pids = get_training_process_pids()
-        if pids:
-            return pids
+        status = get_training_status(run_dir)
+        if status["source"] == "process":
+            return status
+        if run_dir and has_run_activity_advanced(run_dir, baseline_marker):
+            current_status = get_training_status(run_dir)
+            current_status["alive"] = True
+            current_status["source"] = "events-progress"
+            return current_status
         now = time.time()
         if now >= next_progress_log:
             remaining = max(0, int(deadline - now))
-            write_log(f"Waiting for training process... {remaining}s left")
+            write_log(f"Waiting for training activity... {remaining}s left")
             next_progress_log = now + 15
         time.sleep(poll_sec)
-    return []
+    return {"alive": False, "source": "timeout", "pids": [], "activity_age_sec": None}
 
 
 # ============================================================
@@ -3155,6 +3246,7 @@ def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int |
     run_name = os.path.basename(run_dir)
     cp_name = os.path.basename(checkpoint_path)
     iter_num = get_checkpoint_iter(checkpoint_path)
+    baseline_marker = get_run_activity_marker(run_dir)
 
     update_supervisor_state("resume-pre-clean", run=run_name, checkpoint=cp_name, iteration=iter_num)
     write_log("Pre-resume cleanup...")
@@ -3181,32 +3273,38 @@ def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int |
         f'--resume --load_run={run_name} --checkpoint={cp_name}'
     )
     write_log(f"train_cmd: {train_cmd}")
-    _popen_hidden_cmd(
+    launcher = _popen_hidden_cmd(
         train_cmd,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
 
     write_log(f"Waiting for train.py init ({TRAIN_START_TIMEOUT_SEC}s timeout)...")
-    pids = wait_for_training_start()
-    if not pids:
-        write_log("ERROR: Training process not detected after resume.")
+    training_status = wait_for_training_start(run_dir=run_dir, baseline_marker=baseline_marker)
+    if not training_status["alive"]:
+        launcher_code = launcher.poll()
+        if launcher_code is not None:
+            write_log(f"Launcher exited before training detection (returncode={launcher_code})")
+        write_log("ERROR: Training activity not detected after resume.")
         update_supervisor_state(
             "resume-failed",
             run=run_name,
             checkpoint=cp_name,
             iteration=iter_num,
-            reason="train-process-missing",
+            reason=f"training-missing:{training_status['source']}",
         )
         send_telegram(
             f"⚠️ 훈련 재개 실패\n"
             f"- run: {run_name}\n"
             f"- checkpoint: {cp_name}\n"
             f"- iter: {iter_num:,}\n"
-            f"- reason: train.py process not detected within {TRAIN_START_TIMEOUT_SEC}s"
+            f"- reason: training activity not detected within {TRAIN_START_TIMEOUT_SEC}s"
         )
         return False
 
-    write_log(f"Training running: PID={','.join(map(str, pids))}")
+    if training_status["source"] == "process":
+        write_log(f"Training running via process detection: PID={','.join(map(str, training_status['pids']))}")
+    else:
+        write_log(f"Training running via {training_status['source']} detection")
     time.sleep(15)
     gpu_mem = get_gpu_memory_mb()
     if gpu_mem > 0:
@@ -3313,7 +3411,7 @@ def main():
                 process_pending_telegram_commands(run_dir=get_latest_run_dir())
                 sleep_with_command_poll(SUPERVISOR_POLL_SECONDS, run_dir=get_latest_run_dir())
 
-                training_alive = test_training_alive()
+                training_alive = test_training_alive(get_latest_run_dir())
                 if training_alive:
                     unexpected_training_stop_since = 0.0
 
