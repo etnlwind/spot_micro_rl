@@ -129,14 +129,27 @@ PRIMARY_KPI_THRESHOLDS = {
 _tg_offset: int | None = None
 
 
+def _normalize_windows_path(raw_path: str | None) -> str | None:
+    if raw_path is None:
+        return None
+    candidate = str(raw_path).strip()
+    if not candidate:
+        return None
+    candidate = candidate.replace('\\"', '"').replace("\\'", "'").strip()
+    if (candidate.startswith('"') and candidate.endswith('"')) or (candidate.startswith("'") and candidate.endswith("'")):
+        candidate = candidate[1:-1].strip()
+    return os.path.abspath(candidate) if candidate else None
+
+
 def _resolve_conda_activate_bat() -> str | None:
     candidates = [
         _env.get("CONDA_ACTIVATE_BAT"),
         os.path.join(os.path.dirname(os.environ.get("CONDA_EXE", "")), "activate.bat") if os.environ.get("CONDA_EXE") else None,
     ]
-    for candidate in candidates:
+    for raw_candidate in candidates:
+        candidate = _normalize_windows_path(raw_candidate)
         if candidate and os.path.isfile(candidate):
-            return os.path.abspath(candidate)
+            return candidate
     return None
 
 
@@ -1372,18 +1385,20 @@ def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int, log_p
             if tail:
                 write_log(f"Recording {spec['key']} log tail:\n{tail}", log_path)
             continue
+        log_tail_text = ""
         if rc not in (0, None):
             write_log(f"Recording {spec['key']} exited with rc={rc} after {elapsed:.1f}s", log_path)
-            tail = _read_text_tail(capture_log_path)
-            if tail:
-                write_log(f"Recording {spec['key']} log tail:\n{tail}", log_path)
+            log_tail_text = _read_text_tail(capture_log_path)
+            if log_tail_text:
+                write_log(f"Recording {spec['key']} log tail:\n{log_tail_text}", log_path)
 
         latest_video = _find_updated_play_video(run_dir, pre_videos)
         if not latest_video:
             write_log(f"Recording {spec['key']} failed: no new or updated MP4 was detected", log_path)
-            tail = _read_text_tail(capture_log_path)
-            if tail:
-                write_log(f"Recording {spec['key']} log tail:\n{tail}", log_path)
+            if not log_tail_text:
+                log_tail_text = _read_text_tail(capture_log_path)
+                if log_tail_text:
+                    write_log(f"Recording {spec['key']} log tail:\n{log_tail_text}", log_path)
             continue
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
