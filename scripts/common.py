@@ -1183,12 +1183,12 @@ def command_variants() -> set[str]:
 def help_text() -> str:
     return (
         "🛠 명령\n"
-        "- start : 훈련 시작 또는 latest checkpoint 재개\n"
-        "- stop : 현재 훈련만 중단\n"
-        "- status : 현재 상태 조회\n"
-        "- report : training 중이면 최신 zip, stopped면 현재 checkpoint 기준 새 zip 생성\n"
-        "- front / rear / top / side : training 중이면 최신 영상, stopped면 현재 checkpoint 기준 새 영상 생성\n"
-        "- help : 명령 목록"
+        "/start : 훈련 시작 또는 latest checkpoint 재개\n"
+        "/stop : 현재 훈련만 중단\n"
+        "/status : 현재 상태 조회\n"
+        "/report : training 중이면 최신 zip, stopped면 현재 checkpoint 기준 새 zip 생성\n"
+        "/front, /rear, /top, /side : training 중이면 최신 영상, stopped면 현재 checkpoint 기준 새 영상 생성\n"
+        "/help : 명령 목록"
     )
 
 

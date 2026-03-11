@@ -12,6 +12,48 @@ else:
     import common
 
 
+def _build_command_ack(command: str) -> str:
+    run_dir, checkpoint = common.resolve_context()
+    run_name = os.path.basename(run_dir) if run_dir else "N/A"
+    checkpoint_name = os.path.basename(checkpoint) if checkpoint else "N/A"
+    training_running = common.is_training_running()
+    if command == "start":
+        return "✅ start 명령 수신\n- latest checkpoint 기준으로 훈련 시작/재개를 시도합니다."
+    if command == "stop":
+        return "✅ stop 명령 수신\n- 현재 훈련 프로세스를 중단합니다."
+    if command == "status":
+        return "✅ status 명령 수신\n- 현재 상태를 조회합니다."
+    if command == "help":
+        return "✅ help 명령 수신\n- 명령 목록을 전송합니다."
+    if command == "report":
+        if training_running:
+            return (
+                "✅ report 명령 수신\n"
+                f"- run: {run_name}\n"
+                "- 훈련 중이므로 최신 ZIP 리포트를 찾아 전송합니다."
+            )
+        return (
+            "✅ report 명령 수신\n"
+            f"- run: {run_name}\n"
+            f"- checkpoint: {checkpoint_name}\n"
+            "- 현재 checkpoint 기준으로 영상/분석/ZIP 리포트를 생성합니다."
+        )
+    if command in {"front", "rear", "top", "side"}:
+        if training_running:
+            return (
+                f"✅ {command} 명령 수신\n"
+                f"- run: {run_name}\n"
+                f"- 훈련 중이므로 최신 {command} 영상을 찾아 전송합니다."
+            )
+        return (
+            f"✅ {command} 명령 수신\n"
+            f"- run: {run_name}\n"
+            f"- checkpoint: {checkpoint_name}\n"
+            f"- 현재 checkpoint 기준으로 {command} 영상을 생성합니다."
+        )
+    return f"✅ {command} 명령 수신"
+
+
 def _handle_report_command(run_dir: str, checkpoint: str) -> None:
     if common.is_training_running():
         zip_path = common.find_latest_report_zip(run_dir)
@@ -123,6 +165,7 @@ def main() -> None:
                     command = common.normalize_command(text)
                     if command not in common.command_variants():
                         continue
+                    common.send_text(_build_command_ack(command), common.SUPERVISOR_LOG)
                     handle_command(command)
             except Exception as err:
                 common.update_state(last_error=str(err))
