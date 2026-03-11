@@ -60,11 +60,13 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
 _log_subdir = _env.get("LOG_SUBDIR", "spot_micro_flat")
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", _log_subdir)
 PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_heartbeat.pid")
+HEARTBEAT_LOG = os.path.join(PROJECT_ROOT, "logs", "heartbeat_log.txt")
 MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
 USER_STOP_FLAG = os.path.join(PROJECT_ROOT, "logs", "user_stop.flag")
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
 SHOW_APPROX_TIMELINE = str(_env.get("SHOW_APPROX_TIMELINE", "0")).strip().lower() in {"1", "true", "yes", "on"}
 MIN_SUPERVISOR_RESTART_INTERVAL_SEC = int(_env.get("MIN_SUPERVISOR_RESTART_INTERVAL_SEC", "120"))
+TRAINING_MISSING_GRACE_SEC = int(_env.get("TRAINING_MISSING_GRACE_SEC", "600"))
 
 # TensorBoard remote access
 TAILSCALE_IP = _env.get("TAILSCALE_IP", "")
@@ -73,6 +75,19 @@ TB_URL = f"http://{TAILSCALE_IP}:{TB_PORT}" if TAILSCALE_IP else ""
 TB_CURRENT_LINK = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", f"{_log_subdir}_current")
 FINAL_REPORT_MARKER_NAME = "heartbeat_final_report.sent"
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
+
+
+def write_log(msg: str):
+    """Heartbeat 로그를 콘솔과 파일에 동시 기록."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line)
+    try:
+        os.makedirs(os.path.dirname(HEARTBEAT_LOG), exist_ok=True)
+        with open(HEARTBEAT_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def update_tb_junction(run_dir: str):
@@ -1820,7 +1835,7 @@ def main():
     # 중복 실행 방지
     acquire_lock()
 
-    print(f"🤖 Training Heartbeat started | iter_step={args.iter_step} | poll={args.poll}s | PID={os.getpid()}")
+    write_log(f"🤖 Training Heartbeat started | iter_step={args.iter_step} | poll={args.poll}s | PID={os.getpid()}")
     # 시작 알림은 첫 리포트에 포함 (별도 메시지 보내지 않음)
 
     cycle = 0
@@ -1829,6 +1844,8 @@ def main():
     supervisor_alert_sent = False  # Supervisor 사망 알림 중복 방지
     maintenance_logged = False  # 유지보수 모드 로그 중복 방지
     exit_notice = "👋 <b>Training Heartbeat 종료</b>"
+    training_missing_since = 0.0
+    training_missing_logged_minute = -1
 
     try:
         if args.send_final_now:
@@ -1850,33 +1867,60 @@ def main():
                     # 유지보수 모드인지 확인
                     if check_maintenance_mode():
                         if not maintenance_logged:
-                            print(f"[{now}] Maintenance mode — Supervisor가 녹화/분석 중. 대기...")
+                            write_log("Maintenance mode — Supervisor가 녹화/분석 중. 대기...")
                             maintenance_logged = True
+                        training_missing_since = 0.0
+                        training_missing_logged_minute = -1
                         time.sleep(args.poll)
                         continue
                     else:
                         if run_complete:
                             final_report_sent = send_final_heartbeat_report(run_dir=current_run_dir, cycle_num=cycle + 1)
                             if final_report_sent:
-                                print(f"[{now}] Final heartbeat delivered for completed run.")
+                                write_log("Final heartbeat delivered for completed run.")
                             else:
-                                print(f"[{now}] Completed run already reported. Exiting quietly.")
+                                write_log("Completed run already reported. Exiting quietly.")
                             exit_notice = None
+                        elif check_supervisor_alive():
+                            if training_missing_since <= 0:
+                                training_missing_since = time.time()
+                                training_missing_logged_minute = -1
+                                write_log(
+                                    f"Training process missing but supervisor alive. Waiting for recovery up to {TRAINING_MISSING_GRACE_SEC}s."
+                                )
+                            missing_for = int(time.time() - training_missing_since)
+                            missing_minute = missing_for // 60
+                            if missing_minute != training_missing_logged_minute:
+                                training_missing_logged_minute = missing_minute
+                                if missing_for < TRAINING_MISSING_GRACE_SEC:
+                                    write_log(
+                                        f"Training still missing ({missing_for}s). Supervisor alive, heartbeat stays active."
+                                    )
+                                else:
+                                    write_log(
+                                        f"Training still missing after grace ({missing_for}s). Supervisor alive, keeping heartbeat for remote diagnostics."
+                                    )
+                            time.sleep(args.poll)
+                            continue
                         else:
                             exit_notice = "🛑 <b>훈련 프로세스 없음!</b>\n훈련이 종료되었거나 크래시 발생"
-                        print("No training process found!")
+                        write_log("No training process found!")
                         break
                 else:
                     maintenance_logged = False  # 훈련 복귀 시 리셋
+                    if training_missing_since > 0:
+                        write_log(f"Training process recovered after {int(time.time() - training_missing_since)}s.")
+                    training_missing_since = 0.0
+                    training_missing_logged_minute = -1
 
                 # ── Supervisor 워치독 (훈련 생존 중일 때만 자동 재시작) ──
                 if not check_supervisor_alive():
                     if check_user_stop():
-                        print(f"[{now}] Supervisor stopped by user (user_stop.flag exists). Skipping auto-restart.")
+                        write_log("Supervisor stopped by user (user_stop.flag exists). Skipping auto-restart.")
                     elif run_complete:
-                        print(f"[{now}] Completed run detected. Skipping supervisor auto-restart.")
+                        write_log("Completed run detected. Skipping supervisor auto-restart.")
                     elif not supervisor_alert_sent:
-                        print(f"[{now}] WARNING: Supervisor not alive! Attempting auto-restart...")
+                        write_log("WARNING: Supervisor not alive! Attempting auto-restart...")
                         send_telegram("⚠️ <b>Training Supervisor 감지 불가!</b>\n자동 재시작 시도 중...")
                         if restart_supervisor():
                             supervisor_alert_sent = False  # 재시작 성공 — 다음 사이클 정상 감시
@@ -1885,13 +1929,13 @@ def main():
                 else:
                     if supervisor_alert_sent:
                         send_telegram("✅ <b>Training Supervisor 복구 확인</b>")
-                        print(f"[{now}] Supervisor recovered.")
+                        write_log("Supervisor recovered.")
                     supervisor_alert_sent = False
 
                 # 런 디렉토리 찾기
                 run_dir = current_run_dir
                 if not run_dir or not os.path.isdir(run_dir):
-                    print(f"Run dir not found: {run_dir}")
+                    write_log(f"Run dir not found: {run_dir}")
                     time.sleep(args.poll)
                     continue
 
@@ -1906,7 +1950,7 @@ def main():
                 # TensorBoard 읽기 (재시도 포함)
                 data = read_tfevents(run_dir)
                 if not data:
-                    print(f"[{now}] No TF data yet, polling...")
+                    write_log("No TF data yet, polling...")
                     time.sleep(args.poll)
                     continue
 
@@ -1968,7 +2012,7 @@ def main():
 
             except Exception as e:
                 err_msg = f"❌ Monitor error (cycle #{cycle}): {e}\n{traceback.format_exc()[-300:]}"
-                print(err_msg)
+                write_log(err_msg)
                 send_telegram(err_msg)
 
             time.sleep(args.poll)
@@ -1978,7 +2022,7 @@ def main():
 
     if exit_notice:
         send_telegram(exit_notice)
-    print("Heartbeat exited.")
+    write_log("Heartbeat exited.")
 
 
 if __name__ == "__main__":

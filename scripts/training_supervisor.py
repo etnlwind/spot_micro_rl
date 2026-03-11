@@ -103,6 +103,9 @@ ZIP_IMAGE_QUALITY = int(_env.get("ZIP_IMAGE_QUALITY", "78"))
 TELEGRAM_REMOTE_ACTIONS_ENABLED = str(_env.get("TELEGRAM_REMOTE_ACTIONS_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
 TELEGRAM_REMOTE_ACTION_TIMEOUT_SEC = int(_env.get("TELEGRAM_REMOTE_ACTION_TIMEOUT_SEC", "120"))
 REMOTE_SAFE_COMMIT_MAX_FILES = int(_env.get("REMOTE_SAFE_COMMIT_MAX_FILES", "12"))
+TRAIN_START_TIMEOUT_SEC = int(_env.get("TRAIN_START_TIMEOUT_SEC", "150"))
+UNEXPECTED_TRAIN_STOP_GRACE_SEC = int(_env.get("UNEXPECTED_TRAIN_STOP_GRACE_SEC", "90"))
+SUPERVISOR_RECOVERY_COOLDOWN_SEC = int(_env.get("SUPERVISOR_RECOVERY_COOLDOWN_SEC", "180"))
 
 
 def _resolve_conda_activate_bat() -> str | None:
@@ -711,6 +714,7 @@ PHASE2_END_ITER = int(_env.get("PHASE2_END_ITER", "6000"))
 # Derived paths
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", LOG_SUBDIR)
 MONITOR_LOG = os.path.join(PROJECT_ROOT, "logs", "monitor_log.txt")
+SUPERVISOR_STATE_FILE = os.path.join(PROJECT_ROOT, "logs", "training_supervisor_state.json")
 ANALYZE_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "utils", "analyze_training.py")
 MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
 USER_STOP_FLAG = os.path.join(PROJECT_ROOT, "logs", "user_stop.flag")
@@ -1242,6 +1246,34 @@ def write_log(msg: str):
             f.write(line + "\n")
     except Exception:
         pass
+
+
+def update_supervisor_state(stage: str, **extra):
+    """현재 supervisor 단계와 핵심 컨텍스트를 JSON으로 기록."""
+    state = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "pid": os.getpid(),
+        "stage": stage,
+    }
+    state.update(extra)
+    try:
+        os.makedirs(os.path.dirname(SUPERVISOR_STATE_FILE), exist_ok=True)
+        with open(SUPERVISOR_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def load_supervisor_state() -> dict:
+    """최근 supervisor 상태 JSON을 읽어 반환."""
+    if not os.path.isfile(SUPERVISOR_STATE_FILE):
+        return {}
+    try:
+        with open(SUPERVISOR_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def send_telegram(msg: str):
@@ -1947,6 +1979,7 @@ def format_status_message(run_dir: str | None = None, checkpoint: str | None = N
     heartbeat_alive = test_heartbeat_alive()
     pause_state = "paused" if is_telegram_paused() else "running"
     chat_status = _get_chat_storage_status()
+    runtime_state = load_supervisor_state()
     lines = [
         "📡 Supervisor 상태",
         f"- mode: {pause_state}",
@@ -1956,6 +1989,10 @@ def format_status_message(run_dir: str | None = None, checkpoint: str | None = N
         f"- gpu_mem_mb: {gpu_mem}",
         f"- chat_storage: {'ok' if chat_status['io_ok'] else 'degraded'} | mode={chat_status['mode']} | inbox={chat_status['inbox_count']} | outbox_pending={chat_status['outbox_pending']}",
     ]
+    if runtime_state:
+        stage = runtime_state.get("stage", "unknown")
+        stage_ts = runtime_state.get("timestamp", "n/a")
+        lines.append(f"- stage: {stage} @ {stage_ts}")
     if run_dir:
         lines.append(f"- run: {os.path.basename(run_dir)}")
     if checkpoint:
@@ -2645,6 +2682,23 @@ def restart_heartbeat():
         return False
 
 
+def wait_for_training_start(timeout_sec: int = TRAIN_START_TIMEOUT_SEC, poll_sec: int = 5) -> list[int]:
+    """train.py 프로세스가 실제로 올라올 때까지 대기."""
+    deadline = time.time() + timeout_sec
+    next_progress_log = 0.0
+    while time.time() < deadline:
+        pids = get_training_process_pids()
+        if pids:
+            return pids
+        now = time.time()
+        if now >= next_progress_log:
+            remaining = max(0, int(deadline - now))
+            write_log(f"Waiting for training process... {remaining}s left")
+            next_progress_log = now + 15
+        time.sleep(poll_sec)
+    return []
+
+
 # ============================================================
 # VIDEO RECORDING
 # ============================================================
@@ -3096,18 +3150,27 @@ def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, vid
 # TRAINING RESUME
 # ============================================================
 
-def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int | None = None):
-    """훈련을 재개: train.py 실행 → 프로세스 감지 확인."""
+def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int | None = None) -> bool:
+    """훈련을 재개: train.py 실행 → 실제 train.py 프로세스 감지 확인."""
     run_name = os.path.basename(run_dir)
     cp_name = os.path.basename(checkpoint_path)
     iter_num = get_checkpoint_iter(checkpoint_path)
 
+    update_supervisor_state("resume-pre-clean", run=run_name, checkpoint=cp_name, iteration=iter_num)
     write_log("Pre-resume cleanup...")
     ensure_gpu_clean(reason="pre-resume")
 
     phase_num, phase_name = get_curriculum_phase(iter_num)
     write_log(f"Resuming: {run_name} / {cp_name} (iter {iter_num}, Phase {phase_num}/{phase_name})")
     write_log(f"  common_step_counter will sync to iter {iter_num} × steps_per_env")
+    update_supervisor_state(
+        "resume-launch",
+        run=run_name,
+        checkpoint=cp_name,
+        iteration=iter_num,
+        phase=phase_name,
+        next_regular_iter=next_regular_iter,
+    )
     train_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "train.py")
     train_cmd = _wrap_conda_command(
         f'cd /d "{PROJECT_ROOT}" && '
@@ -3123,36 +3186,28 @@ def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int |
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
 
-    write_log("Waiting for init (60s)...")
-    time.sleep(60)
+    write_log(f"Waiting for train.py init ({TRAIN_START_TIMEOUT_SEC}s timeout)...")
+    pids = wait_for_training_start()
+    if not pids:
+        write_log("ERROR: Training process not detected after resume.")
+        update_supervisor_state(
+            "resume-failed",
+            run=run_name,
+            checkpoint=cp_name,
+            iteration=iter_num,
+            reason="train-process-missing",
+        )
+        send_telegram(
+            f"⚠️ 훈련 재개 실패\n"
+            f"- run: {run_name}\n"
+            f"- checkpoint: {cp_name}\n"
+            f"- iter: {iter_num:,}\n"
+            f"- reason: train.py process not detected within {TRAIN_START_TIMEOUT_SEC}s"
+        )
+        return False
 
-    # python 프로세스 확인 (psutil)
-    try:
-        pids = []
-        total_mem = 0
-        my_pid = os.getpid()
-        hb_pid = get_heartbeat_pid()
-        for proc in psutil.process_iter(["pid", "name", "memory_info"]):
-            try:
-                if proc.info["name"] and "python" in proc.info["name"].lower():
-                    pid = proc.info["pid"]
-                    if pid != my_pid and pid != hb_pid:
-                        pids.append(pid)
-                        mi = proc.info.get("memory_info")
-                        if mi:
-                            total_mem += mi.rss
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        mem_mb = round(total_mem / (1024 * 1024))
-        if pids:
-            write_log(f"Training running: PID={','.join(map(str, pids))}, Mem={mem_mb}MB")
-        else:
-            write_log("WARNING: Training process not detected!")
-            send_telegram("⚠️ 훈련 프로세스 감지 실패! 확인 필요")
-    except Exception:
-        pass
-
-    time.sleep(30)
+    write_log(f"Training running: PID={','.join(map(str, pids))}")
+    time.sleep(15)
     gpu_mem = get_gpu_memory_mb()
     if gpu_mem > 0:
         write_log(f"GPU after resume: {gpu_mem}MB")
@@ -3161,6 +3216,16 @@ def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int |
         write_log(f"Next regular clip target: iter {next_regular_iter}")
     else:
         write_log(f"Supervisor poll active: every {SUPERVISOR_POLL_SECONDS}s")
+    update_supervisor_state(
+        "monitoring",
+        run=run_name,
+        checkpoint=cp_name,
+        iteration=iter_num,
+        training_pids=pids,
+        next_regular_iter=next_regular_iter,
+        gpu_mem_mb=gpu_mem,
+    )
+    return True
 
 
 # ============================================================
@@ -3211,6 +3276,13 @@ def main():
     write_log("=========================================")
 
     flush_telegram_updates()
+    update_supervisor_state(
+        "starting",
+        train_envs=TRAIN_ENVS,
+        play_envs=PLAY_ENVS,
+        video_length=VIDEO_LENGTH,
+        poll_seconds=SUPERVISOR_POLL_SECONDS,
+    )
     send_telegram(
         f"🤖 SpotMicro Training Supervisor 시작\n\n"
         f"⚙️ 설정\n"
@@ -3232,6 +3304,8 @@ def main():
     last_observed_checkpoint = ""
     completed_run_signature = ""
     exit_notice = "👋 Training Supervisor 종료"
+    unexpected_training_stop_since = 0.0
+    last_auto_resume_ts = 0.0
 
     try:
         while True:
@@ -3240,6 +3314,8 @@ def main():
                 sleep_with_command_poll(SUPERVISOR_POLL_SECONDS, run_dir=get_latest_run_dir())
 
                 training_alive = test_training_alive()
+                if training_alive:
+                    unexpected_training_stop_since = 0.0
 
                 # Heartbeat 워치독
                 if training_alive and not test_heartbeat_alive():
@@ -3264,6 +3340,61 @@ def main():
                 iter_num = get_checkpoint_iter(checkpoint)
                 kpi_snapshot = build_supervisor_kpi_snapshot(run_dir)
                 run_signature = f"{run_dir}|{checkpoint}|{iter_num}"
+                if training_alive:
+                    update_supervisor_state(
+                        "monitoring",
+                        run=os.path.basename(run_dir),
+                        checkpoint=os.path.basename(checkpoint),
+                        iteration=iter_num,
+                        verdict=kpi_snapshot["verdict"],
+                    )
+                elif not is_telegram_paused() and not os.path.isfile(MAINTENANCE_FLAG) and not is_training_complete(iter_num):
+                    if unexpected_training_stop_since <= 0:
+                        unexpected_training_stop_since = time.time()
+                        write_log(
+                            f"Training missing at iter {iter_num}; waiting {UNEXPECTED_TRAIN_STOP_GRACE_SEC}s before auto-resume."
+                        )
+                    missing_for = int(time.time() - unexpected_training_stop_since)
+                    update_supervisor_state(
+                        "training-missing",
+                        run=os.path.basename(run_dir),
+                        checkpoint=os.path.basename(checkpoint),
+                        iteration=iter_num,
+                        missing_for_sec=missing_for,
+                        heartbeat_alive=test_heartbeat_alive(),
+                    )
+                    if (
+                        missing_for >= UNEXPECTED_TRAIN_STOP_GRACE_SEC
+                        and (time.time() - last_auto_resume_ts) >= SUPERVISOR_RECOVERY_COOLDOWN_SEC
+                    ):
+                        last_auto_resume_ts = time.time()
+                        write_log(
+                            f"Training still missing for {missing_for}s. Attempting auto-resume from {os.path.basename(checkpoint)}."
+                        )
+                        send_telegram(
+                            f"⚠️ 학습 프로세스 중단 감지\n"
+                            f"- run: {os.path.basename(run_dir)}\n"
+                            f"- checkpoint: {os.path.basename(checkpoint)}\n"
+                            f"- iter: {iter_num:,}\n"
+                            f"- action: latest checkpoint에서 자동 재개 시도"
+                        )
+                        resumed_ok = False
+                        set_maintenance_flag()
+                        try:
+                            if not test_heartbeat_alive():
+                                restart_heartbeat()
+                            resumed_ok = resume_training(
+                                run_dir,
+                                checkpoint,
+                                next_regular_iter=get_next_regular_trigger(iter_num),
+                            )
+                        finally:
+                            remove_maintenance_flag()
+                        if resumed_ok:
+                            unexpected_training_stop_since = 0.0
+                            continue
+                        raise RuntimeError(f"Auto-resume failed at iter {iter_num}")
+                    continue
                 if not last_observed_checkpoint:
                     last_observed_checkpoint = checkpoint
                     last_verdict = kpi_snapshot["verdict"]
@@ -3389,6 +3520,7 @@ def main():
 
                 # Phase 1: 훈련 중단 + GPU 해제
                 write_log("--- Phase 1/5: Stop Training ---")
+                update_supervisor_state("clip-stop-training", clip_num=clip_num, iteration=iter_num, trigger=trigger_reason)
                 send_telegram("⏸️ P1/5: 훈련 중단 + GPU 해제")
                 try:
                     ensure_gpu_clean(reason="stop-training")
@@ -3399,6 +3531,7 @@ def main():
 
                 # Phase 2: 영상 녹화
                 write_log("--- Phase 2/5: Record Video ---")
+                update_supervisor_state("clip-record-video", clip_num=clip_num, iteration=iter_num, trigger=trigger_reason)
                 send_telegram(f"🎥 P2/5: 4종 영상 녹화 중... ({VIDEO_LENGTH} steps)")
                 try:
                     captured_videos = record_video_bundle(checkpoint, run_dir, clip_num)
@@ -3411,6 +3544,7 @@ def main():
 
                 # Phase 3: 상세 분석
                 write_log("--- Phase 3/5: Analysis ---")
+                update_supervisor_state("clip-analysis", clip_num=clip_num, iteration=iter_num, captured_views=list(captured_videos))
                 send_telegram("🔬 P3/5: 분석 중...")
                 _last_analysis_text = ""
                 try:
@@ -3501,6 +3635,7 @@ def main():
 
                 # Phase 4: 최종 정리
                 write_log("--- Phase 4/5: Cleanup ---")
+                update_supervisor_state("clip-cleanup", clip_num=clip_num, iteration=iter_num)
                 send_telegram("🧹 P4/5: GPU 정리 중...")
                 try:
                     ensure_gpu_clean(reason="pre-resume")
@@ -3520,13 +3655,15 @@ def main():
 
                 # Phase 5: 훈련 재개 (반드시 실행)
                 write_log("--- Phase 5/5: Resume Training ---")
+                update_supervisor_state("clip-resume", clip_num=clip_num, iteration=iter_num, next_regular_iter=next_regular_iter)
                 phase_num, phase_name = get_curriculum_phase(iter_num)
                 send_telegram(
                     f"▶️ P5/5: 훈련 재개 중... (iter {iter_num}~)\n"
                     f"📋 Curriculum Phase {phase_num} ({phase_name})\n"
                     f"다음 정기 clip 목표: iter {next_regular_iter}"
                 )
-                resume_training(run_dir, checkpoint, next_regular_iter=next_regular_iter)
+                if not resume_training(run_dir, checkpoint, next_regular_iter=next_regular_iter):
+                    raise RuntimeError(f"Training resume failed after clip #{clip_num} @ iter {iter_num}")
                 last_verdict = kpi_snapshot["verdict"]
 
                 # ── Maintenance Flag OFF ──
@@ -3536,27 +3673,33 @@ def main():
                 # 메인 루프 예외 → 비상 훈련 재개
                 write_log(f"CRITICAL: {e}")
                 write_log(traceback.format_exc())
+                update_supervisor_state("error", error=str(e))
                 send_telegram(f"🚨 CRITICAL ERROR\n{e}\n\n비상 훈련 재개 시도 중...")
                 write_log("Emergency resume...")
                 try:
+                    resumed_ok = False
                     set_maintenance_flag()
                     kill_all_python(reason="emergency")
                     time.sleep(15)
                     er = run_dir if run_dir else get_latest_run_dir()
                     ec = checkpoint if checkpoint else (get_latest_checkpoint(er) if er else None)
                     if er and ec:
-                        resume_training(er, ec)
+                        resumed_ok = resume_training(er, ec)
+                        if not resumed_ok:
+                            raise RuntimeError("Emergency resume returned failure")
                     else:
                         write_log("FATAL: Cannot find run/checkpoint for emergency resume!")
-                    remove_maintenance_flag()
                 except Exception as e2:
                     write_log(f"FATAL: Emergency resume failed: {e2}")
+                    update_supervisor_state("fatal-recovery-failed", error=str(e2))
+                finally:
                     remove_maintenance_flag()
 
             write_log(f"########## CLIP #{clip_num} DONE ##########")
             write_log("")
 
     finally:
+        update_supervisor_state("stopped", exit_notice=exit_notice)
         remove_pid_file()
 
     if exit_notice:
