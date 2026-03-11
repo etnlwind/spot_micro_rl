@@ -183,6 +183,31 @@ def _run_hidden_cmd(command: str, **kwargs):
     return subprocess.run(["cmd", "/c", command], **kwargs)
 
 
+def _launch_training_command(command: str, launcher_name: str) -> str:
+    """Launch training via `start /b` so Isaac Lab gets a normal shell context on Windows."""
+    logs_dir = os.path.join(PROJECT_ROOT, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    launcher_path = os.path.join(logs_dir, launcher_name)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    launch_log = os.path.join(logs_dir, "training_launch.log")
+
+    with open(launcher_path, "w", encoding="utf-8", newline="\n") as file:
+        file.write("@echo off\n")
+        file.write(f'echo ===== [{timestamp}] training launch =====>> "{launch_log}"\n')
+        file.write(f'echo cmd: {command}>> "{launch_log}"\n')
+        file.write(f'{command} >> "{launch_log}" 2>&1\n')
+
+    subprocess.Popen(
+        ["cmd", "/c", f'start "" /b cmd /c "{launcher_path}"'],
+        cwd=PROJECT_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    return launcher_path
+
+
 def get_video_capture_specs(play_envs: int) -> list[dict]:
     """전송용 영상 캡처 조합을 반환합니다."""
     return [
@@ -716,6 +741,7 @@ PHASE2_END_ITER = int(_env.get("PHASE2_END_ITER", "6000"))
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", LOG_SUBDIR)
 MONITOR_LOG = os.path.join(PROJECT_ROOT, "logs", "monitor_log.txt")
 SUPERVISOR_STATE_FILE = os.path.join(PROJECT_ROOT, "logs", "training_supervisor_state.json")
+TRAINING_LAUNCH_LOG = os.path.join(PROJECT_ROOT, "logs", "training_launch.log")
 ANALYZE_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "utils", "analyze_training.py")
 MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
 USER_STOP_FLAG = os.path.join(PROJECT_ROOT, "logs", "user_stop.flag")
@@ -1797,10 +1823,8 @@ def start_fresh_training(task_name: str | None = None, train_envs: int | None = 
         f'--max_iterations={effective_max_iterations}'
     )
     write_log(f"fresh_train_cmd: {train_cmd}")
-    _popen_hidden_cmd(
-        train_cmd,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
+    launcher_path = _launch_training_command(train_cmd, "_launch_fresh_training.cmd")
+    write_log(f"fresh_train_launcher: {launcher_path}")
 
     write_log("Waiting for fresh training init (60s)...")
     time.sleep(60)
@@ -2021,6 +2045,18 @@ def has_run_activity_advanced(run_dir: str | None, baseline_marker: tuple[float,
     return current_size > baseline_size
 
 
+def get_newer_run_dir(reference_run_dir: str | None) -> str | None:
+    """Return the newest run dir created after reference_run_dir, if any."""
+    latest_run = get_latest_run_dir()
+    if not latest_run:
+        return None
+    if not reference_run_dir:
+        return latest_run
+    if os.path.basename(latest_run) > os.path.basename(reference_run_dir):
+        return latest_run
+    return None
+
+
 def get_training_process_pids() -> list[int]:
     return sorted({
         pid
@@ -2032,11 +2068,14 @@ def get_training_process_pids() -> list[int]:
 def get_training_status(run_dir: str | None = None) -> dict:
     pids = get_training_process_pids()
     if pids:
-        return {"alive": True, "source": "process", "pids": pids, "activity_age_sec": None}
+        return {"alive": True, "source": "process", "pids": pids, "activity_age_sec": None, "run_dir": run_dir}
     recent_activity, age_sec = has_recent_run_activity(run_dir)
     if recent_activity:
-        return {"alive": True, "source": "events", "pids": [], "activity_age_sec": age_sec}
-    return {"alive": False, "source": "none", "pids": [], "activity_age_sec": age_sec}
+        return {"alive": True, "source": "events", "pids": [], "activity_age_sec": age_sec, "run_dir": run_dir}
+    newer_run_dir = get_newer_run_dir(run_dir)
+    if newer_run_dir:
+        return {"alive": True, "source": "new-run", "pids": [], "activity_age_sec": None, "run_dir": newer_run_dir}
+    return {"alive": False, "source": "none", "pids": [], "activity_age_sec": age_sec, "run_dir": run_dir}
 
 
 def test_training_alive(run_dir: str | None = None) -> bool:
@@ -2058,6 +2097,8 @@ def format_status_message(run_dir: str | None = None, checkpoint: str | None = N
     elif training_status["source"] == "events":
         age = training_status["activity_age_sec"]
         training_line = f"alive (recent events, {age}s ago)"
+    elif training_status["source"] == "new-run":
+        training_line = f"alive (new run: {os.path.basename(training_status['run_dir'])})"
     else:
         training_line = "stopped"
     lines = [
@@ -2774,7 +2815,7 @@ def wait_for_training_start(
     baseline_marker = baseline_marker or (0.0, 0)
     while time.time() < deadline:
         status = get_training_status(run_dir)
-        if status["source"] == "process":
+        if status["source"] in {"process", "new-run"}:
             return status
         if run_dir and has_run_activity_advanced(run_dir, baseline_marker):
             current_status = get_training_status(run_dir)
@@ -3273,18 +3314,14 @@ def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int |
         f'--resume --load_run={run_name} --checkpoint={cp_name}'
     )
     write_log(f"train_cmd: {train_cmd}")
-    launcher = _popen_hidden_cmd(
-        train_cmd,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
+    launcher_path = _launch_training_command(train_cmd, "_launch_resume_training.cmd")
+    write_log(f"train_launcher: {launcher_path}")
 
     write_log(f"Waiting for train.py init ({TRAIN_START_TIMEOUT_SEC}s timeout)...")
     training_status = wait_for_training_start(run_dir=run_dir, baseline_marker=baseline_marker)
     if not training_status["alive"]:
-        launcher_code = launcher.poll()
-        if launcher_code is not None:
-            write_log(f"Launcher exited before training detection (returncode={launcher_code})")
         write_log("ERROR: Training activity not detected after resume.")
+        write_log(f"See launch log: {TRAINING_LAUNCH_LOG}")
         update_supervisor_state(
             "resume-failed",
             run=run_name,
@@ -3303,6 +3340,8 @@ def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int |
 
     if training_status["source"] == "process":
         write_log(f"Training running via process detection: PID={','.join(map(str, training_status['pids']))}")
+    elif training_status["source"] == "new-run":
+        write_log(f"Training running via new run detection: {os.path.basename(training_status['run_dir'])}")
     else:
         write_log(f"Training running via {training_status['source']} detection")
     time.sleep(15)
