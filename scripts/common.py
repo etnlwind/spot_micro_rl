@@ -536,6 +536,11 @@ def _hidden_startupinfo():
 def _wrap_conda_command(command: str) -> str:
     if sys.platform != "win32":
         return command
+    current_env = (os.environ.get("CONDA_DEFAULT_ENV") or "").strip().lower()
+    current_prefix_name = os.path.basename((os.environ.get("CONDA_PREFIX") or "").strip()).lower()
+    target_env = (CONDA_ENV_NAME or "").strip().lower()
+    if target_env and (current_env == target_env or current_prefix_name == target_env):
+        return command
     if CONDA_ACTIVATE_BAT:
         return f'call "{CONDA_ACTIVATE_BAT}" && conda activate {CONDA_ENV_NAME} && {command}'
     return f"conda activate {CONDA_ENV_NAME} && {command}"
