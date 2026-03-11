@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.parse
@@ -78,6 +79,7 @@ TG_BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 ISAAC_LAB = _env.get("ISAAC_LAB_PATH", r"C:\IsaacLab\isaaclab.bat")
 TASK = _env.get("TASK", "Isaac-Velocity-Flat-SpotMicro-v0")
 LOG_SUBDIR = _env.get("LOG_SUBDIR", "spot_micro_flat")
+CONDA_ENV_NAME = _env.get("CONDA_ENV_NAME") or os.environ.get("CONDA_DEFAULT_ENV", "env_isaaclab")
 
 # Numeric config (defaults match .env)
 INTERVAL_MINUTES = int(_env.get("INTERVAL_MINUTES", "180"))
@@ -98,6 +100,71 @@ URGENT_VIDEO_GAP_ITER = int(_env.get("URGENT_VIDEO_GAP_ITER", "400"))
 ZIP_FRAME_COUNT = int(_env.get("ZIP_FRAME_COUNT", "40"))
 ZIP_IMAGE_MAX_WIDTH = int(_env.get("ZIP_IMAGE_MAX_WIDTH", "960"))
 ZIP_IMAGE_QUALITY = int(_env.get("ZIP_IMAGE_QUALITY", "78"))
+TELEGRAM_REMOTE_ACTIONS_ENABLED = str(_env.get("TELEGRAM_REMOTE_ACTIONS_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+TELEGRAM_REMOTE_ACTION_TIMEOUT_SEC = int(_env.get("TELEGRAM_REMOTE_ACTION_TIMEOUT_SEC", "120"))
+REMOTE_SAFE_COMMIT_MAX_FILES = int(_env.get("REMOTE_SAFE_COMMIT_MAX_FILES", "12"))
+
+
+def _resolve_conda_activate_bat() -> str | None:
+    """Return the base conda activation script path when available."""
+    candidates = [
+        _env.get("CONDA_ACTIVATE_BAT"),
+        os.path.join(os.path.dirname(os.environ.get("CONDA_EXE", "")), "activate.bat") if os.environ.get("CONDA_EXE") else None,
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+
+CONDA_ACTIVATE_BAT = _resolve_conda_activate_bat()
+
+
+def _iter_processes_safe(attrs):
+    """Yield psutil processes while skipping protected/system processes on Windows."""
+    iterator = psutil.process_iter(attrs)
+    while True:
+        try:
+            proc = next(iterator)
+        except StopIteration:
+            break
+        except (psutil.Error, PermissionError, OSError):
+            continue
+        try:
+            _ = proc.info
+            yield proc
+        except (psutil.Error, PermissionError, OSError):
+            continue
+
+
+def _wrap_conda_command(command: str) -> str:
+    """Wrap a command so it runs inside the configured conda environment on Windows."""
+    if sys.platform != "win32":
+        return command
+    if CONDA_ACTIVATE_BAT:
+        return f'call "{CONDA_ACTIVATE_BAT}" && conda activate {CONDA_ENV_NAME} && {command}'
+    return f'conda activate {CONDA_ENV_NAME} && {command}'
+
+
+def _hidden_creationflags(extra_flags: int = 0) -> int:
+    """Return Windows process flags that avoid opening visible shell windows."""
+    if sys.platform == "win32":
+        return extra_flags | subprocess.CREATE_NO_WINDOW
+    return extra_flags
+
+
+def _popen_hidden_cmd(command: str, **kwargs):
+    """Run a shell command without opening a visible terminal window on Windows."""
+    kwargs.setdefault("cwd", PROJECT_ROOT)
+    kwargs["creationflags"] = _hidden_creationflags(kwargs.pop("creationflags", 0))
+    return subprocess.Popen(["cmd", "/c", command], **kwargs)
+
+
+def _run_hidden_cmd(command: str, **kwargs):
+    """Run a shell command synchronously without opening a visible terminal window on Windows."""
+    kwargs.setdefault("cwd", PROJECT_ROOT)
+    kwargs["creationflags"] = _hidden_creationflags(kwargs.pop("creationflags", 0))
+    return subprocess.run(["cmd", "/c", command], **kwargs)
 
 
 def get_video_capture_specs(play_envs: int) -> list[dict]:
@@ -619,7 +686,7 @@ def _read_ops_version() -> str:
         value = os.environ.get(key) or _env.get(key, "")
         if value:
             return value
-    return "V22"
+    return _read_train_version() or ""
 
 
 TRAIN_VERSION = _read_train_version()
@@ -635,15 +702,327 @@ MONITOR_LOG = os.path.join(PROJECT_ROOT, "logs", "monitor_log.txt")
 ANALYZE_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "utils", "analyze_training.py")
 MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
 USER_STOP_FLAG = os.path.join(PROJECT_ROOT, "logs", "user_stop.flag")
+TELEGRAM_PAUSE_FLAG = os.path.join(PROJECT_ROOT, "logs", "telegram_pause.flag")
+TELEGRAM_CHAT_MODE_FLAG = os.path.join(PROJECT_ROOT, "logs", "telegram_chat_mode.flag")
+TELEGRAM_UPDATES_LOG = os.path.join(PROJECT_ROOT, "logs", "telegram_updates.jsonl")
+TELEGRAM_CHAT_INBOX = os.path.join(PROJECT_ROOT, "logs", "telegram_chat_inbox.jsonl")
+TELEGRAM_CHAT_OUTBOX = os.path.join(PROJECT_ROOT, "logs", "telegram_chat_outbox.jsonl")
+TELEGRAM_REMOTE_ACTION_LOG = os.path.join(PROJECT_ROOT, "logs", "telegram_remote_actions.jsonl")
 HEARTBEAT_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_heartbeat.pid")
 HEARTBEAT_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "training_heartbeat.py")
 SUPERVISOR_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_supervisor.pid")
+HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
+MIN_HEARTBEAT_RESTART_INTERVAL_SEC = int(_env.get("MIN_HEARTBEAT_RESTART_INTERVAL_SEC", "120"))
+TELEGRAM_FILE_LOCK_TIMEOUT_SEC = float(_env.get("TELEGRAM_FILE_LOCK_TIMEOUT_SEC", "2.0"))
+TELEGRAM_FILE_LOCK_RETRY_SEC = float(_env.get("TELEGRAM_FILE_LOCK_RETRY_SEC", "0.05"))
+
+REMOTE_BLOCKED_TEXT_MARKERS = (
+    "http://",
+    "https://",
+    "curl ",
+    "wget ",
+    "invoke-webrequest",
+    "start-bitstransfer",
+    "scp ",
+    "sftp ",
+    "ftp ",
+    "webhook",
+    "token",
+    "password",
+    "credential",
+    "secret",
+    ".env",
+    "id_rsa",
+    "known_hosts",
+    "remove-item",
+    "del ",
+    "erase ",
+    "format ",
+    "diskpart",
+    "reg delete",
+    "shutdown",
+    "restart-computer",
+    "stop-computer",
+    "taskkill",
+    "stop-process",
+    "kill-process",
+    "git reset --hard",
+    "git clean -fd",
+)
+
+REMOTE_BLOCKED_PATH_PREFIXES = (
+    "logs/",
+    "outputs/",
+    ".git/",
+    "source/spot_micro_rl/spot_micro_rl.egg-info/",
+)
+
+REMOTE_BLOCKED_PATH_SUFFIXES = (
+    ".env",
+    ".pt",
+    ".pth",
+    ".mp4",
+    ".zip",
+    ".jsonl",
+    ".pid",
+    ".flag",
+    ".db",
+    ".sqlite",
+    ".csv",
+)
+
+REMOTE_ALLOWED_COMMIT_SUFFIXES = (
+    ".py",
+    ".md",
+    ".txt",
+    ".json",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".ini",
+    ".cfg",
+)
 
 # ── State ────────────────────────────────────────────────────────
 _tg_offset = 0
 _last_analysis_text = ""
 _prev_score = -1
 _heartbeat_alert_sent = False
+_last_heartbeat_restart_ts = 0.0
+_chat_storage_health = {
+    "append_ok": 0,
+    "append_fail": 0,
+    "read_ok": 0,
+    "read_fail": 0,
+    "rewrite_ok": 0,
+    "rewrite_fail": 0,
+    "probe_ok": 0,
+    "probe_fail": 0,
+    "last_error": "",
+    "last_error_ts": "",
+    "last_probe_ts": "",
+}
+
+
+def _set_chat_storage_error(action: str, path: str, err: Exception):
+    _chat_storage_health["last_error"] = f"{action} {os.path.basename(path)}: {err}"
+    _chat_storage_health["last_error_ts"] = datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _chat_lock_path(path: str) -> str:
+    return f"{path}.lock"
+
+
+def _with_path_lock(path: str, action: str, func):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lock_path = _chat_lock_path(path)
+    deadline = time.time() + max(0.1, TELEGRAM_FILE_LOCK_TIMEOUT_SEC)
+    lock_fd = None
+
+    while time.time() < deadline:
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            payload = f"pid={os.getpid()}\nts={datetime.datetime.now().isoformat(timespec='seconds')}\naction={action}\n"
+            os.write(lock_fd, payload.encode("utf-8", errors="replace"))
+            break
+        except FileExistsError:
+            time.sleep(TELEGRAM_FILE_LOCK_RETRY_SEC)
+        except Exception as err:
+            _set_chat_storage_error(action, path, err)
+            raise
+
+    if lock_fd is None:
+        err = TimeoutError(f"lock timeout after {TELEGRAM_FILE_LOCK_TIMEOUT_SEC:.2f}s")
+        _set_chat_storage_error(action, path, err)
+        raise err
+
+    try:
+        return func()
+    finally:
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+
+
+def _append_jsonl(path: str, record: dict) -> bool:
+    def _write():
+        with open(path, "a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    try:
+        _with_path_lock(path, "append", _write)
+        _chat_storage_health["append_ok"] += 1
+        return True
+    except Exception as err:
+        _chat_storage_health["append_fail"] += 1
+        write_log(f"JSONL append failed ({os.path.basename(path)}): {err}")
+        return False
+
+
+def _read_jsonl_records(path: str) -> list[dict]:
+    if not os.path.isfile(path):
+        return []
+
+    def _read():
+        records = []
+        with open(path, "r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return records
+
+    try:
+        records = _with_path_lock(path, "read", _read)
+        _chat_storage_health["read_ok"] += 1
+        return records
+    except Exception as err:
+        _chat_storage_health["read_fail"] += 1
+        write_log(f"JSONL read failed ({os.path.basename(path)}): {err}")
+        return []
+
+
+def _rewrite_jsonl_records(path: str, records: list[dict]) -> bool:
+    def _rewrite():
+        fd, temp_path = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                for record in records:
+                    file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            os.replace(temp_path, path)
+        except Exception:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            raise
+
+    try:
+        _with_path_lock(path, "rewrite", _rewrite)
+        _chat_storage_health["rewrite_ok"] += 1
+        return True
+    except Exception as err:
+        _chat_storage_health["rewrite_fail"] += 1
+        write_log(f"JSONL rewrite failed ({os.path.basename(path)}): {err}")
+        return False
+
+
+def _probe_chat_storage() -> tuple[bool, str]:
+    probe_path = os.path.join(PROJECT_ROOT, "logs", "telegram_chat_storage_probe.tmp")
+    payload = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "pid": os.getpid(),
+    }
+
+    try:
+        ok = _append_jsonl(probe_path, payload)
+        if not ok:
+            raise RuntimeError("probe append failed")
+        records = _read_jsonl_records(probe_path)
+        if not records:
+            raise RuntimeError("probe readback empty")
+        try:
+            os.remove(probe_path)
+        except OSError:
+            pass
+        try:
+            os.remove(_chat_lock_path(probe_path))
+        except OSError:
+            pass
+        _chat_storage_health["probe_ok"] += 1
+        _chat_storage_health["last_probe_ts"] = datetime.datetime.now().isoformat(timespec="seconds")
+        return True, "ok"
+    except Exception as err:
+        _chat_storage_health["probe_fail"] += 1
+        _set_chat_storage_error("probe", probe_path, err)
+        _chat_storage_health["last_probe_ts"] = datetime.datetime.now().isoformat(timespec="seconds")
+        return False, str(err)
+
+
+def _get_chat_storage_status() -> dict:
+    probe_ok, probe_detail = _probe_chat_storage()
+    inbox_records = _read_jsonl_records(TELEGRAM_CHAT_INBOX)
+    outbox_records = _read_jsonl_records(TELEGRAM_CHAT_OUTBOX)
+    outbox_pending = sum(1 for record in outbox_records if not record.get("sent"))
+    health_ok = probe_ok
+    return {
+        "mode": "on" if is_telegram_chat_mode_enabled() else "off",
+        "probe_ok": probe_ok,
+        "probe_detail": probe_detail,
+        "inbox_count": len(inbox_records),
+        "outbox_pending": outbox_pending,
+        "last_error": _chat_storage_health["last_error"] or "none",
+        "last_error_ts": _chat_storage_health["last_error_ts"] or "n/a",
+        "last_probe_ts": _chat_storage_health["last_probe_ts"] or "n/a",
+        "io_ok": health_ok,
+    }
+
+
+def get_heartbeat_history_path(run_dir: str) -> str:
+    return os.path.join(run_dir, HEARTBEAT_HISTORY_JSONL)
+
+
+def load_latest_heartbeat_record(run_dir: str) -> dict | None:
+    history_path = get_heartbeat_history_path(run_dir)
+    records = _read_jsonl_records(history_path)
+    return records[-1] if records else None
+
+
+def set_telegram_pause_flag():
+    os.makedirs(os.path.dirname(TELEGRAM_PAUSE_FLAG), exist_ok=True)
+    with open(TELEGRAM_PAUSE_FLAG, "w", encoding="utf-8") as file:
+        file.write(datetime.datetime.now().isoformat(timespec="seconds"))
+    write_log("Telegram pause flag SET")
+
+
+def remove_telegram_pause_flag():
+    try:
+        os.remove(TELEGRAM_PAUSE_FLAG)
+    except OSError:
+        pass
+    write_log("Telegram pause flag REMOVED")
+
+
+def is_telegram_paused() -> bool:
+    return os.path.isfile(TELEGRAM_PAUSE_FLAG)
+
+
+def set_telegram_chat_mode_flag():
+    os.makedirs(os.path.dirname(TELEGRAM_CHAT_MODE_FLAG), exist_ok=True)
+    with open(TELEGRAM_CHAT_MODE_FLAG, "w", encoding="utf-8") as file:
+        file.write(datetime.datetime.now().isoformat(timespec="seconds"))
+    write_log("Telegram chat mode flag SET")
+
+
+def remove_telegram_chat_mode_flag():
+    try:
+        os.remove(TELEGRAM_CHAT_MODE_FLAG)
+    except OSError:
+        pass
+    write_log("Telegram chat mode flag REMOVED")
+
+
+def is_telegram_chat_mode_enabled() -> bool:
+    return os.path.isfile(TELEGRAM_CHAT_MODE_FLAG)
+
+
+def sleep_with_command_poll(total_sec: int, run_dir: str | None = None, checkpoint: str | None = None, step_sec: int = 5):
+    """긴 대기 중에도 Telegram 명령을 짧게 polling합니다."""
+    remaining = max(0, int(total_sec))
+    while remaining > 0:
+        chunk = min(step_sec, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
+        process_pending_telegram_commands(run_dir=run_dir, checkpoint=checkpoint)
 
 
 def is_training_complete(iter_num: int) -> bool:
@@ -715,11 +1094,33 @@ def format_trigger_status(next_regular_iter: int, last_clip_iter: int, verdict: 
 # PID FILE — 자기 자신의 PID 기록 (Heartbeat에서 감시용)
 # ============================================================
 
+def _pid_matches_script(pid: int, script_name: str) -> bool:
+    try:
+        proc = psutil.Process(pid)
+        cmdline = " ".join(proc.cmdline()).lower()
+        return script_name.lower() in cmdline
+    except (psutil.Error, PermissionError, OSError):
+        return False
+
 def write_pid_file():
     """Supervisor PID를 파일에 기록."""
     os.makedirs(os.path.dirname(SUPERVISOR_PID_FILE), exist_ok=True)
     with open(SUPERVISOR_PID_FILE, "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))
+
+
+def acquire_lock():
+    """PID 잠금 파일로 supervisor 중복 실행을 방지."""
+    if os.path.isfile(SUPERVISOR_PID_FILE):
+        try:
+            with open(SUPERVISOR_PID_FILE, "r", encoding="utf-8") as f:
+                old_pid = int(f.read().strip())
+            if old_pid != os.getpid() and _pid_matches_script(old_pid, "training_supervisor.py"):
+                print(f"ERROR: Another training_supervisor is already running (PID {old_pid})")
+                sys.exit(1)
+        except (ValueError, OSError):
+            pass
+    write_pid_file()
 
 
 def remove_pid_file():
@@ -857,35 +1258,715 @@ def send_telegram_document(file_path: str, caption: str = ""):
         send_telegram(f"⚠️ 진단 ZIP 전송 실패: {e}")
 
 
+def _fetch_telegram_updates(timeout_sec: int = 0) -> list[dict]:
+    """Telegram getUpdates 결과를 반환하고 offset을 전진시킵니다."""
+    global _tg_offset
+    query = urllib.parse.urlencode({"offset": _tg_offset, "timeout": timeout_sec})
+    url = f"{TG_BASE_URL}/getUpdates?{query}"
+    resp = json.loads(urllib.request.urlopen(url, timeout=max(15, timeout_sec + 5)).read().decode("utf-8"))
+    if not resp.get("ok"):
+        return []
+    updates = resp.get("result") or []
+    for update in updates:
+        _tg_offset = max(_tg_offset, int(update.get("update_id", 0)) + 1)
+    return updates
+
+
+def _extract_telegram_message(update: dict) -> tuple[str | None, str | None, dict]:
+    msg = update.get("message") or update.get("edited_message") or {}
+    text = msg.get("text") or msg.get("caption")
+    chat_id = msg.get("chat", {}).get("id")
+    return text, str(chat_id) if chat_id is not None else None, msg
+
+
+def _log_telegram_update(update: dict, text: str, chat_id: str | None, handled: bool = False, outcome: str = ""):
+    msg = update.get("message") or update.get("edited_message") or {}
+    from_user = msg.get("from", {}) or {}
+    record = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "update_id": update.get("update_id"),
+        "chat_id": chat_id,
+        "from_id": from_user.get("id"),
+        "from_username": from_user.get("username"),
+        "text": text,
+        "handled": bool(handled),
+        "outcome": outcome,
+    }
+    _append_jsonl(TELEGRAM_UPDATES_LOG, record)
+
+
+def _log_telegram_chat_message(update: dict, text: str, chat_id: str | None):
+    msg = update.get("message") or update.get("edited_message") or {}
+    from_user = msg.get("from", {}) or {}
+    record = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "update_id": update.get("update_id"),
+        "chat_id": chat_id,
+        "from_id": from_user.get("id"),
+        "from_username": from_user.get("username"),
+        "text": text,
+        "mode": "chat_inbox",
+    }
+    _append_jsonl(TELEGRAM_CHAT_INBOX, record)
+
+
+def queue_telegram_chat_reply(text: str, source: str = "copilot"):
+    payload = (text or "").strip()
+    if not payload:
+        return
+    record = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "source": source,
+        "text": payload,
+        "sent": False,
+    }
+    _append_jsonl(TELEGRAM_CHAT_OUTBOX, record)
+
+
+def flush_telegram_chat_outbox() -> int:
+    records = _read_jsonl_records(TELEGRAM_CHAT_OUTBOX)
+    if not records:
+        return 0
+
+    sent_count = 0
+    updated_records = []
+    for record in records:
+        if record.get("sent"):
+            updated_records.append(record)
+            continue
+        try:
+            send_telegram(f"💬 Copilot\n{record.get('text', '')}")
+            record["sent"] = True
+            record["sent_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+            sent_count += 1
+        except Exception as err:
+            record["send_error"] = str(err)
+        updated_records.append(record)
+
+    _rewrite_jsonl_records(TELEGRAM_CHAT_OUTBOX, updated_records)
+
+    return sent_count
+
+
+def _log_remote_action(payload: str, action: str, status: str, detail: str = "", update: dict | None = None):
+    record = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "action": action,
+        "status": status,
+        "payload": payload,
+        "detail": detail,
+    }
+    if update:
+        record["update_id"] = update.get("update_id")
+    _append_jsonl(TELEGRAM_REMOTE_ACTION_LOG, record)
+
+
+def _run_repo_process(args: list[str], timeout_sec: int = TELEGRAM_REMOTE_ACTION_TIMEOUT_SEC) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_sec,
+            creationflags=_hidden_creationflags(),
+        )
+        return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+    except subprocess.TimeoutExpired as err:
+        stdout = (err.stdout or "").strip() if isinstance(err.stdout, str) else ""
+        stderr = (err.stderr or "").strip() if isinstance(err.stderr, str) else ""
+        return 124, stdout, stderr or f"timeout after {timeout_sec}s"
+
+
+def _shorten_text(text: str, max_lines: int = 20, max_chars: int = 1500) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + ["..."]
+    shortened = "\n".join(lines)
+    if len(shortened) > max_chars:
+        shortened = shortened[: max_chars - 3] + "..."
+    return shortened
+
+
+def _normalize_repo_path(path: str) -> str:
+    normalized = (path or "").strip().replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _is_remote_safe_repo_path(path: str) -> tuple[bool, str]:
+    normalized = _normalize_repo_path(path).lower()
+    if not normalized:
+        return False, "empty path"
+    for prefix in REMOTE_BLOCKED_PATH_PREFIXES:
+        if normalized.startswith(prefix):
+            return False, f"blocked path prefix: {prefix}"
+    for suffix in REMOTE_BLOCKED_PATH_SUFFIXES:
+        if normalized.endswith(suffix):
+            return False, f"blocked file suffix: {suffix}"
+    if normalized in {".env", ".env.local", ".env.production"}:
+        return False, "sensitive env file"
+    if normalized.endswith(REMOTE_ALLOWED_COMMIT_SUFFIXES):
+        return True, ""
+    if os.path.basename(normalized) in {"readme", "readme.md", ".gitignore"}:
+        return True, ""
+    return False, "unapproved file type"
+
+
+def _parse_git_status_entries(text: str) -> list[dict]:
+    entries = []
+    for raw_line in text.splitlines():
+        if not raw_line.strip():
+            continue
+        if raw_line.startswith("##"):
+            continue
+        status = raw_line[:2]
+        path_text = raw_line[3:].strip()
+        if " -> " in path_text:
+            path_text = path_text.split(" -> ", 1)[1].strip()
+        entries.append({
+            "status": status,
+            "path": _normalize_repo_path(path_text),
+        })
+    return entries
+
+
+def _get_git_status_entries() -> tuple[list[dict], str]:
+    code, stdout, stderr = _run_repo_process(["git", "status", "--short", "--branch", "--untracked-files=all"])
+    if code != 0:
+        raise RuntimeError(stderr or stdout or "git status failed")
+    return _parse_git_status_entries(stdout), stdout
+
+
+def _extract_commit_message(payload: str) -> str | None:
+    match = re.search(r"(?:commit\s*message|메시지|커밋메시지)\s*[:=]\s*(.+)$", payload, re.IGNORECASE)
+    if not match:
+        return None
+    message = match.group(1).strip().strip("\"'")
+    return message[:120] if message else None
+
+
+def _build_remote_commit_message(payload: str, safe_files: list[str]) -> str:
+    explicit = _extract_commit_message(payload)
+    if explicit:
+        return explicit
+    lowered = [path.lower() for path in safe_files]
+    if all(path.startswith("scripts/") for path in lowered):
+        return "chore: update training automation scripts"
+    if all(path.endswith(".md") for path in lowered):
+        return "docs: update project notes"
+    if any(path.endswith("training_supervisor.py") for path in lowered):
+        return "chore: harden telegram supervisor automation"
+    return "chore: apply telegram-approved workspace updates"
+
+
+def _classify_remote_action(payload: str) -> tuple[str | None, dict]:
+    text = (payload or "").strip()
+    lowered = text.lower()
+    if not text:
+        return None, {}
+    if "커밋" in text and "푸시" in text:
+        return "git-commit-push", {}
+    if "커밋" in text:
+        return "git-commit", {}
+    if re.search(r"\bgit\s+status\b|깃\s*상태|git 상태", lowered):
+        return "git-status", {}
+    if "push" in lowered or "푸시" in text:
+        return "git-push-blocked", {}
+    if "heartbeat" in lowered and ("restart" in lowered or "재시작" in text):
+        return "restart-heartbeat", {}
+    if "resume" in lowered or "재개" in text:
+        return "resume", {}
+    if "pause" in lowered or "일시정지" in text or "멈춰" in text:
+        return "pause", {}
+    if "front" in lowered or "프론트" in text:
+        return "front-video", {}
+    if re.search(r"\btop\b", lowered) or "탑" in text or "위에서" in text:
+        return "top-video", {}
+    if "latest_report" in lowered or "리포트" in text or "보고" in text:
+        return "latest-report", {}
+    if "status" in lowered or "상태" in text:
+        return "train-status", {}
+    return None, {}
+
+
+def _scan_remote_payload_risk(payload: str) -> list[str]:
+    lowered = (payload or "").lower()
+    reasons = []
+    for marker in REMOTE_BLOCKED_TEXT_MARKERS:
+        if marker in lowered:
+            reasons.append(marker)
+    return sorted(set(reasons))
+
+
+def _format_git_entries(entries: list[dict], max_items: int = 8) -> str:
+    if not entries:
+        return "(no changes)"
+    lines = []
+    for entry in entries[:max_items]:
+        lines.append(f"{entry['status'].strip() or '??'} {entry['path']}")
+    if len(entries) > max_items:
+        lines.append(f"... (+{len(entries) - max_items} more)")
+    return "\n".join(lines)
+
+
+def _execute_remote_commit(push_after: bool, payload: str) -> tuple[bool, str, str]:
+    entries, raw_status = _get_git_status_entries()
+    if not entries:
+        return True, "remote-noop", "커밋할 변경이 없습니다."
+
+    safe_files = []
+    blocked = []
+    for entry in entries:
+        ok, reason = _is_remote_safe_repo_path(entry["path"])
+        if ok:
+            safe_files.append(entry["path"])
+        else:
+            blocked.append(f"{entry['path']} ({reason})")
+
+    if blocked:
+        detail = "\n".join(blocked[:8])
+        return True, "remote-rejected", f"원격 커밋 차단: 민감/런타임 파일 포함\n{detail}"
+
+    safe_files = sorted(dict.fromkeys(safe_files))
+    if len(safe_files) > REMOTE_SAFE_COMMIT_MAX_FILES:
+        return True, "remote-rejected", f"원격 커밋 차단: 안전 파일 수가 너무 많습니다 ({len(safe_files)}개)."
+
+    commit_message = _build_remote_commit_message(payload, safe_files)
+    code, _stdout, stderr = _run_repo_process(["git", "add", "--", *safe_files])
+    if code != 0:
+        raise RuntimeError(stderr or "git add failed")
+
+    diff_code, diff_stdout, diff_stderr = _run_repo_process(["git", "diff", "--cached", "--stat"])
+    if diff_code != 0:
+        raise RuntimeError(diff_stderr or "git diff --cached --stat failed")
+    if not diff_stdout.strip():
+        return True, "remote-noop", "staging 이후 커밋할 차이가 없습니다."
+
+    commit_code, commit_stdout, commit_stderr = _run_repo_process(["git", "commit", "-m", commit_message])
+    if commit_code != 0:
+        detail = commit_stderr or commit_stdout or "git commit failed"
+        return True, "remote-rejected", f"원격 커밋 실패\n{_shorten_text(detail)}"
+
+    summary = [
+        f"커밋 완료: {commit_message}",
+        _shorten_text(diff_stdout, max_lines=12, max_chars=900),
+        _shorten_text(commit_stdout or commit_stderr, max_lines=12, max_chars=900),
+    ]
+
+    if push_after:
+        push_code, push_stdout, push_stderr = _run_repo_process(["git", "push"])
+        if push_code != 0:
+            detail = push_stderr or push_stdout or "git push failed"
+            return True, "remote-rejected", "\n".join(summary + [f"push 실패\n{_shorten_text(detail)}"])
+        summary.append(_shorten_text(push_stdout or push_stderr or "git push 완료", max_lines=10, max_chars=700))
+        return True, "remote-commit-push", "\n".join(summary)
+
+    return True, "remote-commit", "\n".join(summary)
+
+
+def _execute_remote_action(action: str, payload: str, run_dir: str | None = None, checkpoint: str | None = None) -> tuple[bool, str, str]:
+    if action == "train-status":
+        return True, "remote-status", format_status_message(run_dir=run_dir, checkpoint=checkpoint)
+    if action == "latest-report":
+        return True, "remote-report", format_latest_report_message(run_dir=run_dir)
+    if action == "pause":
+        handled, outcome = handle_telegram_command("/pause", run_dir=run_dir, checkpoint=checkpoint)
+        return handled, f"remote-{outcome}", "pause 실행"
+    if action == "resume":
+        handled, outcome = handle_telegram_command("/resume", run_dir=run_dir, checkpoint=checkpoint)
+        return handled, f"remote-{outcome}", "resume 실행"
+    if action == "restart-heartbeat":
+        handled, outcome = handle_telegram_command("/restart_heartbeat", run_dir=run_dir, checkpoint=checkpoint)
+        return handled, f"remote-{outcome}", "heartbeat 재시작 실행"
+    if action == "front-video":
+        handled, outcome = handle_telegram_command("/front", run_dir=run_dir, checkpoint=checkpoint)
+        return handled, f"remote-{outcome}", "front 영상 요청 실행"
+    if action == "top-video":
+        handled, outcome = handle_telegram_command("/top", run_dir=run_dir, checkpoint=checkpoint)
+        return handled, f"remote-{outcome}", "top 영상 요청 실행"
+    if action == "git-status":
+        entries, raw_status = _get_git_status_entries()
+        body = _shorten_text(raw_status or _format_git_entries(entries), max_lines=20, max_chars=1500)
+        return True, "remote-git-status", f"git status\n{body}"
+    if action == "git-commit":
+        return _execute_remote_commit(push_after=False, payload=payload)
+    if action == "git-commit-push":
+        return _execute_remote_commit(push_after=True, payload=payload)
+    if action == "git-push-blocked":
+        return True, "remote-rejected", "원격 단독 push는 차단했습니다. 커밋+푸시 요청만 허용합니다."
+    return False, "", ""
+
+
+def try_handle_telegram_chat_action(update: dict, text: str, chat_id: str | None, run_dir: str | None = None, checkpoint: str | None = None) -> tuple[bool, str]:
+    if not is_telegram_chat_mode_enabled() or not TELEGRAM_REMOTE_ACTIONS_ENABLED:
+        return False, ""
+
+    payload = _extract_chat_payload(text)
+    if not payload:
+        return False, ""
+
+    action, _meta = _classify_remote_action(payload)
+    risk_reasons = _scan_remote_payload_risk(payload)
+
+    if action is None:
+        if risk_reasons:
+            detail = ", ".join(risk_reasons[:6])
+            send_telegram(f"⛔ 원격 실행 차단\n- 사유: {detail}\n- 요청: {payload[:200]}")
+            _log_remote_action(payload, "unknown", "rejected", detail, update=update)
+            return True, "chat-remote-rejected"
+        return False, ""
+
+    if risk_reasons and action not in {"train-status", "latest-report", "pause", "resume", "restart-heartbeat", "front-video", "top-video", "git-status", "git-commit", "git-commit-push", "git-push-blocked"}:
+        detail = ", ".join(risk_reasons[:6])
+        send_telegram(f"⛔ 원격 실행 차단\n- 사유: {detail}\n- 요청: {payload[:200]}")
+        _log_remote_action(payload, action, "rejected", detail, update=update)
+        return True, "chat-remote-rejected"
+
+    try:
+        handled, outcome, detail = _execute_remote_action(action, payload, run_dir=run_dir, checkpoint=checkpoint)
+    except Exception as err:
+        detail = f"{action} failed: {err}"
+        write_log(f"Remote action error: {detail}")
+        send_telegram(f"⚠️ 원격 실행 실패\n- action: {action}\n- error: {err}")
+        _log_remote_action(payload, action, "error", detail, update=update)
+        return True, "chat-remote-error"
+
+    if handled:
+        send_telegram(f"🤖 원격 실행 결과\n- action: {action}\n{_shorten_text(detail, max_lines=20, max_chars=1600)}")
+        _log_remote_action(payload, action, outcome or "executed", detail, update=update)
+        return True, outcome or "chat-remote-action"
+
+    return False, ""
+
+
+def _extract_chat_payload(text: str) -> str:
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+    parts = stripped.split(maxsplit=1)
+    if len(parts) >= 2 and _normalize_command(parts[0]) == "/chat":
+        return parts[1].strip()
+    return stripped
+
+
+def handle_telegram_chat_message(update: dict, text: str, chat_id: str | None) -> bool:
+    if not is_telegram_chat_mode_enabled():
+        return False
+    payload = _extract_chat_payload(text)
+    if not payload:
+        return False
+    _log_telegram_chat_message(update, payload, chat_id)
+    send_telegram(
+        "💬 chat inbox에 저장했습니다.\n"
+        "자동 실행 가능한 안전 작업이 아니어서 inbox로만 적재했습니다.\n"
+        "필요하면 이후 VS Code 세션에서 읽어 확인할 수 있습니다."
+    )
+    return True
+
+
+def _normalize_command(text: str) -> str:
+    token = (text or "").strip().split()[0].lower() if text else ""
+    if "@" in token:
+        token = token.split("@", 1)[0]
+    return token
+
+
+def get_training_process_pids() -> list[int]:
+    pids = []
+    for pid, cmdline in _get_python_pids_with_cmdline():
+        cmdline_l = cmdline.lower()
+        if "scripts\\rsl_rl\\train.py" in cmdline_l or "scripts/rsl_rl/train.py" in cmdline_l:
+            pids.append(pid)
+    return sorted(set(pids))
+
+
+def test_training_alive() -> bool:
+    return bool(get_training_process_pids())
+
+
+def format_status_message(run_dir: str | None = None, checkpoint: str | None = None) -> str:
+    run_dir = run_dir or get_latest_run_dir()
+    checkpoint = checkpoint or (get_latest_checkpoint(run_dir) if run_dir else None)
+    iter_num = get_checkpoint_iter(checkpoint) if checkpoint else 0
+    gpu_mem = get_gpu_memory_mb()
+    training_pids = get_training_process_pids()
+    heartbeat_alive = test_heartbeat_alive()
+    pause_state = "paused" if is_telegram_paused() else "running"
+    chat_status = _get_chat_storage_status()
+    lines = [
+        "📡 Supervisor 상태",
+        f"- mode: {pause_state}",
+        f"- training: {'alive' if training_pids else 'stopped'} {training_pids if training_pids else ''}",
+        f"- heartbeat: {'alive' if heartbeat_alive else 'missing'}",
+        f"- supervisor_pid: {os.getpid()}",
+        f"- gpu_mem_mb: {gpu_mem}",
+        f"- chat_storage: {'ok' if chat_status['io_ok'] else 'degraded'} | mode={chat_status['mode']} | inbox={chat_status['inbox_count']} | outbox_pending={chat_status['outbox_pending']}",
+    ]
+    if run_dir:
+        lines.append(f"- run: {os.path.basename(run_dir)}")
+    if checkpoint:
+        lines.append(f"- checkpoint: {os.path.basename(checkpoint)}")
+        lines.append(f"- iter: {iter_num:,}")
+
+    if run_dir:
+        kpi = build_supervisor_kpi_snapshot(run_dir)
+        lines.append(f"- verdict: {kpi['verdict']}")
+        lines.append(f"- kpi: {kpi['kpi_line']}")
+    return "\n".join(lines)
+
+
+def format_latest_report_message(run_dir: str | None = None) -> str:
+    run_dir = run_dir or get_latest_run_dir()
+    if not run_dir:
+        return "⚠️ latest run을 찾지 못했습니다."
+    record = load_latest_heartbeat_record(run_dir)
+    if not record:
+        return f"⚠️ heartbeat history가 없습니다: {os.path.basename(run_dir)}"
+
+    primary = record.get("primary_metrics") or {}
+    reasons = record.get("reasons") or []
+    reason_text = reasons[0] if reasons else "N/A"
+    return (
+        "📝 최신 heartbeat 요약\n"
+        f"- run: {record.get('run_name') or os.path.basename(run_dir)}\n"
+        f"- ts: {record.get('timestamp', 'N/A')}\n"
+        f"- kind: {record.get('report_kind', 'N/A')}\n"
+        f"- iter: {int(record.get('iteration', 0)):,}\n"
+        f"- reward: {record.get('mean_reward', 'N/A')}\n"
+        f"- survival: {record.get('survival_pct', 'N/A')}%\n"
+        f"- verdict: {record.get('verdict', 'N/A')}\n"
+        f"- gait: {record.get('gait_grade', 'N/A')} ({record.get('gait_score', 'N/A')}/13)\n"
+        f"- stability: {record.get('stability_grade', 'N/A')} ({record.get('stability_score', 'N/A')}/10)\n"
+        f"- posture: {record.get('posture_style_grade', 'N/A')} ({record.get('posture_style_score', 'N/A')}/10)\n"
+        f"- stand/fwd/diag: {primary.get('standing_height', 'N/A')} / {primary.get('forward_velocity', 'N/A')} / {primary.get('diagonal_coupling', 'N/A')}\n"
+        f"- reason: {reason_text}"
+    )
+
+
+def find_latest_view_video(run_dir: str | None, view_key: str) -> str | None:
+    if not run_dir or not os.path.isdir(run_dir):
+        return None
+    patterns = {
+        "front": ["*front*.mp4"],
+        "top": ["*top*.mp4"],
+    }
+    candidates = []
+    for pattern in patterns.get(view_key, [f"*{view_key}*.mp4"]):
+        candidates.extend(glob.glob(os.path.join(run_dir, "**", pattern), recursive=True))
+    candidates = [path for path in candidates if os.path.isfile(path)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    return candidates[0]
+
+
+def build_command_help() -> str:
+    return (
+        "🛠 Telegram 명령\n"
+        "- /status : 현재 run, iter, 프로세스, KPI 상태\n"
+        "- /latest_report : 최신 heartbeat 요약 재전송\n"
+        "- /chat : chat inbox 모드 ON/OFF 토글\n"
+        "- /chat_off : chat inbox 모드 OFF\n"
+        "- /chat_status : chat inbox/outbox 상태 확인\n"
+        "- /pause : 현재 학습 프로세스 정지 후 pause 모드 진입\n"
+        "- /resume : latest checkpoint에서 학습 재개\n"
+        "- /restart_heartbeat : heartbeat만 재시작\n"
+        "- /front : 최근 front-view mp4 재전송\n"
+        "- /top : 최근 top-view mp4 재전송\n"
+        "- chat 자유문 : 안전검사 통과 시 상태/영상/git status/commit/push 일부 자동 실행\n"
+        "- /help : 명령 목록"
+    )
+
+
+def handle_telegram_command(text: str, run_dir: str | None = None, checkpoint: str | None = None) -> tuple[bool, str]:
+    command = _normalize_command(text)
+    if command in {"", "1", "2"}:
+        return False, ""
+
+    if command in {"/chat", "chat"}:
+        if is_telegram_chat_mode_enabled():
+            remove_telegram_chat_mode_flag()
+            chat_status = _get_chat_storage_status()
+            send_telegram(
+                "💬 chat inbox 모드를 껐습니다.\n"
+                f"- inbox messages: {chat_status['inbox_count']}\n"
+                f"- outbox pending: {chat_status['outbox_pending']}\n"
+                "자유문은 더 이상 chat inbox로 적재되지 않습니다."
+            )
+            return True, "chat-off"
+
+        set_telegram_chat_mode_flag()
+        payload = _extract_chat_payload(text)
+        if payload and payload not in {"/chat", "chat"}:
+            _log_telegram_chat_message({"message": {"from": {}, "chat": {"id": TELEGRAM_CHAT_ID}}}, payload, str(TELEGRAM_CHAT_ID))
+            send_telegram(
+                "💬 chat inbox 모드를 켰습니다.\n"
+                f"- inbox file: logs/telegram_chat_inbox.jsonl\n"
+                f"- outbox file: logs/telegram_chat_outbox.jsonl\n"
+                f"첫 메시지도 inbox에 저장했습니다: {payload[:120]}"
+            )
+        else:
+            send_telegram(
+                "💬 chat inbox 모드를 켰습니다.\n"
+                "- inbox file: logs/telegram_chat_inbox.jsonl\n"
+                "- outbox file: logs/telegram_chat_outbox.jsonl\n"
+                "이제 자유문을 보내면 inbox에 저장되고, 내가 남긴 답변은 outbox를 통해 Telegram으로 전달됩니다."
+            )
+        return True, "chat-on"
+
+    if command in {"/chat_off", "chat_off", "/chat_stop", "chat_stop"}:
+        remove_telegram_chat_mode_flag()
+        send_telegram("💬 chat inbox 모드를 껐습니다.")
+        return True, "chat-off"
+
+    if command in {"/chat_status", "chat_status"}:
+        chat_status = _get_chat_storage_status()
+        send_telegram(
+            "💬 chat bridge 상태\n"
+            f"- mode: {chat_status['mode']}\n"
+            f"- io: {'ok' if chat_status['io_ok'] else 'degraded'}\n"
+            f"- probe: {'ok' if chat_status['probe_ok'] else 'failed'} ({chat_status['probe_detail']})\n"
+            f"- inbox messages: {chat_status['inbox_count']}\n"
+            f"- outbox pending: {chat_status['outbox_pending']}\n"
+            f"- last error: {chat_status['last_error']}\n"
+            f"- last error ts: {chat_status['last_error_ts']}\n"
+            f"- last probe ts: {chat_status['last_probe_ts']}\n"
+            f"- inbox file: logs/telegram_chat_inbox.jsonl\n"
+            f"- outbox file: logs/telegram_chat_outbox.jsonl"
+        )
+        return True, "chat-status"
+
+    if command in {"/help", "help"}:
+        send_telegram(build_command_help())
+        return True, "help"
+
+    if command in {"/status", "status"}:
+        send_telegram(format_status_message(run_dir=run_dir, checkpoint=checkpoint))
+        return True, "status"
+
+    if command in {"/latest_report", "latest_report", "/report", "report"}:
+        send_telegram(format_latest_report_message(run_dir=run_dir))
+        return True, "latest_report"
+
+    if command in {"/pause", "pause"}:
+        already_paused = is_telegram_paused()
+        set_telegram_pause_flag()
+        if test_training_alive():
+            send_telegram("⏸️ Telegram pause 요청 수신. 학습 프로세스를 정지합니다.")
+            set_maintenance_flag()
+            try:
+                ensure_gpu_clean(reason="telegram-pause")
+            finally:
+                remove_maintenance_flag()
+            send_telegram("⏸️ pause 완료. /resume 으로 재개할 수 있습니다.")
+        elif already_paused:
+            send_telegram("⏸️ 이미 pause 상태입니다. /resume 으로 재개할 수 있습니다.")
+        else:
+            send_telegram("⏸️ 학습 프로세스는 이미 멈춰 있습니다. pause 상태로 전환했습니다.")
+        return True, "pause"
+
+    if command in {"/resume", "resume"}:
+        if test_training_alive():
+            remove_telegram_pause_flag()
+            send_telegram("▶️ 이미 학습 프로세스가 실행 중입니다. pause 플래그만 해제했습니다.")
+            return True, "resume-already-running"
+
+        run_dir = run_dir or get_latest_run_dir()
+        checkpoint = checkpoint or (get_latest_checkpoint(run_dir) if run_dir else None)
+        if not run_dir or not checkpoint:
+            send_telegram("⚠️ 재개할 latest run/checkpoint를 찾지 못했습니다.")
+            return True, "resume-missing-checkpoint"
+
+        iter_num = get_checkpoint_iter(checkpoint)
+        next_regular_iter = get_next_regular_trigger(iter_num)
+        remove_telegram_pause_flag()
+        remove_user_stop_flag()
+        send_telegram(
+            f"▶️ Telegram resume 요청 수신\n"
+            f"- run: {os.path.basename(run_dir)}\n"
+            f"- checkpoint: {os.path.basename(checkpoint)}\n"
+            f"- iter: {iter_num:,}"
+        )
+        resume_training(run_dir, checkpoint, next_regular_iter=next_regular_iter)
+        return True, "resume"
+
+    if command in {"/restart_heartbeat", "restart_heartbeat", "/hb", "hb"}:
+        restart_heartbeat()
+        return True, "restart_heartbeat"
+
+    if command in {"/front", "front", "/top", "top"}:
+        view_key = "front" if "front" in command else "top"
+        run_dir = run_dir or get_latest_run_dir()
+        video_path = find_latest_view_video(run_dir, view_key)
+        if not video_path:
+            send_telegram(f"⚠️ 최근 {view_key}-view 영상 파일을 찾지 못했습니다.")
+            return True, f"{view_key}-missing"
+        iter_num = get_checkpoint_iter(checkpoint) if checkpoint else 0
+        send_telegram_video(video_path, f"📹 latest {view_key}-view | iter {iter_num:,} | {os.path.basename(run_dir) if run_dir else 'N/A'}")
+        return True, view_key
+
+    return False, ""
+
+
+def process_pending_telegram_commands(run_dir: str | None = None, checkpoint: str | None = None):
+    """대기 중인 Telegram 업데이트를 짧게 polling하고 허용 명령을 처리합니다."""
+    flush_telegram_chat_outbox()
+    try:
+        updates = _fetch_telegram_updates(timeout_sec=0)
+    except Exception as err:
+        write_log(f"[TG] Poll failed: {err}")
+        return
+
+    for update in updates:
+        text, chat_id, _msg = _extract_telegram_message(update)
+        if not text or str(chat_id) != str(TELEGRAM_CHAT_ID):
+            continue
+        handled, outcome = handle_telegram_command(text.strip(), run_dir=run_dir, checkpoint=checkpoint)
+        if not handled:
+            handled, outcome = try_handle_telegram_chat_action(update, text.strip(), chat_id, run_dir=run_dir, checkpoint=checkpoint)
+        if not handled and handle_telegram_chat_message(update, text.strip(), chat_id):
+            handled = True
+            outcome = "chat-inbox"
+        if not handled and re.match(r"^\s*[12]\s*$", text):
+            send_telegram("ℹ️ 지금은 선택 대기 중이 아닙니다. /help 로 사용 가능한 명령을 확인하세요.")
+            outcome = "ignored-choice-outside-decision"
+        _log_telegram_update(update, text.strip(), chat_id, handled=handled or bool(outcome), outcome=outcome)
+
+
 def flush_telegram_updates():
     """이전 Telegram 메시지를 모두 소진하여 offset 갱신."""
     global _tg_offset
     try:
-        url = f"{TG_BASE_URL}/getUpdates?timeout=0"
-        resp = json.loads(urllib.request.urlopen(url, timeout=5).read().decode("utf-8"))
-        if resp.get("ok") and resp.get("result"):
-            _tg_offset = resp["result"][-1]["update_id"] + 1
+        updates = _fetch_telegram_updates(timeout_sec=0)
+        if updates:
+            write_log(f"[TG] Flushed {len(updates)} pending updates")
     except Exception:
         pass
 
 
 def get_telegram_reply(timeout_sec: int = 600) -> str | None:
     """텔레그램 사용자 응답 대기. timeout_sec 이내 응답 없으면 None."""
-    global _tg_offset
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         try:
-            url = f"{TG_BASE_URL}/getUpdates?offset={_tg_offset}&timeout=10"
-            resp = json.loads(urllib.request.urlopen(url, timeout=15).read().decode("utf-8"))
-            if resp.get("ok") and resp.get("result"):
-                for update in resp["result"]:
-                    _tg_offset = update["update_id"] + 1
-                    msg = update.get("message", {})
-                    text = msg.get("text")
-                    chat_id = msg.get("chat", {}).get("id")
-                    if text and str(chat_id) == str(TELEGRAM_CHAT_ID):
-                        write_log(f"[TG] Reply received: {text}")
-                        return text.strip()
+            updates = _fetch_telegram_updates(timeout_sec=10)
+            for update in updates:
+                text, chat_id, _msg = _extract_telegram_message(update)
+                if not text or str(chat_id) != str(TELEGRAM_CHAT_ID):
+                    continue
+                stripped = text.strip()
+                handled, outcome = handle_telegram_command(stripped)
+                _log_telegram_update(update, stripped, chat_id, handled=handled, outcome=outcome or ("decision-reply" if not handled else outcome))
+                if handled:
+                    continue
+                write_log(f"[TG] Reply received: {stripped}")
+                return stripped
         except Exception:
             time.sleep(5)
         remaining = int(deadline - time.time())
@@ -1115,12 +2196,12 @@ def get_heartbeat_pid() -> int:
 def _get_python_pids_with_cmdline() -> list:
     """psutil로 모든 python.exe 프로세스의 (pid, cmdline_str) 리스트 반환."""
     result = []
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+    for proc in _iter_processes_safe(["pid", "name", "cmdline"]):
         try:
             if proc.info["name"] and "python" in proc.info["name"].lower():
                 cmdline = " ".join(proc.info["cmdline"] or [])
                 result.append((proc.info["pid"], cmdline))
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.Error, PermissionError, OSError):
             pass
     return result
 
@@ -1134,11 +2215,11 @@ def kill_all_python(reason: str = "cleanup"):
     write_log(f"[{reason}] Killing python/Kit processes (heartbeat/supervisor 제외)...")
 
     # Kit 프로세스 무조건 kill
-    for proc in psutil.process_iter(["pid", "name"]):
+    for proc in _iter_processes_safe(["pid", "name"]):
         try:
             if proc.info["name"] and proc.info["name"].lower() == "kit.exe":
                 proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.Error, PermissionError, OSError):
             pass
 
     # python.exe 프로세스 kill (heartbeat + supervisor 자신 제외)
@@ -1266,6 +2347,14 @@ def test_heartbeat_alive() -> bool:
 
 def restart_heartbeat():
     """training_heartbeat.py 재시작 후 결과를 텔레그램으로 알림."""
+    global _last_heartbeat_restart_ts
+    now = time.time()
+    cooldown_left = MIN_HEARTBEAT_RESTART_INTERVAL_SEC - (now - _last_heartbeat_restart_ts)
+    if cooldown_left > 0:
+        write_log(f"Heartbeat restart skipped due to cooldown ({cooldown_left:.0f}s left)")
+        return True
+    _last_heartbeat_restart_ts = now
+
     write_log("Restarting training_heartbeat...")
     # 기존 PID 파일 제거
     try:
@@ -1275,16 +2364,20 @@ def restart_heartbeat():
 
     # 최신 run dir 찾기
     latest_run = get_latest_run_dir()
-    run_arg = f'--run_dir "{latest_run}"' if latest_run else ""
+    hb_cmd = [sys.executable, HEARTBEAT_SCRIPT, "--iter_step", "100", "--poll", "30"]
+    if latest_run:
+        hb_cmd.extend(["--run_dir", latest_run])
 
-    hb_cmd = (
-        f'conda activate env_isaaclab && '
-        f'set PYTHONIOENCODING=utf-8 && '
-        f'python "{HEARTBEAT_SCRIPT}" --iter_step 100 --poll 30 {run_arg}'
-    )
     subprocess.Popen(
-        ["cmd", "/c", hb_cmd],
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        hb_cmd,
+        cwd=PROJECT_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP |
+            (subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        ),
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     time.sleep(10)
 
@@ -1326,17 +2419,16 @@ def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int) -> di
         write_log(f"Recording view: {view_label} ({view_name}, envs={num_envs})")
         pre_videos = set(glob.glob(os.path.join(run_dir, "videos", "play", "*.mp4")))
 
-        play_cmd = (
-            f'conda activate env_isaaclab && '
-            f'cd /d {PROJECT_ROOT} && '
+        play_cmd = _wrap_conda_command(
+            f'cd /d "{PROJECT_ROOT}" && '
             f'set PYTHONIOENCODING=utf-8 && '
-            f'{ISAAC_LAB} -p {play_script} '
+            f'"{ISAAC_LAB}" -p "{play_script}" '
             f'--task={TASK} --num_envs={num_envs} '
-            f'--checkpoint={checkpoint_path} --video --video_length={VIDEO_LENGTH} '
+            f'--checkpoint="{checkpoint_path}" --video --video_length={VIDEO_LENGTH} '
             f'--camera_view={view_name} --camera_zoom={camera_zoom}'
         )
         write_log(f"play_cmd({view_key}): {play_cmd}")
-        proc = subprocess.Popen(["cmd", "/c", play_cmd])
+        proc = _popen_hidden_cmd(play_cmd)
 
         timeout = 480
         elapsed = 0
@@ -1456,9 +2548,11 @@ print(f'OK: {{count}} frames @ {{TARGET_FPS}}fps H.264 -> {{dst}}')
         with open(tmp_py, "w", encoding="utf-8") as f:
             f.write(py_code)
 
-        reencode_cmd = f'conda activate env_isaaclab && set PYTHONIOENCODING=utf-8 && python "{tmp_py}"'
-        proc = subprocess.run(
-            ["cmd", "/c", reencode_cmd],
+        reencode_cmd = _wrap_conda_command(
+            f'set PYTHONIOENCODING=utf-8 && python "{tmp_py}"'
+        )
+        proc = _run_hidden_cmd(
+            reencode_cmd,
             capture_output=True, timeout=300,
         )
         try:
@@ -1690,18 +2784,17 @@ def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, vid
         write_basic_analysis(run_dir, iter_num)
         return
 
-    analysis_cmd = (
-        f'conda activate env_isaaclab && '
-        f'cd /d {PROJECT_ROOT} && '
+    analysis_cmd = _wrap_conda_command(
+        f'cd /d "{PROJECT_ROOT}" && '
         f'set PYTHONIOENCODING=utf-8 && '
-        f'{ISAAC_LAB} -p {ANALYZE_SCRIPT} '
-        f'--run_dir {run_dir} --clip_num {clip_num}'
+        f'"{ISAAC_LAB}" -p "{ANALYZE_SCRIPT}" '
+        f'--run_dir "{run_dir}" --clip_num {clip_num}'
     )
     write_log(f"analysis_cmd: {analysis_cmd}")
 
     try:
-        proc = subprocess.Popen(
-            ["cmd", "/c", analysis_cmd],
+        proc = _popen_hidden_cmd(
+            analysis_cmd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         try:
@@ -1767,18 +2860,17 @@ def resume_training(run_dir: str, checkpoint_path: str, next_regular_iter: int |
     write_log(f"Resuming: {run_name} / {cp_name} (iter {iter_num}, Phase {phase_num}/{phase_name})")
     write_log(f"  common_step_counter will sync to iter {iter_num} × steps_per_env")
     train_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "train.py")
-    train_cmd = (
-        f'conda activate env_isaaclab && '
-        f'cd /d {PROJECT_ROOT} && '
+    train_cmd = _wrap_conda_command(
+        f'cd /d "{PROJECT_ROOT}" && '
         f'set PYTHONIOENCODING=utf-8 && '
-        f'{ISAAC_LAB} -p {train_script} '
+        f'"{ISAAC_LAB}" -p "{train_script}" '
         f'--task={TASK} --num_envs={TRAIN_ENVS} --headless '
         f'--max_iterations={MAX_ITERATIONS} '
         f'--resume --load_run={run_name} --checkpoint={cp_name}'
     )
     write_log(f"train_cmd: {train_cmd}")
-    subprocess.Popen(
-        ["cmd", "/c", train_cmd],
+    _popen_hidden_cmd(
+        train_cmd,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
 
@@ -1850,8 +2942,8 @@ def main():
     if args.max_iterations > 0:
         MAX_ITERATIONS = args.max_iterations
 
-    # PID 기록
-    write_pid_file()
+    # PID 기록 + 중복 실행 방지
+    acquire_lock()
 
     # 이전 user_stop.flag 제거 (재시작 시 정상 동작 보장)
     remove_user_stop_flag()
@@ -1880,7 +2972,8 @@ def main():
         f"├ Max: {MAX_ITERATIONS} iter\n"
         f"└ 의사결정 타임아웃: {DECISION_TIMEOUT_SEC}초\n\n"
         f"📢 등급 D/F 시 텔레그램으로 물어봅니다\n"
-        f"10분 무응답 → 자동 계속"
+        f"10분 무응답 → 자동 계속\n\n"
+        f"🛠 원격 명령: /help"
     )
 
     clip_num = 0
@@ -1894,7 +2987,8 @@ def main():
     try:
         while True:
             try:
-                time.sleep(SUPERVISOR_POLL_SECONDS)
+                process_pending_telegram_commands(run_dir=get_latest_run_dir())
+                sleep_with_command_poll(SUPERVISOR_POLL_SECONDS, run_dir=get_latest_run_dir())
 
                 # Heartbeat 워치독
                 if not test_heartbeat_alive():
@@ -1914,6 +3008,7 @@ def main():
                 checkpoint = get_latest_checkpoint(run_dir)
                 if not checkpoint:
                     continue
+                process_pending_telegram_commands(run_dir=run_dir, checkpoint=checkpoint)
 
                 iter_num = get_checkpoint_iter(checkpoint)
                 kpi_snapshot = build_supervisor_kpi_snapshot(run_dir)
@@ -1937,6 +3032,9 @@ def main():
                     )
                     exit_notice = None
                     break
+
+                if is_telegram_paused():
+                    continue
 
                 if is_training_complete(iter_num):
                     trigger_clip, trigger_reason = True, "final"
@@ -2161,6 +3259,13 @@ def main():
                     time.sleep(15)
 
                 time.sleep(5)
+
+                if is_telegram_paused():
+                    write_log("Resume skipped due to Telegram pause flag")
+                    send_telegram("⏸️ pause 플래그가 있어 자동 재개를 건너뜁니다. /resume 으로 다시 시작하세요.")
+                    remove_maintenance_flag()
+                    last_verdict = kpi_snapshot["verdict"]
+                    continue
 
                 # Phase 5: 훈련 재개 (반드시 실행)
                 write_log("--- Phase 5/5: Resume Training ---")

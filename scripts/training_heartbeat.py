@@ -17,6 +17,8 @@ import traceback
 import io
 import math
 
+import psutil
+
 # Windows cp949 콘솔에서 이모지 깨짐 방지
 if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -61,6 +63,8 @@ PID_FILE = os.path.join(PROJECT_ROOT, "logs", "training_heartbeat.pid")
 MAINTENANCE_FLAG = os.path.join(PROJECT_ROOT, "logs", "maintenance.flag")
 USER_STOP_FLAG = os.path.join(PROJECT_ROOT, "logs", "user_stop.flag")
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
+SHOW_APPROX_TIMELINE = str(_env.get("SHOW_APPROX_TIMELINE", "0")).strip().lower() in {"1", "true", "yes", "on"}
+MIN_SUPERVISOR_RESTART_INTERVAL_SEC = int(_env.get("MIN_SUPERVISOR_RESTART_INTERVAL_SEC", "120"))
 
 # TensorBoard remote access
 TAILSCALE_IP = _env.get("TAILSCALE_IP", "")
@@ -101,6 +105,25 @@ def update_tb_junction(run_dir: str):
 # ─── TensorBoard 프로세스 관리 ──────────────────────────────────
 
 _tb_restart_count = 0
+_last_supervisor_restart_ts = 0.0
+
+
+def _iter_processes_safe(attrs):
+    """Yield psutil processes while tolerating protected/system processes on Windows."""
+    iterator = psutil.process_iter(attrs)
+    while True:
+        try:
+            proc = next(iterator)
+        except StopIteration:
+            break
+        except (psutil.Error, PermissionError, OSError):
+            continue
+
+        try:
+            _ = proc.info
+            yield proc
+        except (psutil.Error, PermissionError, OSError):
+            continue
 
 def _is_tb_alive() -> bool:
     """TB_PORT에 TCP 연결이 가능한지 확인."""
@@ -130,14 +153,13 @@ def ensure_tensorboard() -> None:
 
     try:
         # 이전 좀비 프로세스 정리
-        import psutil
-        for p in psutil.process_iter(["pid", "cmdline"]):
+        for p in _iter_processes_safe(["pid", "cmdline"]):
             try:
                 cmdline = " ".join(p.info["cmdline"] or [])
                 if "tensorboard" in cmdline.lower() and str(TB_PORT) in cmdline:
                     p.terminate()
                     print(f"[TB] Killed zombie TensorBoard PID {p.pid}")
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except (psutil.Error, PermissionError, OSError):
                 pass
 
         # 새 TensorBoard 시작
@@ -190,7 +212,7 @@ def _read_ops_version() -> str:
         value = os.environ.get(key) or _env.get(key, "")
         if value:
             return value
-    return "V22"
+    return _read_train_version() or ""
 
 
 TRAIN_VERSION = _read_train_version()
@@ -1130,7 +1152,8 @@ def format_report(data, run_name, cycle_num):
         lines.append(kpi_line)
     stride_val = rewards.get("stride_length", 0.0)
     cycle_val = rewards.get("gait_cycle_period", 0.0)
-    lines.append(f"  📎 접촉참고: stride {stride_val:+.4f} / cycle {cycle_val:+.4f}")
+    if abs(stride_val) > 0.01 or abs(cycle_val) > 0.01:
+        lines.append(f"  📎 접촉참고: stride {stride_val:+.4f} / cycle {cycle_val:+.4f}")
     lines.append("")
 
     # ════════════════════════════════════════════
@@ -1369,26 +1392,22 @@ def format_report(data, run_name, cycle_num):
         lines.append(f"  ❗ {p}")
     lines.append("")
 
-    # 🔮 예상 타임라인 (대략적 참고용, 학습마다 차이 큼)
-    lines.append(f"<b>🔮 대략적 단계 참고</b>")
-    lines.append(f"  ⚠️ 아래는 과거 학습 기준 참고치이며, 실제 진행은 다를 수 있음")
-    phases_timeline = [
-        (2000, "기립 시작", "ep length 증가 시작"),
-        (4000, "균형 학습", "넘어짐 비율 감소"),
-        (7000, "관절 패턴?", "커플링/리듬 발달 가능 (영상 확인)"),
-        (10000, "보행 발달?", "stride/velocity 확인 필요"),
-        (13000, "안정화", "미세 조정"),
-        (15600, "훈련 종료", "최종 모델 (영상 검증 필수)"),
-    ]
-    for target_iter, label, desc in phases_timeline:
-        if current_iter < target_iter:
-            marker = "⬜"
-        elif current_iter >= target_iter:
-            marker = "✅"
-        else:
-            marker = "▶️"
-        lines.append(f"  {marker} iter {target_iter:>6,}: {label} — {desc}")
-    lines.append("")
+    if SHOW_APPROX_TIMELINE:
+        # 과거 런 기반 휴리스틱이라 기본 비활성화. 명시적으로 켰을 때만 노출.
+        lines.append(f"<b>🔮 대략적 단계 참고</b>")
+        lines.append(f"  ⚠️ 아래는 과거 학습 기준 참고치이며, 실제 진행은 다를 수 있음")
+        phases_timeline = [
+            (2000, "기립 시작", "ep length 증가 시작"),
+            (4000, "균형 학습", "넘어짐 비율 감소"),
+            (7000, "관절 패턴?", "커플링/리듬 발달 가능 (영상 확인)"),
+            (10000, "보행 발달?", "stride/velocity 확인 필요"),
+            (13000, "안정화", "미세 조정"),
+            (15600, "훈련 종료", "최종 모델 (영상 검증 필수)"),
+        ]
+        for target_iter, label, desc in phases_timeline:
+            marker = "✅" if current_iter >= target_iter else "⬜"
+            lines.append(f"  {marker} iter {target_iter:>6,}: {label} — {desc}")
+        lines.append("")
 
     # ════════════════════════════════════════════
     # 🧑‍🔬 AI 산문 분석
@@ -1723,28 +1742,32 @@ def check_training_alive():
 def check_supervisor_alive():
     """Training Supervisor (python) 프로세스가 살아있는지 확인."""
     try:
-        import psutil
-        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        for proc in _iter_processes_safe(["pid", "name", "cmdline"]):
             try:
                 if proc.info["name"] and "python" in proc.info["name"].lower():
                     cmdline = " ".join(proc.info["cmdline"] or [])
                     if "training_supervisor" in cmdline.lower():
                         return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except (psutil.Error, PermissionError, OSError):
                 pass
         return False
-    except ImportError:
-        # psutil 없으면 보수적으로 alive 간주
-        return True
     except Exception:
         return True  # 오류 시 보수적으로 alive 간주
 
 
 def restart_supervisor():
     """training_supervisor.py 자동 재시작. 성공 여부를 반환."""
+    global _last_supervisor_restart_ts
     import subprocess as _sp
     supervisor_script = os.path.join(PROJECT_ROOT, "scripts", "training_supervisor.py")
     supervisor_pid_file = os.path.join(PROJECT_ROOT, "logs", "training_supervisor.pid")
+
+    now_ts = time.time()
+    cooldown_left = MIN_SUPERVISOR_RESTART_INTERVAL_SEC - (now_ts - _last_supervisor_restart_ts)
+    if cooldown_left > 0:
+        print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Supervisor restart skipped due to cooldown ({cooldown_left:.0f}s left)")
+        return True
+    _last_supervisor_restart_ts = now_ts
 
     # 기존 PID 파일 제거
     try:
@@ -1752,15 +1775,16 @@ def restart_supervisor():
     except OSError:
         pass
 
-    sv_cmd = (
-        f'conda activate env_isaaclab && '
-        f'set PYTHONIOENCODING=utf-8 && '
-        f'python scripts/training_supervisor.py'
-    )
     _sp.Popen(
-        ["cmd", "/c", sv_cmd],
+        [sys.executable, supervisor_script],
         cwd=PROJECT_ROOT,
-        creationflags=_sp.CREATE_NEW_PROCESS_GROUP,
+        stdout=_sp.DEVNULL,
+        stderr=_sp.DEVNULL,
+        creationflags=(
+            _sp.CREATE_NEW_PROCESS_GROUP |
+            (_sp.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        ),
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     time.sleep(15)  # supervisor 초기화 대기 (heartbeat보다 느림)
 
@@ -1771,14 +1795,13 @@ def restart_supervisor():
         except Exception:
             # PID 파일 없어도 프로세스가 살아있으면 OK
             try:
-                import psutil
-                for proc in psutil.process_iter(["pid", "cmdline"]):
+                for proc in _iter_processes_safe(["pid", "cmdline"]):
                     try:
                         cmdline = " ".join(proc.info["cmdline"] or [])
                         if "training_supervisor" in cmdline.lower():
                             new_pid = proc.info["pid"]
                             break
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    except (psutil.Error, PermissionError, OSError):
                         pass
             except Exception:
                 pass
