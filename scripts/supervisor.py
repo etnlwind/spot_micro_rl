@@ -68,7 +68,7 @@ def _handle_report_command(run_dir: str, checkpoint: str) -> None:
         return
     with common.busy_lock("report"):
         common.update_state(mode="reporting", last_command="report", last_error="")
-        report_data = common.stop_and_report(run_dir, checkpoint, common.SUPERVISOR_LOG)
+        report_data = common.stop_and_report(run_dir, checkpoint, common.SUPERVISOR_LOG, force=True)
         common.send_text(
             common.format_report_summary(run_dir, checkpoint, report_data["analysis_text"], report_data["kpi_snapshot"]),
             common.SUPERVISOR_LOG,
@@ -95,7 +95,7 @@ def _handle_view_command(view_key: str, run_dir: str, checkpoint: str) -> None:
         return
     with common.busy_lock(view_key):
         common.update_state(mode="rendering", last_command=view_key, last_error="")
-        videos = common.ensure_current_videos(run_dir, checkpoint, common.SUPERVISOR_LOG)
+        videos = common.ensure_current_videos(run_dir, checkpoint, common.SUPERVISOR_LOG, force=True)
         video_path = videos.get(view_key)
         if not video_path:
             raise RuntimeError(f"{view_key} view was not generated.")

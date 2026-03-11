@@ -1,6 +1,7 @@
 import contextlib
 import datetime
 import glob
+import hashlib
 import io
 import json
 import math
@@ -77,11 +78,27 @@ PLAY_ENVS = int(_env.get("PLAY_ENVS", "50"))
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
 VIDEO_LENGTH = int(_env.get("VIDEO_LENGTH", "250"))
 VIDEO_FPS = int(_env.get("VIDEO_FPS", "15"))
+VIDEO_CAPTURE_HEADLESS = _parse_env_flag(
+    os.environ.get("VIDEO_CAPTURE_HEADLESS", _env.get("VIDEO_CAPTURE_HEADLESS")),
+    default=True,
+)
+VIDEO_CAPTURE_FALLBACK_GUI = _parse_env_flag(
+    os.environ.get("VIDEO_CAPTURE_FALLBACK_GUI", _env.get("VIDEO_CAPTURE_FALLBACK_GUI")),
+    default=True,
+)
+VIDEO_REQUIRE_DISTINCT_VIEWS = _parse_env_flag(
+    os.environ.get("VIDEO_REQUIRE_DISTINCT_VIEWS", _env.get("VIDEO_REQUIRE_DISTINCT_VIEWS")),
+    default=True,
+)
+REPORT_REQUIRE_XLSX = _parse_env_flag(
+    os.environ.get("REPORT_REQUIRE_XLSX", _env.get("REPORT_REQUIRE_XLSX")),
+    default=True,
+)
 SUPERVISOR_POLL_SECONDS = int(_env.get("SUPERVISOR_POLL_SECONDS", "10"))
 HEARTBEAT_POLL_SECONDS = int(_env.get("HEARTBEAT_POLL_SECONDS", _env.get("V2_HEARTBEAT_POLL_SECONDS", "30")))
 HEARTBEAT_ITER_STEP = int(_env.get("HEARTBEAT_ITER_STEP", _env.get("V2_HEARTBEAT_ITER_STEP", "100")))
 ZIP_FRAME_COUNT = int(_env.get("ZIP_FRAME_COUNT", "12"))
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", LOG_SUBDIR)
 STATE_FILE = os.path.join(PROJECT_ROOT, "logs", "state.json")
@@ -634,6 +651,24 @@ def _find_updated_play_video(run_dir: str, before_snapshot: dict[str, tuple[int,
             candidates.append((stat.st_mtime_ns, stat.st_size, path))
     candidates.sort()
     return candidates[-1][2] if candidates else None
+
+
+def _sha256_file(path: str) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _find_duplicate_video_hashes(captured_videos: dict[str, str]) -> dict[str, list[str]]:
+    hash_to_views: dict[str, list[str]] = {}
+    for view_key, path in captured_videos.items():
+        if not path or not os.path.isfile(path):
+            continue
+        digest = _sha256_file(path)
+        hash_to_views.setdefault(digest, []).append(view_key)
+    return {digest: sorted(views) for digest, views in hash_to_views.items() if len(views) > 1}
 
 
 def find_latest_video(view_key: str, run_dir: str | None = None) -> str | None:
@@ -1259,43 +1294,119 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str, log_path: str) ->
     return out_path
 
 
-def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int) -> dict[str, str]:
+def _build_play_command(
+    checkpoint_path: str,
+    play_script: str,
+    camera_view: str,
+    camera_zoom: float,
+    num_envs: int,
+    headless: bool,
+) -> str:
+    command = (
+        f'cd /d "{PROJECT_ROOT}" && '
+        'set PYTHONIOENCODING=utf-8 && '
+        f'"{ISAAC_LAB}" -p "{play_script}" '
+        f'--task={TASK} --num_envs={num_envs} '
+        f'--checkpoint="{checkpoint_path}" --video --video_length={VIDEO_LENGTH} '
+        f'--camera_view={camera_view} --camera_zoom={camera_zoom}'
+    )
+    if headless:
+        command += " --headless"
+    return _wrap_conda_command(command)
+
+
+def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int, log_path: str, headless: bool) -> dict[str, str]:
     play_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "play.py")
     iter_num = get_checkpoint_iter(checkpoint_path)
     captured_videos: dict[str, str] = {}
     for spec in get_video_capture_specs(PLAY_ENVS):
         pre_videos = _snapshot_play_videos(run_dir)
-        play_cmd = _wrap_conda_command(
-            f'cd /d "{PROJECT_ROOT}" && '
-            f'set PYTHONIOENCODING=utf-8 && '
-            f'"{ISAAC_LAB}" -p "{play_script}" '
-            f'--task={TASK} --num_envs={spec["num_envs"]} '
-            f'--checkpoint="{checkpoint_path}" --video --video_length={VIDEO_LENGTH} '
-            f'--camera_view={spec["camera_view"]} --camera_zoom={spec["camera_zoom"]} '
-            '--headless'
+        play_cmd = _build_play_command(
+            checkpoint_path=checkpoint_path,
+            play_script=play_script,
+            camera_view=spec["camera_view"],
+            camera_zoom=spec["camera_zoom"],
+            num_envs=spec["num_envs"],
+            headless=headless,
         )
-        write_log(f"Recording {spec['key']}: {play_cmd}", SUPERVISOR_LOG)
+        mode_label = "headless" if headless else "gui"
+        write_log(f"Recording {spec['key']} ({mode_label}): {play_cmd}", log_path)
+        started_at = time.time()
         proc = _popen_hidden_cmd(play_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         timeout = time.time() + 480
         while proc.poll() is None and time.time() < timeout:
             time.sleep(5)
-        if proc.poll() is None:
+
+        timed_out = proc.poll() is None
+        if timed_out:
             try:
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
             except Exception:
                 pass
+
+        elapsed = time.time() - started_at
+        rc = proc.poll()
+        if timed_out:
+            write_log(f"Recording {spec['key']} timed out after {elapsed:.1f}s", log_path)
+            continue
+        if rc not in (0, None):
+            write_log(f"Recording {spec['key']} exited with rc={rc} after {elapsed:.1f}s", log_path)
+
         latest_video = _find_updated_play_video(run_dir, pre_videos)
         if not latest_video:
-            write_log(f"Recording {spec['key']} failed: no new or updated MP4 was detected", SUPERVISOR_LOG)
+            write_log(f"Recording {spec['key']} failed: no new or updated MP4 was detected", log_path)
             continue
+
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         new_name = f"clip_{clip_num}_iter{iter_num}_{spec['key']}_{ts}.mp4"
         dest_path = os.path.join(run_dir, "videos", new_name)
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         shutil.copy2(latest_video, dest_path)
-        dest_path = reencode_video(dest_path, VIDEO_FPS, SUPERVISOR_LOG)
+        dest_path = reencode_video(dest_path, VIDEO_FPS, log_path)
+        try:
+            digest = _sha256_file(dest_path)[:12]
+            size = os.path.getsize(dest_path)
+            write_log(f"Captured {spec['key']} -> {os.path.basename(dest_path)} ({size} bytes, sha256={digest}...)", log_path)
+        except Exception:
+            pass
         captured_videos[spec["key"]] = dest_path
     return captured_videos
+
+
+def capture_videos_with_validation(checkpoint_path: str, run_dir: str, clip_num: int, log_path: str) -> dict[str, str]:
+    attempt_modes = [VIDEO_CAPTURE_HEADLESS]
+    if VIDEO_CAPTURE_FALLBACK_GUI and VIDEO_CAPTURE_HEADLESS:
+        attempt_modes.append(False)
+
+    last_error = ""
+    for attempt_index, headless in enumerate(attempt_modes, start=1):
+        mode_label = "headless" if headless else "gui"
+        write_log(f"Video capture attempt {attempt_index}/{len(attempt_modes)} mode={mode_label}", log_path)
+        captured_videos = record_video_bundle(
+            checkpoint_path=checkpoint_path,
+            run_dir=run_dir,
+            clip_num=clip_num,
+            log_path=log_path,
+            headless=headless,
+        )
+        if not captured_videos:
+            last_error = f"No videos were generated in {mode_label} mode."
+            write_log(last_error, log_path)
+            continue
+
+        if VIDEO_REQUIRE_DISTINCT_VIEWS:
+            duplicates = _find_duplicate_video_hashes(captured_videos)
+            if duplicates:
+                duplicate_groups = ", ".join("/".join(view_keys) for view_keys in duplicates.values())
+                last_error = f"Duplicate video content detected across views: {duplicate_groups}"
+                write_log(last_error, log_path)
+                if headless and VIDEO_CAPTURE_FALLBACK_GUI:
+                    write_log("Retrying video capture without headless mode due to duplicate hashes.", log_path)
+                    continue
+                raise RuntimeError(last_error)
+        return captured_videos
+
+    raise RuntimeError(last_error or "No videos were generated.")
 
 
 def select_representative_video(captured_videos: dict[str, str]) -> str | None:
@@ -1342,6 +1453,8 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
         os.path.join(artifact_dir, f"clip_{clip_num}_iter{iter_num}_{timestamp}_heartbeat_history.xlsx"),
         SUPERVISOR_LOG,
     )
+    if REPORT_REQUIRE_XLSX and (not heartbeat_xlsx_path or not os.path.isfile(heartbeat_xlsx_path)):
+        raise RuntimeError("Heartbeat XLSX export failed.")
     manifest = {
         "clip_num": clip_num,
         "iteration": iter_num,
@@ -1406,7 +1519,7 @@ def ensure_current_videos(run_dir: str, checkpoint_path: str, log_path: str, for
     iter_num = get_checkpoint_iter(checkpoint_path)
     clip_num = max(1, iter_num)
     write_log(f"Generating current videos for iter {iter_num}", log_path)
-    captured_videos = record_video_bundle(checkpoint_path, run_dir, clip_num)
+    captured_videos = capture_videos_with_validation(checkpoint_path, run_dir, clip_num, log_path)
     if not captured_videos:
         raise RuntimeError("No videos were generated.")
     update_state(

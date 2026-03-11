@@ -169,6 +169,10 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
 - `--contact_primary_mode`: `foot`, `toe`, `aggregate`
 - `VIDEO_LENGTH`: report/video 생성 시 녹화 길이. 초가 아니라 simulation step 기준
 - `VIDEO_FPS`: report/video ZIP에 넣기 전 재인코딩 fps. 낮출수록 같은 step 수라도 더 천천히 재생됨
+- `VIDEO_CAPTURE_HEADLESS`: supervisor 리포트/멀티뷰 생성 시 `--headless` 사용 여부 (기본 1)
+- `VIDEO_CAPTURE_FALLBACK_GUI`: headless 결과가 실패/중복이면 GUI 모드로 1회 재시도 (기본 1)
+- `VIDEO_REQUIRE_DISTINCT_VIEWS`: 뷰별 영상 해시가 중복되면 실패 처리 (기본 1)
+- `REPORT_REQUIRE_XLSX`: report ZIP에 `metrics/heartbeat_history.xlsx`를 반드시 포함 (기본 1)
 
 ### 모니터링
 
@@ -190,7 +194,8 @@ python scripts/supervisor.py
 - active 운영 원칙:
   - `start` / `stop`만 훈련 상태를 바꿈
   - `report/front/rear/top/side`는 훈련 중이면 최신 기존 산출물만 전송
-  - `report/front/rear/top/side`는 훈련 정지 상태에서만 현재 checkpoint 기준으로 새 산출물을 생성
+  - `report/front/rear/top/side`는 훈련 정지 상태에서 현재 checkpoint 기준으로 **항상 새 산출물을 생성** (캐시 재사용 안 함)
+  - 새 산출물 생성 시 멀티뷰 해시 중복을 검증하고, 중복이면 실패로 처리 (옵션으로 GUI 재시도 가능)
   - auto-resume / emergency resume / supervisor-heartbeat 상호복구 루프는 active 경로에서 사용하지 않음
 - 파일명 변경 기록:
   - `scripts/training_supervisor.py` → `scripts/supervisor.py`
