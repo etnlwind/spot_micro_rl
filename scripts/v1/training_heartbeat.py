@@ -35,14 +35,14 @@ def _load_env(path):
     env = {}
     if not os.path.isfile(path):
         return env
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
             if "=" in line:
                 k, v = line.split("=", 1)
-                env[k.strip()] = v.strip()
+                env[k.strip().lstrip("\ufeff")] = v.strip()
     return env
 
 
