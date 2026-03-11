@@ -81,6 +81,7 @@ SUPERVISOR_POLL_SECONDS = int(_env.get("SUPERVISOR_POLL_SECONDS", "10"))
 HEARTBEAT_POLL_SECONDS = int(_env.get("HEARTBEAT_POLL_SECONDS", _env.get("V2_HEARTBEAT_POLL_SECONDS", "30")))
 HEARTBEAT_ITER_STEP = int(_env.get("HEARTBEAT_ITER_STEP", _env.get("V2_HEARTBEAT_ITER_STEP", "100")))
 ZIP_FRAME_COUNT = int(_env.get("ZIP_FRAME_COUNT", "12"))
+CACHE_SCHEMA_VERSION = 2
 
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", LOG_SUBDIR)
 STATE_FILE = os.path.join(PROJECT_ROOT, "logs", "state.json")
@@ -172,6 +173,7 @@ def save_telegram_offset(offset: int) -> None:
 def default_state() -> dict:
     return {
         "updated_at": _now(),
+        "cache_schema_version": CACHE_SCHEMA_VERSION,
         "mode": "idle",
         "active_run": "",
         "active_checkpoint": "",
@@ -196,6 +198,7 @@ def load_state() -> dict:
 def save_state(state: dict) -> dict:
     state = dict(state)
     state["updated_at"] = _now()
+    state["cache_schema_version"] = CACHE_SCHEMA_VERSION
     write_json(STATE_FILE, state)
     return state
 
@@ -1360,6 +1363,21 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
     return zip_path
 
 
+def _cache_matches_current_schema(state: dict) -> bool:
+    return int(state.get("cache_schema_version") or 0) == CACHE_SCHEMA_VERSION
+
+
+def _report_zip_meets_requirements(zip_path: str) -> bool:
+    if not zip_path or not os.path.isfile(zip_path):
+        return False
+    try:
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            names = set(archive.namelist())
+        return "metrics/heartbeat_history.xlsx" in names
+    except Exception:
+        return False
+
+
 def _checkpoint_matches_cached(checkpoint_path: str, cached_checkpoint: str, file_map: dict | None) -> bool:
     if not checkpoint_path or checkpoint_path != cached_checkpoint or not file_map:
         return False
@@ -1369,7 +1387,11 @@ def _checkpoint_matches_cached(checkpoint_path: str, cached_checkpoint: str, fil
 def ensure_current_videos(run_dir: str, checkpoint_path: str, log_path: str, force: bool = False) -> dict[str, str]:
     state = load_state()
     cached_videos = state.get("last_videos") or {}
-    if not force and _checkpoint_matches_cached(checkpoint_path, state.get("last_video_checkpoint") or "", cached_videos):
+    if (
+        not force
+        and _cache_matches_current_schema(state)
+        and _checkpoint_matches_cached(checkpoint_path, state.get("last_video_checkpoint") or "", cached_videos)
+    ):
         return cached_videos
     iter_num = get_checkpoint_iter(checkpoint_path)
     clip_num = max(1, iter_num)
@@ -1392,7 +1414,13 @@ def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bo
     cached_zip = state.get("last_report_zip") or ""
     cached_report_checkpoint = state.get("last_report_checkpoint") or ""
     cached_videos = state.get("last_videos") or {}
-    if not force and checkpoint_path == cached_report_checkpoint and cached_zip and os.path.isfile(cached_zip) and _checkpoint_matches_cached(checkpoint_path, state.get("last_video_checkpoint") or "", cached_videos):
+    if (
+        not force
+        and _cache_matches_current_schema(state)
+        and checkpoint_path == cached_report_checkpoint
+        and _report_zip_meets_requirements(cached_zip)
+        and _checkpoint_matches_cached(checkpoint_path, state.get("last_video_checkpoint") or "", cached_videos)
+    ):
         return {"zip_path": cached_zip, "videos": cached_videos, "analysis_text": "", "kpi_snapshot": build_supervisor_kpi_snapshot(run_dir)}
     videos = ensure_current_videos(run_dir, checkpoint_path, log_path=log_path, force=force)
     representative_video = select_representative_video(videos)
