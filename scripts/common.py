@@ -543,8 +543,8 @@ def _wrap_conda_command(command: str) -> str:
 
 def _popen_hidden_cmd(command: str, **kwargs):
     kwargs.setdefault("cwd", PROJECT_ROOT)
-    kwargs["creationflags"] = _hidden_creationflags(kwargs.pop("creationflags", 0))
-    kwargs.setdefault("startupinfo", _hidden_startupinfo())
+    kwargs.setdefault("creationflags", kwargs.pop("creationflags", 0))
+    kwargs.setdefault("startupinfo", kwargs.pop("startupinfo", None))
     kwargs["env"] = {**os.environ, "PYTHONIOENCODING": "utf-8", **kwargs.get("env", {})}
     if kwargs.get("text") or kwargs.get("universal_newlines"):
         kwargs.setdefault("encoding", "utf-8")
@@ -554,8 +554,8 @@ def _popen_hidden_cmd(command: str, **kwargs):
 
 def _run_hidden_cmd(command: str, **kwargs):
     kwargs.setdefault("cwd", PROJECT_ROOT)
-    kwargs["creationflags"] = _hidden_creationflags(kwargs.pop("creationflags", 0))
-    kwargs.setdefault("startupinfo", _hidden_startupinfo())
+    kwargs.setdefault("creationflags", kwargs.pop("creationflags", 0))
+    kwargs.setdefault("startupinfo", kwargs.pop("startupinfo", None))
     kwargs["env"] = {**os.environ, "PYTHONIOENCODING": "utf-8", **kwargs.get("env", {})}
     if kwargs.get("text") or kwargs.get("universal_newlines"):
         kwargs.setdefault("encoding", "utf-8")
