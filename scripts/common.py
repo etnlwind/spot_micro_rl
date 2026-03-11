@@ -502,6 +502,10 @@ def _popen_hidden_cmd(command: str, **kwargs):
     kwargs.setdefault("cwd", PROJECT_ROOT)
     kwargs["creationflags"] = _hidden_creationflags(kwargs.pop("creationflags", 0))
     kwargs.setdefault("startupinfo", _hidden_startupinfo())
+    kwargs["env"] = {**os.environ, "PYTHONIOENCODING": "utf-8", **kwargs.get("env", {})}
+    if kwargs.get("text") or kwargs.get("universal_newlines"):
+        kwargs.setdefault("encoding", "utf-8")
+        kwargs.setdefault("errors", "replace")
     return subprocess.Popen(["cmd", "/c", command], **kwargs)
 
 
@@ -509,6 +513,10 @@ def _run_hidden_cmd(command: str, **kwargs):
     kwargs.setdefault("cwd", PROJECT_ROOT)
     kwargs["creationflags"] = _hidden_creationflags(kwargs.pop("creationflags", 0))
     kwargs.setdefault("startupinfo", _hidden_startupinfo())
+    kwargs["env"] = {**os.environ, "PYTHONIOENCODING": "utf-8", **kwargs.get("env", {})}
+    if kwargs.get("text") or kwargs.get("universal_newlines"):
+        kwargs.setdefault("encoding", "utf-8")
+        kwargs.setdefault("errors", "replace")
     return subprocess.run(["cmd", "/c", command], **kwargs)
 
 
@@ -1307,6 +1315,8 @@ def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, vid
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
