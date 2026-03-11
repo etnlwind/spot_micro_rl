@@ -27,6 +27,7 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
+import zipfile
 
 import psutil
 
@@ -94,8 +95,43 @@ VIDEO_INTERVAL_EARLY_END = int(_env.get("VIDEO_INTERVAL_EARLY_END", "1500"))
 VIDEO_INTERVAL_MID_END = int(_env.get("VIDEO_INTERVAL_MID_END", "6000"))
 URGENT_VIDEO_GAP_ITER = int(_env.get("URGENT_VIDEO_GAP_ITER", "400"))
 
-# Video camera views for gait validation
-VIDEO_VIEWS = ["side", "front", "rear", "top_oblique"]
+ZIP_FRAME_COUNT = int(_env.get("ZIP_FRAME_COUNT", "40"))
+ZIP_IMAGE_MAX_WIDTH = int(_env.get("ZIP_IMAGE_MAX_WIDTH", "960"))
+ZIP_IMAGE_QUALITY = int(_env.get("ZIP_IMAGE_QUALITY", "78"))
+
+
+def get_video_capture_specs(play_envs: int) -> list[dict]:
+    """전송용 영상 캡처 조합을 반환합니다."""
+    return [
+        {
+            "key": "overview",
+            "label": "전체 로봇 오버뷰",
+            "camera_view": "overview",
+            "num_envs": play_envs,
+            "camera_zoom": 1.0,
+        },
+        {
+            "key": "side",
+            "label": "로봇 1대 측면",
+            "camera_view": "side",
+            "num_envs": 1,
+            "camera_zoom": 0.9,
+        },
+        {
+            "key": "rear",
+            "label": "로봇 1대 후면",
+            "camera_view": "rear",
+            "num_envs": 1,
+            "camera_zoom": 0.9,
+        },
+        {
+            "key": "top",
+            "label": "로봇 1대 상단",
+            "camera_view": "top",
+            "num_envs": 1,
+            "camera_zoom": 0.85,
+        },
+    ]
 
 # Training / ops version tags
 def _read_train_version() -> str:
@@ -312,6 +348,50 @@ def send_telegram_video(video_path: str, caption: str = ""):
     except Exception as e:
         write_log(f"[TG] Video send FAILED: {e} (skip)")
         send_telegram(f"⚠️ 영상 전송 실패: {e}")
+
+
+def send_telegram_document(file_path: str, caption: str = ""):
+    """텔레그램 문서 파일 전송 (zip diagnostics 등)."""
+    if not file_path or not os.path.isfile(file_path):
+        write_log(f"[TG] Document not found: {file_path} (skip)")
+        return
+    try:
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        if file_size_mb > 50:
+            write_log(f"[TG] Document too large: {file_size_mb:.2f}MB > 50MB limit (skip)")
+            send_telegram(f"⚠️ 진단 ZIP 크기 초과: {file_size_mb:.2f}MB (50MB 제한)")
+            return
+
+        import uuid
+        boundary = uuid.uuid4().hex
+        filename = os.path.basename(file_path)
+
+        with open(file_path, "rb") as file:
+            payload = file.read()
+
+        body = b""
+        body += f"--{boundary}\r\n".encode()
+        body += b'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+        body += f"{TELEGRAM_CHAT_ID}\r\n".encode()
+        body += f"--{boundary}\r\n".encode()
+        body += b'Content-Disposition: form-data; name="caption"\r\n\r\n'
+        body += f"{caption}\r\n".encode("utf-8")
+        body += f"--{boundary}\r\n".encode()
+        body += b'Content-Disposition: form-data; name="document"; filename="' + filename.encode() + b'"\r\n'
+        body += b"Content-Type: application/zip\r\n\r\n"
+        body += payload
+        body += f"\r\n--{boundary}--\r\n".encode()
+
+        req = urllib.request.Request(
+            f"{TG_BASE_URL}/sendDocument",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        urllib.request.urlopen(req, timeout=180)
+        write_log(f"[TG] Document sent OK: {filename} ({file_size_mb:.2f}MB)")
+    except Exception as e:
+        write_log(f"[TG] Document send FAILED: {e} (skip)")
+        send_telegram(f"⚠️ 진단 ZIP 전송 실패: {e}")
 
 
 def flush_telegram_updates():
@@ -763,21 +843,23 @@ def restart_heartbeat():
 # VIDEO RECORDING
 # ============================================================
 
-def record_video(checkpoint_path: str, run_dir: str, clip_num: int) -> str | None:
-    """멀티뷰 영상 녹화: side/front/rear/top_oblique 순차 캡처.
-
-    반환값은 side view 경로(기존 호출부 호환용).
-    """
+def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int) -> dict[str, str]:
+    """오버뷰 + 단일 로봇 상세 시점 영상을 순차 캡처합니다."""
     cp_name = os.path.basename(checkpoint_path)
     iter_num = get_checkpoint_iter(checkpoint_path)
     write_log(f"Recording clip #{clip_num} from: {cp_name}")
 
     play_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "play.py")
-    side_video_path = None
-    any_video = False
+    captured_videos: dict[str, str] = {}
 
-    for view_name in VIDEO_VIEWS:
-        write_log(f"Recording view: {view_name}")
+    for spec in get_video_capture_specs(PLAY_ENVS):
+        view_name = spec["camera_view"]
+        view_key = spec["key"]
+        view_label = spec["label"]
+        num_envs = spec["num_envs"]
+        camera_zoom = spec["camera_zoom"]
+
+        write_log(f"Recording view: {view_label} ({view_name}, envs={num_envs})")
         pre_videos = set(glob.glob(os.path.join(run_dir, "videos", "play", "*.mp4")))
 
         play_cmd = (
@@ -785,11 +867,11 @@ def record_video(checkpoint_path: str, run_dir: str, clip_num: int) -> str | Non
             f'cd /d {PROJECT_ROOT} && '
             f'set PYTHONIOENCODING=utf-8 && '
             f'{ISAAC_LAB} -p {play_script} '
-            f'--task={TASK} --num_envs={PLAY_ENVS} '
+            f'--task={TASK} --num_envs={num_envs} '
             f'--checkpoint={checkpoint_path} --video --video_length={VIDEO_LENGTH} '
-            f'--camera_view={view_name}'
+            f'--camera_view={view_name} --camera_zoom={camera_zoom}'
         )
-        write_log(f"play_cmd({view_name}): {play_cmd}")
+        write_log(f"play_cmd({view_key}): {play_cmd}")
         proc = subprocess.Popen(["cmd", "/c", play_cmd])
 
         timeout = 480
@@ -824,7 +906,7 @@ def record_video(checkpoint_path: str, run_dir: str, clip_num: int) -> str | Non
             continue
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        new_name = f"clip_{clip_num}_iter{iter_num}_{view_name}_{ts}.mp4"
+        new_name = f"clip_{clip_num}_iter{iter_num}_{view_key}_{ts}.mp4"
         dest_path = os.path.join(run_dir, "videos", new_name)
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         shutil.copy2(latest_video, dest_path)
@@ -836,22 +918,26 @@ def record_video(checkpoint_path: str, run_dir: str, clip_num: int) -> str | Non
         if reencoded:
             dest_path = reencoded
 
-        any_video = True
-        if view_name == "side":
-            side_video_path = dest_path
+        captured_videos[view_key] = dest_path
 
-    if any_video:
-        if side_video_path:
-            return side_video_path
-        # side 실패 시 첫 번째 view 파일을 반환하도록 최신 clip 파일 선택
-        candidates = sorted(
-            glob.glob(os.path.join(run_dir, "videos", f"clip_{clip_num}_iter{iter_num}_*.mp4")),
-            key=os.path.getmtime,
-        )
-        return candidates[0] if candidates else None
+    if not captured_videos:
+        write_log("WARNING: No video file found across all views!")
 
-    write_log("WARNING: No video file found across all views!")
-    return None
+    return captured_videos
+
+
+def record_video(checkpoint_path: str, run_dir: str, clip_num: int) -> str | None:
+    """대표 영상 경로 반환용 호환 래퍼."""
+    captured_videos = record_video_bundle(checkpoint_path, run_dir, clip_num)
+    return select_representative_video(captured_videos)
+
+
+def select_representative_video(captured_videos: dict[str, str]) -> str | None:
+    """분석/로그 대표 영상 경로를 선택합니다."""
+    for preferred_key in ("side", "overview", "rear", "top"):
+        if preferred_key in captured_videos:
+            return captured_videos[preferred_key]
+    return next(iter(captured_videos.values()), None)
 
 
 def reencode_video(src_path: str, target_fps: int) -> str | None:
@@ -936,6 +1022,163 @@ print(f'OK: {{count}} frames @ {{TARGET_FPS}}fps H.264 -> {{dst}}')
         except OSError:
             pass
         return None
+
+
+def send_clip_video_set(captured_videos: dict[str, str], clip_num: int, iter_num: int, progress_pct: float, kpi_snapshot: dict, is_final: bool = False):
+    """요청된 4종 영상 세트를 순서대로 전송합니다."""
+    specs = get_video_capture_specs(PLAY_ENVS)
+    total = len(specs)
+    prefix = "🏆 최종" if is_final else f"🎬 Clip #{clip_num}"
+    for idx, spec in enumerate(specs, start=1):
+        video_path = captured_videos.get(spec["key"])
+        if not video_path:
+            continue
+        caption = (
+            f"{prefix} {idx}/{total} | {spec['label']} | "
+            f"Iter {iter_num} / {MAX_ITERATIONS} ({progress_pct}%) | {kpi_snapshot['caption_suffix']}"
+        )
+        send_telegram_video(video_path, caption)
+
+
+def extract_video_frames(video_path: str, out_dir: str, prefix: str, frame_count: int) -> list[str]:
+    """영상에서 균등 샘플링한 정지 프레임을 JPEG로 저장합니다."""
+    try:
+        import av
+    except ImportError:
+        write_log("Frame extraction skipped: PyAV not installed")
+        return []
+
+    os.makedirs(out_dir, exist_ok=True)
+    container = av.open(video_path)
+    stream = container.streams.video[0]
+    total_frames = int(stream.frames or 0)
+
+    if total_frames <= 0:
+        total_frames = sum(1 for _ in container.decode(video=0))
+        container.close()
+        container = av.open(video_path)
+
+    if total_frames <= 0:
+        container.close()
+        return []
+
+    sample_count = max(1, min(frame_count, total_frames))
+    if sample_count == 1:
+        selected_indices = [0]
+    else:
+        selected_indices = sorted({
+            round(index * (total_frames - 1) / (sample_count - 1)) for index in range(sample_count)
+        })
+
+    selected_set = set(selected_indices)
+    saved = []
+    for frame_index, frame in enumerate(container.decode(video=0)):
+        if frame_index not in selected_set:
+            continue
+        image = frame.to_image().convert("RGB")
+        if ZIP_IMAGE_MAX_WIDTH > 0 and image.width > ZIP_IMAGE_MAX_WIDTH:
+            scale = ZIP_IMAGE_MAX_WIDTH / image.width
+            image = image.resize((ZIP_IMAGE_MAX_WIDTH, max(1, int(image.height * scale))))
+        frame_path = os.path.join(out_dir, f"{prefix}_{frame_index:04d}.jpg")
+        image.save(frame_path, format="JPEG", quality=ZIP_IMAGE_QUALITY, optimize=True)
+        saved.append(frame_path)
+        if len(saved) >= len(selected_indices):
+            break
+
+    container.close()
+    return saved
+
+
+def create_clip_artifact_zip(
+    run_dir: str,
+    checkpoint_path: str,
+    clip_num: int,
+    captured_videos: dict[str, str],
+    kpi_snapshot: dict,
+    analysis_text: str,
+) -> str | None:
+    """보행 분석 텍스트와 정지 프레임 묶음을 ZIP으로 생성합니다."""
+    if not captured_videos:
+        write_log("Artifact ZIP skipped: no captured videos")
+        return None
+
+    iter_num = get_checkpoint_iter(checkpoint_path)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    artifact_root = os.path.join(run_dir, "artifacts", f"clip_{clip_num}_iter{iter_num}_{timestamp}")
+    metrics_root = os.path.join(artifact_root, "metrics")
+    frames_root = os.path.join(artifact_root, "frames")
+    os.makedirs(metrics_root, exist_ok=True)
+    os.makedirs(frames_root, exist_ok=True)
+
+    grade = parse_analysis_grade(analysis_text)
+    summary_lines = [
+        f"clip_num={clip_num}",
+        f"iteration={iter_num}",
+        f"checkpoint={os.path.basename(checkpoint_path)}",
+        f"run_dir={os.path.basename(run_dir)}",
+        f"verdict={kpi_snapshot['verdict']}",
+        f"reason={kpi_snapshot['reason']}",
+        f"kpi_line={kpi_snapshot['kpi_line']}",
+        f"gait={kpi_snapshot['gait']} ({kpi_snapshot['gait_score']}/13)",
+        f"stability={kpi_snapshot['stability']} ({kpi_snapshot['stability_score']}/10)",
+        f"analysis_grade={grade['Grade']}",
+        f"analysis_score={grade['Score']}/13",
+        f"analysis_reward={grade['Reward']}",
+        f"analysis_trend={grade['Trend']}",
+        "",
+        "captured_videos:",
+    ]
+    for spec in get_video_capture_specs(PLAY_ENVS):
+        video_path = captured_videos.get(spec["key"])
+        if video_path:
+            summary_lines.append(f"- {spec['label']}: {os.path.basename(video_path)}")
+
+    summary_path = os.path.join(metrics_root, "summary.txt")
+    with open(summary_path, "w", encoding="utf-8") as file:
+        file.write("\n".join(summary_lines) + "\n")
+
+    analysis_path = os.path.join(metrics_root, "analysis_report.txt")
+    with open(analysis_path, "w", encoding="utf-8") as file:
+        file.write(analysis_text.strip() + "\n" if analysis_text.strip() else "Analysis output unavailable\n")
+
+    manifest = {
+        "clip_num": clip_num,
+        "iteration": iter_num,
+        "checkpoint": os.path.basename(checkpoint_path),
+        "run_dir": os.path.basename(run_dir),
+        "zip_frame_count": ZIP_FRAME_COUNT,
+        "videos": {},
+        "frames": {},
+        "kpi_snapshot": kpi_snapshot,
+        "analysis": grade,
+    }
+
+    for spec in get_video_capture_specs(PLAY_ENVS):
+        video_path = captured_videos.get(spec["key"])
+        if not video_path:
+            continue
+        manifest["videos"][spec["key"]] = os.path.basename(video_path)
+        saved_frames = extract_video_frames(
+            video_path,
+            os.path.join(frames_root, spec["key"]),
+            spec["key"],
+            ZIP_FRAME_COUNT,
+        )
+        manifest["frames"][spec["key"]] = len(saved_frames)
+
+    manifest_path = os.path.join(metrics_root, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as file:
+        json.dump(manifest, file, indent=2, ensure_ascii=False)
+
+    zip_path = os.path.join(run_dir, "artifacts", f"clip_{clip_num}_iter{iter_num}_{timestamp}.zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for root, _, files in os.walk(artifact_root):
+            for name in files:
+                file_path = os.path.join(root, name)
+                archive.write(file_path, os.path.relpath(file_path, artifact_root))
+
+    write_log(f"Artifact ZIP created: {zip_path}")
+    return zip_path
 
 
 # ============================================================
@@ -1174,6 +1417,7 @@ def main():
     next_regular_iter = VIDEO_INTERVAL_EARLY_ITER
     last_observed_checkpoint = ""
     completed_run_signature = ""
+    exit_notice = "👋 Training Supervisor 종료"
 
     try:
         while True:
@@ -1219,6 +1463,7 @@ def main():
                         f"Completed run already handled: {os.path.basename(run_dir)} / "
                         f"{os.path.basename(checkpoint)} (iter {iter_num})"
                     )
+                    exit_notice = None
                     break
 
                 if is_training_complete(iter_num):
@@ -1247,6 +1492,8 @@ def main():
                 write_log(f"Trigger: {trigger_reason}")
 
                 video_path = None
+                captured_videos: dict[str, str] = {}
+                artifact_zip_path = None
                 progress_pct = round((iter_num / MAX_ITERATIONS) * 100, 1)
                 send_telegram(
                     f"🎬 Clip #{clip_num} 시작\n"
@@ -1259,18 +1506,15 @@ def main():
                 if is_training_complete(iter_num):
                     completed_run_signature = run_signature
                     write_log(f"===== TRAINING COMPLETE (iter {iter_num}) =====")
-                    send_telegram(f"🏆 훈련 완료! (iter {iter_num}/{MAX_ITERATIONS})\n최종 분석 진행합니다...")
+                    send_telegram(f"🏁 훈련 완료 감지 (iter {iter_num}/{MAX_ITERATIONS})\n최종 영상과 분석을 정리합니다...")
                     try:
                         ensure_gpu_clean(reason="complete")
                     except Exception:
                         pass
                     try:
-                        video_path = record_video(checkpoint, run_dir, clip_num)
-                        if video_path and os.path.isfile(video_path):
-                            send_telegram_video(
-                                video_path,
-                                f"🏆 최종 영상 | Iter {iter_num} / {MAX_ITERATIONS} | {kpi_snapshot['caption_suffix']}"
-                            )
+                        captured_videos = record_video_bundle(checkpoint, run_dir, clip_num)
+                        video_path = select_representative_video(captured_videos)
+                        send_clip_video_set(captured_videos, clip_num, iter_num, progress_pct, kpi_snapshot, is_final=True)
                     except Exception as e:
                         write_log(f"Video err: {e}")
                     _last_analysis_text = ""
@@ -1283,9 +1527,23 @@ def main():
                     except Exception:
                         pass
                     try:
+                        artifact_zip_path = create_clip_artifact_zip(
+                            run_dir,
+                            checkpoint,
+                            clip_num,
+                            captured_videos,
+                            kpi_snapshot,
+                            _last_analysis_text,
+                        )
+                        if artifact_zip_path:
+                            send_telegram_document(
+                                artifact_zip_path,
+                                f"🏁 최종 진단 ZIP | Iter {iter_num} | 분석지표 + 시점별 정지프레임 {ZIP_FRAME_COUNT}장"
+                            )
+
                         grade = parse_analysis_grade(_last_analysis_text)
                         send_telegram(
-                            f"🏆 최종 결과\n\n"
+                            f"🏆 훈련 종료 요약\n\n"
                             f"📊 등급: {grade['Grade']}\n"
                             f"🎯 점수: {grade['Score']}/13\n"
                             f"💰 Reward: {grade['Reward']}\n"
@@ -1293,11 +1551,12 @@ def main():
                             f"🚦 운영 판정: {kpi_snapshot['verdict']}\n"
                             f"🧭 KPI: {kpi_snapshot['kpi_line']}\n"
                             f"🦿 Gait: {kpi_snapshot['gait']} ({kpi_snapshot['gait_score']}/13)\n"
-                            f"🛡 Stability: {kpi_snapshot['stability']} ({kpi_snapshot['stability_score']}/10)\n\n"
-                            f"✅ 모니터 종료"
+                            f"🛡 Stability: {kpi_snapshot['stability']} ({kpi_snapshot['stability_score']}/10)"
                         )
+                        exit_notice = "🏁 Training Supervisor 종료\n완료된 훈련의 최종 정리를 마쳤습니다"
                     except Exception:
-                        send_telegram("✅ 훈련 완료. 모니터 종료.")
+                        send_telegram("🏁 훈련 완료. 최종 정리를 마쳤습니다.")
+                        exit_notice = "🏁 Training Supervisor 종료"
                     write_log("===== MONITOR FINISHED =====")
                     break
 
@@ -1319,14 +1578,11 @@ def main():
 
                 # Phase 2: 영상 녹화
                 write_log("--- Phase 2/5: Record Video ---")
-                send_telegram(f"🎥 P2/5: 영상 녹화 중... ({VIDEO_LENGTH} steps)")
+                send_telegram(f"🎥 P2/5: 4종 영상 녹화 중... ({VIDEO_LENGTH} steps)")
                 try:
-                    video_path = record_video(checkpoint, run_dir, clip_num)
-                    if video_path and os.path.isfile(video_path):
-                        send_telegram_video(
-                            video_path,
-                            f"🎬 Clip #{clip_num} | Iter {iter_num} / {MAX_ITERATIONS} ({progress_pct}%) | {kpi_snapshot['caption_suffix']}"
-                        )
+                    captured_videos = record_video_bundle(checkpoint, run_dir, clip_num)
+                    video_path = select_representative_video(captured_videos)
+                    send_clip_video_set(captured_videos, clip_num, iter_num, progress_pct, kpi_snapshot)
                 except Exception as e:
                     write_log(f"P2 err: {e} (skip)")
                     kill_all_python(reason="p2-fb")
@@ -1340,6 +1596,23 @@ def main():
                     run_detailed_analysis(run_dir, checkpoint, clip_num, video_path)
                 except Exception as e:
                     write_log(f"P3 err: {e} (skip)")
+
+                try:
+                    artifact_zip_path = create_clip_artifact_zip(
+                        run_dir,
+                        checkpoint,
+                        clip_num,
+                        captured_videos,
+                        kpi_snapshot,
+                        _last_analysis_text,
+                    )
+                    if artifact_zip_path:
+                        send_telegram_document(
+                            artifact_zip_path,
+                            f"📦 Clip #{clip_num} 진단 ZIP | Iter {iter_num} | 분석지표 + 시점별 정지프레임 {ZIP_FRAME_COUNT}장"
+                        )
+                except Exception as e:
+                    write_log(f"Artifact ZIP err: {e} (skip)")
 
                 # Telegram 보고 + 의사결정
                 write_log("--- Telegram Report & Decision ---")
@@ -1381,6 +1654,7 @@ def main():
                             send_telegram("🛑 사용자 요청으로 훈련 중단.")
                             ensure_gpu_clean(reason="user-stop")
                             set_user_stop_flag()
+                            exit_notice = "🛑 Training Supervisor 종료\n사용자 요청으로 감시를 중단했습니다"
                             break
 
                     # 점수 하락 + 낮은 점수 → 사용자에게 결정 요청
@@ -1393,6 +1667,7 @@ def main():
                             send_telegram("🛑 사용자 요청으로 훈련 중단 (점수하락).")
                             ensure_gpu_clean(reason="user-stop")
                             set_user_stop_flag()
+                            exit_notice = "🛑 Training Supervisor 종료\n사용자 요청으로 감시를 중단했습니다"
                             break
 
                     # 정상 → 알림만
@@ -1456,7 +1731,8 @@ def main():
     finally:
         remove_pid_file()
 
-    send_telegram("👋 모니터 종료. 수고하셨습니다!")
+    if exit_notice:
+        send_telegram(exit_notice)
     write_log("Monitor exiting.")
 
 

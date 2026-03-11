@@ -66,6 +66,7 @@ TAILSCALE_IP = _env.get("TAILSCALE_IP", "")
 TB_PORT = _env.get("TB_PORT", "6006")
 TB_URL = f"http://{TAILSCALE_IP}:{TB_PORT}" if TAILSCALE_IP else ""
 TB_CURRENT_LINK = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", f"{_log_subdir}_current")
+FINAL_REPORT_MARKER_NAME = "heartbeat_final_report.sent"
 
 
 def update_tb_junction(run_dir: str):
@@ -333,6 +334,25 @@ def find_latest_run():
     runs = sorted([d for d in os.listdir(LOG_BASE)
                    if os.path.isdir(os.path.join(LOG_BASE, d))])
     return os.path.join(LOG_BASE, runs[-1]) if runs else None
+
+
+def get_final_report_marker_path(run_dir: str) -> str:
+    """런별 최종 heartbeat 전송 마커 파일 경로를 반환합니다."""
+    return os.path.join(run_dir, FINAL_REPORT_MARKER_NAME)
+
+
+def has_final_report_marker(run_dir: str | None) -> bool:
+    """런에 대한 최종 heartbeat 전송 여부를 반환합니다."""
+    return bool(run_dir) and os.path.isfile(get_final_report_marker_path(run_dir))
+
+
+def write_final_report_marker(run_dir: str, iteration: int):
+    """최종 heartbeat 전송 마커를 기록합니다."""
+    marker_path = get_final_report_marker_path(run_dir)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write(f"iter={iteration}\n")
+        f.write(f"sent_at={timestamp}\n")
 
 
 def read_tfevents(run_dir, retries=3):
@@ -1330,6 +1350,47 @@ def format_report(data, run_name, cycle_num):
     return "\n".join(lines)
 
 
+def send_final_heartbeat_report(run_dir: str, cycle_num: int = 0, force: bool = False) -> bool:
+    """완료된 런의 최종 heartbeat 리포트를 한 번 전송합니다."""
+    if not run_dir or not os.path.isdir(run_dir):
+        print("[FINAL] Run dir missing, final heartbeat skipped")
+        return False
+
+    if not force and has_final_report_marker(run_dir):
+        print(f"[FINAL] Marker exists, final heartbeat already sent: {run_dir}")
+        return False
+
+    data = read_tfevents(run_dir)
+    if not data:
+        print(f"[FINAL] No TensorBoard data for {run_dir}, final heartbeat skipped")
+        return False
+
+    reward_vals = data.get("Train/mean_reward", [])
+    if not reward_vals:
+        print(f"[FINAL] No reward scalars for {run_dir}, final heartbeat skipped")
+        return False
+
+    current_iter = int(reward_vals[-1][0])
+    run_name = os.path.basename(run_dir)
+    final_report = format_report(data, run_name, cycle_num)
+    final_header = (
+        "🏁 <b>훈련 종료 Final Heartbeat</b>\n"
+        f"📁 Run: <code>{run_name}</code>\n"
+        f"🎯 최종 iter: <b>{current_iter:,}</b>\n"
+        + "━" * 30
+        + "\n\n"
+    )
+    send_telegram(final_header + final_report)
+
+    graph_bytes = generate_training_graphs(data, run_name)
+    if graph_bytes:
+        send_telegram_photo(graph_bytes, f"🏁 Final Training Graphs (iter {current_iter:,})")
+
+    write_final_report_marker(run_dir, current_iter)
+    print(f"[FINAL] Final heartbeat report sent for {run_name} @ iter {current_iter}")
+    return True
+
+
 # ─── PID LOCK ───────────────────────────────────────────────────
 
 def acquire_lock():
@@ -1513,6 +1574,7 @@ def main():
     parser.add_argument("--iter_step", type=int, default=100, help="Report every N iterations (default: 100)")
     parser.add_argument("--poll", type=int, default=30, help="Polling interval in seconds (default: 30)")
     parser.add_argument("--run_dir", type=str, default=None, help="Specific run dir (auto-detect if omitted)")
+    parser.add_argument("--send_final_now", action="store_true", help="Send final heartbeat report immediately for the target run")
     args = parser.parse_args()
 
     # 중복 실행 방지
@@ -1526,8 +1588,16 @@ def main():
     first_check = True
     supervisor_alert_sent = False  # Supervisor 사망 알림 중복 방지
     maintenance_logged = False  # 유지보수 모드 로그 중복 방지
+    exit_notice = "👋 <b>Training Heartbeat 종료</b>"
 
     try:
+        if args.send_final_now:
+            target_run_dir = args.run_dir if args.run_dir else find_latest_run()
+            if not send_final_heartbeat_report(target_run_dir, cycle_num=0, force=True):
+                raise RuntimeError("Final heartbeat report was not sent")
+            exit_notice = None
+            return
+
         while True:
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1563,7 +1633,15 @@ def main():
                         time.sleep(args.poll)
                         continue
                     else:
-                        send_telegram(f"🛑 <b>훈련 프로세스 없음!</b>\n훈련이 종료되었거나 크래시 발생")
+                        if run_complete:
+                            final_report_sent = send_final_heartbeat_report(run_dir=current_run_dir, cycle_num=cycle + 1)
+                            if final_report_sent:
+                                print(f"[{now}] Final heartbeat delivered for completed run.")
+                            else:
+                                print(f"[{now}] Completed run already reported. Exiting quietly.")
+                            exit_notice = None
+                        else:
+                            exit_notice = "🛑 <b>훈련 프로세스 없음!</b>\n훈련이 종료되었거나 크래시 발생"
                         print("No training process found!")
                         break
                 else:
@@ -1655,7 +1733,8 @@ def main():
     finally:
         release_lock()
 
-    send_telegram("👋 <b>Training Heartbeat 종료</b>")
+    if exit_notice:
+        send_telegram(exit_notice)
     print("Heartbeat exited.")
 
 

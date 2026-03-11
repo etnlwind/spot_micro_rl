@@ -25,7 +25,7 @@ parser.add_argument(
     "--camera_view",
     type=str,
     default="side",
-    choices=["side", "front", "rear", "top_oblique"],
+    choices=["overview", "side", "front", "rear", "top", "top_oblique"],
     help="Camera view preset for video recording.",
 )
 parser.add_argument(
@@ -127,9 +127,11 @@ CONTACT_LIMB_PATTERNS = {
 def _camera_offsets(view_name: str, zoom: float = 1.0):
     """Return (eye_offset, lookat_offset) relative to robot base position."""
     offsets = {
+        "overview": ((3.0, -3.0, 2.2), (0.0, 0.0, 0.35)),
         "side": ((2.6, -0.45, 0.62), (0.0, 0.0, 0.26)),
         "front": ((0.0, 2.0, 0.50), (0.0, 0.0, 0.28)),
         "rear": ((0.0, -2.0, 0.50), (0.0, 0.0, 0.28)),
+        "top": ((0.0, 0.0, 2.1), (0.0, 0.0, 0.22)),
         "top_oblique": ((1.25, 1.25, 1.35), (0.0, 0.0, 0.22)),
     }
     eye_off, look_off = offsets.get(view_name, offsets["side"])
@@ -140,6 +142,10 @@ def _camera_offsets(view_name: str, zoom: float = 1.0):
 
 def _apply_camera_view_preset(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, view_name: str):
     """Apply camera pose preset for consistent gait evaluation videos."""
+    if view_name == "overview":
+        print("[INFO] Camera view preset: overview | using default viewer pose")
+        return
+
     # Initial pose before stepping. Runtime follow logic keeps robot centered.
     eye, lookat = _camera_offsets(view_name, args_cli.camera_zoom)
     if hasattr(env_cfg, "viewer") and env_cfg.viewer is not None:
@@ -349,7 +355,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs = env.get_observations()
     timestep = 0
     camera_follow_error_logged = False
-    follow_camera = args_cli.video and (args_cli.num_envs == 1)
+    follow_camera = args_cli.video and (args_cli.num_envs == 1) and (args_cli.camera_view != "overview")
     contact_csv_fp = None
     contact_csv_writer = None
     contact_sensor = None
