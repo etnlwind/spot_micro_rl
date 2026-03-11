@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V20 학습 커리큘럼 + V22 운영/아티팩트 체계, V23 준비 중
+**현재 상태**: V20 학습 커리큘럼 + V22 운영/아티팩트 체계 + 단순화된 운영 스크립트, V23 준비 중
 
 ### 기술 스택
 
@@ -50,14 +50,16 @@ spot_micro_rl/
 │   ├── rsl_rl/
 │   │   ├── train.py                    # 훈련 entry point
 │   │   └── play.py                     # 평가/비디오 entry point (카메라 preset, contact CSV 지원)
-│   ├── training_supervisor.py          # iter milestone 기반 비디오 관리 + Telegram
-│   ├── training_heartbeat.py           # gait-quality-first KPI 모니터링 + Telegram
+│   ├── common.py                       # Telegram, process, state, report/video helper
+│   ├── supervisor.py                   # Telegram command loop
+│   ├── heartbeat.py                    # read-only KPI heartbeat loop
 │   ├── milestone_monitor.py            # V20 ramp milestone 자동 스냅샷/리포트
 │   ├── collect_checkpoint_diagnostics.py    # foot/toe/aggregate contact 진단 패키지
 │   ├── make_multiview_screenshot_pack.py    # 멀티뷰 스크린샷 ZIP 생성
 │   ├── analyze_v19.py                  # V19 훈련 분석 스크립트
 │   ├── analyze_v20.py                  # V20 훈련 분석 스크립트
-│   └── transfer_flat_to_rough.py       # Flat→Rough 전이학습 (48→102 obs dim)
+│   ├── transfer_flat_to_rough.py       # Flat→Rough 전이학습 (48→102 obs dim)
+│   └── legacy/                         # 구 training_* 운영 코드 참고용 보관
 ├── plan/
 │   ├── MEMORY.md                       # AI 세션 핸드오프 문서
 │   ├── V19_ANALYSIS.md                 # V19 분석 리포트
@@ -98,6 +100,26 @@ spot_micro_rl/
     # Linux
     ~/.local/share/ov/pkg/isaac-lab/isaaclab.sh -p scripts/list_envs.py
     ```
+
+5. `.env` 생성:
+    ```bash
+    # PowerShell
+    Copy-Item .env.example .env
+
+    # bash/zsh
+    cp .env.example .env
+    ```
+
+6. `.env` 보안 설정:
+    ```env
+    TELEGRAM_TOKEN=<bot token>
+    TELEGRAM_CHAT_ID=<allowed chat id>
+    TELEGRAM_ALLOWED_USER_IDS=<comma-separated user ids>
+    TELEGRAM_VERBOSE_ERRORS=0
+    ```
+    `.env`는 직접 수정하지 말고 항상 `.env.example`을 복사해서 생성합니다.
+    `TELEGRAM_ALLOWED_USER_IDS`를 설정하면 지정한 사용자만 `start/stop/report` 같은 명령을 실행할 수 있습니다. 설정하지 않으면 private chat에서 `chat_id == user_id`인 경우만 명령을 허용합니다.
+    `TELEGRAM_VERBOSE_ERRORS=1`로 두면 `status`에 `last_error`를 표시하고, supervisor 예외 상세 문자열도 텔레그램으로 전송합니다. 기본값 `0`은 상세 에러를 서버 로그에만 남깁니다.
 
 ---
 
@@ -152,28 +174,34 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
 # TensorBoard
 python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat_current --port=6006
 
-# Heartbeat (gait-quality-first KPI를 100 iter마다 Telegram 리포트)
-python scripts/training_heartbeat.py --iter_step 100 --poll 30
+# Heartbeat (read-only, gait-quality-first KPI를 100 iter마다 Telegram 리포트)
+python scripts/heartbeat.py --iter_step 100 --poll 30
 
-# Supervisor (iter milestone/판정 악화 시 비디오 녹화 → 분석 → Telegram)
-python scripts/training_supervisor.py
+# Supervisor (Telegram command loop)
+python scripts/supervisor.py
 ```
 
 ### Heartbeat / Supervisor 역할 분담
 
-- `training_heartbeat.py`: TensorBoard 기반 상태 감시, `standing_height`, `forward_velocity`, `diagonal_coupling`, `trot_gait`, `rear_joint_velocity`, `foot_clearance`를 우선 KPI로 판정
-- `training_supervisor.py`: 훈련 일시중단, 멀티뷰 재생, 분석, Telegram 비디오 전송, 사용자 의사결정 처리
-- supervisor 정기 cadence:
-  - 초기 500 iter
-  - 중기 1000 iter
-  - 후기 1500 iter
-  - verdict 악화 시 urgent clip 허용
+- `heartbeat.py`: TensorBoard 기반 상태 감시와 heartbeat 전송만 담당하는 read-only 루프. `standing_height`, `forward_velocity`, `diagonal_coupling`, `trot_gait`, `rear_joint_velocity`, `foot_clearance`를 우선 KPI로 판정
+- `supervisor.py`: Telegram 명령 처리 담당. `start`, `stop`, `status`, `report`, `front`, `rear`, `top`, `side`, `help` 지원
+- active 운영 원칙:
+  - `start` / `stop`만 훈련 상태를 바꿈
+  - `report/front/rear/top/side`는 훈련 중이면 최신 기존 산출물만 전송
+  - `report/front/rear/top/side`는 훈련 정지 상태에서만 현재 checkpoint 기준으로 새 산출물을 생성
+  - auto-resume / emergency resume / supervisor-heartbeat 상호복구 루프는 active 경로에서 사용하지 않음
+- 파일명 변경 기록:
+  - `scripts/training_supervisor.py` → `scripts/supervisor.py`
+  - `scripts/training_heartbeat.py` → `scripts/heartbeat.py`
+  - `scripts/training_common.py` / `scripts/v2/common.py` 계열 실험본 → `scripts/common.py`
+  - 구 운영 코드는 `scripts/legacy/` 아래에 참고용으로 남김
 
 ### 현재 운영 기준
 
 - 학습 버전: `V20`
 - 운영/아티팩트 버전: `V22`
 - 다음 준비 버전: `V23`
+- active 운영 스크립트: `scripts/supervisor.py`, `scripts/heartbeat.py`, `scripts/common.py`
 - 접촉 해석 기본값: `toe_link`
 - 참고 문서: `plan/V21_ANALYSIS.md`
 - 참고 문서: `plan/V22_ANALYSIS.md`

@@ -1,7 +1,7 @@
 # SpotMicro RL Training Project History
 
 **Last Updated**: 2026-03-11  
-**Project Status**: V20 학습 결과 검증 완료, V22 운영/아티팩트 체계 정리 완료, V23 준비 시작  
+**Project Status**: V20 학습 결과 검증 완료, V22 운영/아티팩트 체계 정리 완료, 운영 스크립트 단순화 완료, V23 준비 시작  
 **Current Iteration**: `logs/rsl_rl/spot_micro_flat/2026-03-11_02-39-01` 기준 15.0K 최종 검증 완료
 
 ---
@@ -31,12 +31,29 @@ V22는 새 reward curriculum 버전이라기보다, V20 훈련 결과를 더 정
 4. artifact ZIP에 `heartbeat_history.xlsx`와 정지 프레임 묶음을 포함
 5. 과거 런에도 TensorBoard fallback으로 workbook을 복구 가능하게 정리
 
+### 2026-03-11 밤 운영 스크립트 단순화
+
+- active 운영 파일은 `scripts/supervisor.py`, `scripts/heartbeat.py`, `scripts/common.py`
+- 파일명 변경 기록
+  - `scripts/training_supervisor.py` → `scripts/supervisor.py`
+  - `scripts/training_heartbeat.py` → `scripts/heartbeat.py`
+  - `scripts/training_common.py` / `scripts/v2/common.py` 계열 실험본 → `scripts/common.py`
+- `scripts/legacy/supervisor.py`, `scripts/legacy/heartbeat.py`는 과거 V21/V22 운영 코드 참고용 보관본
+- active 경로에서는 auto-resume / emergency resume / supervisor-heartbeat 상호복구 루프를 제거
+- `start` / `stop`만 훈련 상태를 바꾸고, `report/front/rear/top/side`는 훈련 중이면 최신 산출물만 전송하고 정지 상태에서만 현재 checkpoint 기준으로 새로 생성
+
 ### Heartbeat / Supervisor 역할
 
 | 컴포넌트 | 역할 | 출력 |
 |----------|------|------|
-| `training_heartbeat.py` | 자주 보는 상태 감시, KPI 분류, 운영 판정 | 텍스트 + 그래프 |
-| `training_supervisor.py` | 훈련 일시중단, 멀티뷰 재생, 상세 분석, 사용자 의사결정 | 비디오 + 분석 요약 |
+| `heartbeat.py` | read-only 상태 감시, KPI 분류, heartbeat 전송 | 텍스트 + 그래프 |
+| `supervisor.py` | Telegram 명령 처리, 훈련 시작/중단, 보고서/영상 전송 | 텍스트 + 비디오 + ZIP |
+
+참고:
+
+- 과거 V21/V22 문서의 `training_heartbeat.py`, `training_supervisor.py` 표기는 역사적 명칭이다
+- 현재 active 파일은 `heartbeat.py`, `supervisor.py`
+- 구 코드는 `scripts/legacy/` 아래에 참고용으로 남겨둔다
 
 ### V21에서 우선 보는 KPI
 

@@ -1,13 +1,13 @@
 # MEMORY.md — AI Session Handoff Document
 > **목적**: 새 세션에서 AI가 이 파일만 읽으면 프로젝트 컨텍스트를 즉시 복원할 수 있도록 작성.  
 > **갱신 시점**: 매 세션 종료 시, 또는 중요 의사결정 발생 시.  
-> **마지막 갱신**: 2026-03-11 (V22 운영/아티팩트 체계 완료, V23 준비)
+> **마지막 갱신**: 2026-03-11 (V22 운영/아티팩트 체계 완료, 운영 스크립트 단순화, V23 준비)
 
 ---
 
 ## 1. 프로젝트 한 줄 요약
 
-SpotMicro 4족 로봇이 **trot 걸음걸이**(대각 교대보행)로 걷도록 강화학습(PPO)으로 훈련. 현재 학습 버전 태그는 **V20**이고, 운영/아티팩트 체계는 **V22**까지 정리됨. V22는 V21의 gait-quality-first 모니터링 위에 멀티뷰 영상, heartbeat workbook, ZIP artifact, front-view 포함 패키징을 얹은 운영 레이어다. 다음 작업은 **V23 학습 전략 준비**다.
+SpotMicro 4족 로봇이 **trot 걸음걸이**(대각 교대보행)로 걷도록 강화학습(PPO)으로 훈련. 현재 학습 버전 태그는 **V20**이고, 운영/아티팩트 체계는 **V22**까지 정리됨. V22는 V21의 gait-quality-first 모니터링 위에 멀티뷰 영상, heartbeat workbook, ZIP artifact, front-view 포함 패키징을 얹은 운영 레이어다. 2026-03-11 밤에 운영 스크립트는 `scripts/supervisor.py` + `scripts/heartbeat.py` 중심의 단순 구조로 재정리됐고, 레거시 코드는 `scripts/legacy/`에 참고용으로 보관한다. 다음 작업은 **V23 학습 전략 준비**다.
 
 ---
 
@@ -47,6 +47,10 @@ pip install -e source/spot_micro_rl --quiet
 | `source/spot_micro_rl/spot_micro_rl/tasks/manager_based/spot_micro_rl/agents/rsl_rl_ppo_cfg.py` | PPO 하이퍼파라미터 |
 | `source/spot_micro_rl/spot_micro_rl/tasks/manager_based/spot_micro_rl/__init__.py` | gym 환경 등록 (4개) |
 | `source/spot_micro_rl/spot_micro_rl/robots/spot_micro.py` | 로봇 URDF, 모터 설정 |
+| `scripts/common.py` | Telegram, process, state, report/video helper 공용 함수 |
+| `scripts/supervisor.py` | Telegram 명령 루프 (`start/stop/status/report/front/rear/top/side/help`) |
+| `scripts/heartbeat.py` | read-only heartbeat 전송 루프 |
+| `scripts/legacy/` | 구 `training_supervisor.py` / `training_heartbeat.py` 참고용 보관 |
 
 ---
 
@@ -73,6 +77,32 @@ pip install -e source/spot_micro_rl --quiet
 - 과거 런에는 JSONL이 없을 수 있으므로 TensorBoard scalar fallback으로 workbook을 재구성
 - 실전 검증 런: `logs/rsl_rl/spot_micro_flat/2026-03-11_02-39-01`
 - 최신 검증 아티팩트: `clip_1005_iter15000_20260311_132732.zip`
+
+### 5.0b 운영 스크립트 단순화 (2026-03-11 밤)
+
+- active 운영 엔트리포인트는 `scripts/supervisor.py`, `scripts/heartbeat.py`, `scripts/common.py`
+- 파일명 변경 기록
+  - `scripts/training_supervisor.py` → `scripts/supervisor.py`
+  - `scripts/training_heartbeat.py` → `scripts/heartbeat.py`
+  - `scripts/training_common.py` / `scripts/v2/common.py` 계열 실험본 → `scripts/common.py`
+  - `scripts/legacy/supervisor.py`, `scripts/legacy/heartbeat.py`는 과거 운영 코드 참고용 보관본
+- `supervisor.py`가 Telegram 명령을 직접 처리
+  - `start`
+  - `stop`
+  - `status`
+  - `report`
+  - `front`
+  - `rear`
+  - `top`
+  - `side`
+  - `help`
+- `heartbeat.py`는 read-only 상태 감시 전용이며, 프로세스 kill/restart를 수행하지 않는다
+- `start` / `stop`만 훈련 상태를 바꾸고, `report/front/rear/top/side`는 내부에서 훈련을 중단/재개하지 않는다
+- `report/front/rear/top/side` 동작 원칙
+  - 훈련 중이면 최신 기존 산출물만 전송
+  - 훈련 정지 상태면 현재 active checkpoint 기준으로 새 산출물을 생성 후 전송
+- 자동 재개 / emergency resume / supervisor-heartbeat 상호복구 루프는 active 경로에서 제거
+- 구 운영 코드는 `scripts/legacy/` 아래에 참고용으로만 남긴다
 
 ### 5.1 V21 운영 정리 (2026-03-10)
 

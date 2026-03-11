@@ -41,6 +41,33 @@ V23 1차의 진짜 목표는 아래 3개다.
 2. posture/style KPI를 신뢰 가능하게 추가
 3. posture-first refinement를 매우 좁게 1차 적용
 
+### 4.1 운영 레이어 전제 (2026-03-11 밤 정리)
+
+- active 운영 엔트리포인트
+  - `scripts/supervisor.py`
+  - `scripts/heartbeat.py`
+  - `scripts/common.py`
+- 파일명 변경 기록
+  - `scripts/training_supervisor.py` → `scripts/supervisor.py`
+  - `scripts/training_heartbeat.py` → `scripts/heartbeat.py`
+  - `scripts/training_common.py` / `scripts/v2/common.py` 계열 실험본 → `scripts/common.py`
+- `scripts/legacy/supervisor.py`, `scripts/legacy/heartbeat.py`는 과거 운영 코드 참고용 보관본
+- `supervisor.py` Telegram 명령
+  - `start`
+  - `stop`
+  - `status`
+  - `report`
+  - `front`
+  - `rear`
+  - `top`
+  - `side`
+  - `help`
+- 설계 원칙
+  - `start` / `stop`만 훈련 상태를 바꾼다
+  - `report/front/rear/top/side`는 훈련 중이면 최신 산출물만 전송한다
+  - `report/front/rear/top/side`는 정지 상태에서만 현재 checkpoint 기준 산출물을 새로 생성한다
+  - active 경로에서는 auto-resume / emergency resume / supervisor-heartbeat 상호복구 루프를 사용하지 않는다
+
 이번 단계에서 하지 않을 것:
 
 - distal jitter 본격 penalty 다중 추가

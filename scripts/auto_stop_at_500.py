@@ -67,7 +67,7 @@ def get_current_iter():
 def kill_all():
     import psutil
     my_pid = os.getpid()
-    targets = ["train.py", "training_heartbeat", "training_supervisor",
+    targets = ["train.py", "heartbeat.py", "supervisor.py", "training_heartbeat", "training_supervisor",
                "tensorboard", "milestone_monitor"]
     killed = []
     for p in psutil.process_iter(["pid", "cmdline"]):

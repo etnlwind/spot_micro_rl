@@ -1,5 +1,5 @@
 import psutil
-targets = ['train.py', 'training_supervisor', 'training_heartbeat']
+targets = ['train.py', 'supervisor.py', 'heartbeat.py', 'training_supervisor', 'training_heartbeat']
 for p in psutil.process_iter():
     try:
         cmd = ' '.join(p.cmdline())
