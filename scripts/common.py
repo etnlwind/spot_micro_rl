@@ -159,6 +159,19 @@ def write_log(message: str, log_path: str) -> None:
         file.write(line + "\n")
 
 
+def _read_text_tail(path: str, max_chars: int = 1200) -> str:
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as file:
+            text = file.read()
+    except Exception:
+        return ""
+    if len(text) <= max_chars:
+        return text.strip()
+    return text[-max_chars:].strip()
+
+
 def read_json(path: str, default):
     try:
         with open(path, "r", encoding="utf-8") as file:
@@ -1331,30 +1344,46 @@ def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int, log_p
         )
         mode_label = "headless" if headless else "gui"
         write_log(f"Recording {spec['key']} ({mode_label}): {play_cmd}", log_path)
+        capture_log_dir = os.path.join(PROJECT_ROOT, "logs", "video_capture")
+        os.makedirs(capture_log_dir, exist_ok=True)
+        capture_log_path = os.path.join(
+            capture_log_dir,
+            f"{datetime.datetime.now():%Y%m%d_%H%M%S}_{spec['key']}_{mode_label}.log",
+        )
         started_at = time.time()
-        proc = _popen_hidden_cmd(play_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        timeout = time.time() + 480
-        while proc.poll() is None and time.time() < timeout:
-            time.sleep(5)
+        with open(capture_log_path, "wb") as capture_log_file:
+            proc = _popen_hidden_cmd(play_cmd, stdout=capture_log_file, stderr=subprocess.STDOUT)
+            timeout = time.time() + 480
+            while proc.poll() is None and time.time() < timeout:
+                time.sleep(5)
 
-        timed_out = proc.poll() is None
-        if timed_out:
-            try:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
-            except Exception:
-                pass
+            timed_out = proc.poll() is None
+            if timed_out:
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
+                except Exception:
+                    pass
 
-        elapsed = time.time() - started_at
-        rc = proc.poll()
+            elapsed = time.time() - started_at
+            rc = proc.poll()
         if timed_out:
             write_log(f"Recording {spec['key']} timed out after {elapsed:.1f}s", log_path)
+            tail = _read_text_tail(capture_log_path)
+            if tail:
+                write_log(f"Recording {spec['key']} log tail:\n{tail}", log_path)
             continue
         if rc not in (0, None):
             write_log(f"Recording {spec['key']} exited with rc={rc} after {elapsed:.1f}s", log_path)
+            tail = _read_text_tail(capture_log_path)
+            if tail:
+                write_log(f"Recording {spec['key']} log tail:\n{tail}", log_path)
 
         latest_video = _find_updated_play_video(run_dir, pre_videos)
         if not latest_video:
             write_log(f"Recording {spec['key']} failed: no new or updated MP4 was detected", log_path)
+            tail = _read_text_tail(capture_log_path)
+            if tail:
+                write_log(f"Recording {spec['key']} log tail:\n{tail}", log_path)
             continue
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
