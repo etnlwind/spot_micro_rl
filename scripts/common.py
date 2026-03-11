@@ -976,7 +976,8 @@ def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int) -> di
             f'"{ISAAC_LAB}" -p "{play_script}" '
             f'--task={TASK} --num_envs={spec["num_envs"]} '
             f'--checkpoint="{checkpoint_path}" --video --video_length={VIDEO_LENGTH} '
-            f'--camera_view={spec["camera_view"]} --camera_zoom={spec["camera_zoom"]}'
+            f'--camera_view={spec["camera_view"]} --camera_zoom={spec["camera_zoom"]} '
+            '--headless'
         )
         write_log(f"Recording {spec['key']}: {play_cmd}", SUPERVISOR_LOG)
         proc = _popen_hidden_cmd(play_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
