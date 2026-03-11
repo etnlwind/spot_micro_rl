@@ -153,10 +153,21 @@ def _hidden_creationflags(extra_flags: int = 0) -> int:
     return extra_flags
 
 
+def _hidden_startupinfo():
+    """Return Windows startupinfo that explicitly hides child console windows."""
+    if sys.platform != "win32":
+        return None
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return startupinfo
+
+
 def _popen_hidden_cmd(command: str, **kwargs):
     """Run a shell command without opening a visible terminal window on Windows."""
     kwargs.setdefault("cwd", PROJECT_ROOT)
     kwargs["creationflags"] = _hidden_creationflags(kwargs.pop("creationflags", 0))
+    kwargs.setdefault("startupinfo", _hidden_startupinfo())
     return subprocess.Popen(["cmd", "/c", command], **kwargs)
 
 
@@ -164,6 +175,7 @@ def _run_hidden_cmd(command: str, **kwargs):
     """Run a shell command synchronously without opening a visible terminal window on Windows."""
     kwargs.setdefault("cwd", PROJECT_ROOT)
     kwargs["creationflags"] = _hidden_creationflags(kwargs.pop("creationflags", 0))
+    kwargs.setdefault("startupinfo", _hidden_startupinfo())
     return subprocess.run(["cmd", "/c", command], **kwargs)
 
 
@@ -749,6 +761,90 @@ REMOTE_BLOCKED_TEXT_MARKERS = (
     "git reset --hard",
     "git clean -fd",
 )
+
+REMOTE_POLICY_BLOCK_KEYWORDS = (
+    "보안",
+    "security",
+    "계정",
+    "account",
+    "로그인",
+    "login",
+    "credential",
+    "자격증명",
+    "권한",
+    "permission",
+    "permissions",
+    "관리자 권한",
+    "admin",
+    "administrator",
+    "sudo",
+    "개인정보",
+    "personal information",
+    "pii",
+    "주민등록",
+    "비밀번호",
+    "password",
+    "secret",
+    "secret key",
+    "token",
+    "apikey",
+    "api key",
+    "ssh key",
+    "private key",
+    "disk",
+    "디스크",
+    "drive",
+    "드라이브",
+    "storage",
+    "저장장치",
+    "registry",
+    "레지스트리",
+    "firewall",
+    "방화벽",
+    "antivirus",
+    "백신",
+)
+
+REMOTE_TRAINING_HINT_KEYWORDS = (
+    "훈련",
+    "학습",
+    "training",
+    "train",
+    "resume",
+    "재개",
+    "다시 시작",
+    "restart",
+    "pause",
+    "멈춰",
+    "중단",
+    "status",
+    "상태",
+    "리포트",
+    "report",
+    "heartbeat",
+    "front",
+    "top",
+    "영상",
+)
+
+REMOTE_DEVELOPMENT_HINT_KEYWORDS = (
+    "개발",
+    "코드",
+    "git",
+    "깃",
+    "커밋",
+    "commit",
+    "push",
+    "푸시",
+    "변경사항",
+    "diff",
+    "status",
+    "브랜치",
+    "branch",
+)
+
+REMOTE_TRAINING_TASK_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{3,120}$")
+REMOTE_TRAINING_ARG_PATTERN = re.compile(r"\b(task|envs|iters|max_iterations)\s*=\s*([^\s,;]+)", re.IGNORECASE)
 
 REMOTE_BLOCKED_PATH_PREFIXES = (
     "logs/",
@@ -1470,19 +1566,51 @@ def _classify_remote_action(payload: str) -> tuple[str | None, dict]:
     lowered = text.lower()
     if not text:
         return None, {}
+    if (
+        "새 훈련" in text
+        or "처음부터" in text
+        or "from scratch" in lowered
+        or "new training" in lowered
+        or (("훈련" in text or "training" in lowered or "train" in lowered) and ("새로" in text or "fresh" in lowered))
+    ):
+        return "fresh-train", {}
+    if ("훈련" in text or "학습" in text or "training" in lowered or "train" in lowered) and (
+        "다시 시작" in text or "재시작" in text or "재개" in text or "resume" in lowered or "start again" in lowered or "이어" in text
+    ):
+        return "resume", {}
+    if ("훈련" in text or "학습" in text or "training" in lowered or "train" in lowered) and (
+        "멈춰" in text or "중단" in text or "일시정지" in text or "pause" in lowered or "stop" in lowered
+    ):
+        return "pause", {}
+    if ("훈련" in text or "학습" in text or "training" in lowered or "train" in lowered) and (
+        "상태" in text or "status" in lowered or "어때" in text or "진행" in text
+    ):
+        return "train-status", {}
     if "커밋" in text and "푸시" in text:
+        return "git-commit-push", {}
+    if "commit" in lowered and "push" in lowered:
         return "git-commit-push", {}
     if "커밋" in text:
         return "git-commit", {}
+    if "commit" in lowered:
+        return "git-commit", {}
     if re.search(r"\bgit\s+status\b|깃\s*상태|git 상태", lowered):
+        return "git-status", {}
+    if "변경사항" in text or "diff" in lowered:
         return "git-status", {}
     if "push" in lowered or "푸시" in text:
         return "git-push-blocked", {}
     if "heartbeat" in lowered and ("restart" in lowered or "재시작" in text):
         return "restart-heartbeat", {}
+    if "heartbeat" in lowered and ("상태" in text or "status" in lowered):
+        return "train-status", {}
     if "resume" in lowered or "재개" in text:
         return "resume", {}
+    if "다시 시작" in text or "시작하자" in text or "이어" in text:
+        return "resume", {}
     if "pause" in lowered or "일시정지" in text or "멈춰" in text:
+        return "pause", {}
+    if "중단해" in text or "멈추자" in text:
         return "pause", {}
     if "front" in lowered or "프론트" in text:
         return "front-video", {}
@@ -1502,6 +1630,54 @@ def _scan_remote_payload_risk(payload: str) -> list[str]:
         if marker in lowered:
             reasons.append(marker)
     return sorted(set(reasons))
+
+
+def _scan_remote_policy_block(payload: str) -> list[str]:
+    lowered = (payload or "").lower()
+    reasons = []
+    for keyword in REMOTE_POLICY_BLOCK_KEYWORDS:
+        if keyword.lower() in lowered:
+            reasons.append(keyword)
+    return sorted(set(reasons))
+
+
+def _looks_like_training_or_development_request(payload: str) -> bool:
+    lowered = (payload or "").lower()
+    return any(keyword.lower() in lowered for keyword in REMOTE_TRAINING_HINT_KEYWORDS + REMOTE_DEVELOPMENT_HINT_KEYWORDS)
+
+
+def _parse_remote_training_request(payload: str) -> dict:
+    lowered = (payload or "").lower()
+    options = {
+        "task": TASK,
+        "train_envs": TRAIN_ENVS,
+        "max_iterations": MAX_ITERATIONS,
+    }
+
+    for key, raw_value in REMOTE_TRAINING_ARG_PATTERN.findall(payload or ""):
+        value = raw_value.strip()
+        key_l = key.lower()
+        if key_l == "task":
+            if not REMOTE_TRAINING_TASK_PATTERN.fullmatch(value):
+                raise ValueError(f"허용되지 않는 task 형식입니다: {value}")
+            options["task"] = value
+        elif key_l == "envs":
+            envs = int(value)
+            if envs < 1 or envs > 65536:
+                raise ValueError(f"envs 범위 오류: {envs}")
+            options["train_envs"] = envs
+        elif key_l in {"iters", "max_iterations"}:
+            max_iterations = int(value)
+            if max_iterations < 100 or max_iterations > 1000000:
+                raise ValueError(f"max_iterations 범위 오류: {max_iterations}")
+            options["max_iterations"] = max_iterations
+
+    if "rough" in lowered and "task=" not in lowered:
+        options["task"] = "Isaac-Velocity-Rough-SpotMicro-v0"
+    elif "flat" in lowered and "task=" not in lowered:
+        options["task"] = "Isaac-Velocity-Flat-SpotMicro-v0"
+
+    return options
 
 
 def _format_git_entries(entries: list[dict], max_items: int = 8) -> str:
@@ -1570,7 +1746,63 @@ def _execute_remote_commit(push_after: bool, payload: str) -> tuple[bool, str, s
     return True, "remote-commit", "\n".join(summary)
 
 
+def start_fresh_training(task_name: str | None = None, train_envs: int | None = None, max_iterations: int | None = None):
+    """기존 학습을 정리한 뒤 새 run으로 train.py를 처음부터 시작합니다."""
+    effective_task = task_name or TASK
+    effective_train_envs = train_envs or TRAIN_ENVS
+    effective_max_iterations = max_iterations or MAX_ITERATIONS
+
+    write_log("Pre-fresh-training cleanup...")
+    ensure_gpu_clean(reason="pre-fresh-training")
+
+    train_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "train.py")
+    train_cmd = _wrap_conda_command(
+        f'cd /d "{PROJECT_ROOT}" && '
+        f'set PYTHONIOENCODING=utf-8 && '
+        f'"{ISAAC_LAB}" -p "{train_script}" '
+        f'--task={effective_task} --num_envs={effective_train_envs} --headless '
+        f'--max_iterations={effective_max_iterations}'
+    )
+    write_log(f"fresh_train_cmd: {train_cmd}")
+    _popen_hidden_cmd(
+        train_cmd,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+
+    write_log("Waiting for fresh training init (60s)...")
+    time.sleep(60)
+
+    if not test_training_alive():
+        write_log("WARNING: Fresh training process not detected!")
+        send_telegram("⚠️ 새 훈련 시작 후 프로세스 감지 실패! 확인 필요")
+
+
+def _execute_remote_fresh_train(payload: str) -> tuple[bool, str, str]:
+    options = _parse_remote_training_request(payload)
+    set_maintenance_flag()
+    try:
+        remove_telegram_pause_flag()
+        remove_user_stop_flag()
+        start_fresh_training(
+            task_name=options["task"],
+            train_envs=options["train_envs"],
+            max_iterations=options["max_iterations"],
+        )
+    finally:
+        remove_maintenance_flag()
+
+    detail = (
+        "새 훈련 시작 완료\n"
+        f"- task: {options['task']}\n"
+        f"- train_envs: {options['train_envs']:,}\n"
+        f"- max_iterations: {options['max_iterations']:,}"
+    )
+    return True, "remote-fresh-train", detail
+
+
 def _execute_remote_action(action: str, payload: str, run_dir: str | None = None, checkpoint: str | None = None) -> tuple[bool, str, str]:
+    if action == "fresh-train":
+        return _execute_remote_fresh_train(payload)
     if action == "train-status":
         return True, "remote-status", format_status_message(run_dir=run_dir, checkpoint=checkpoint)
     if action == "latest-report":
@@ -1611,6 +1843,13 @@ def try_handle_telegram_chat_action(update: dict, text: str, chat_id: str | None
     if not payload:
         return False, ""
 
+    policy_reasons = _scan_remote_policy_block(payload)
+    if policy_reasons:
+        detail = ", ".join(policy_reasons[:8])
+        send_telegram(f"⛔ 원격 실행 차단\n- 정책 범주: 보안/계정/권한/디스크 관련 요청\n- 매칭: {detail}\n- 요청: {payload[:200]}")
+        _log_remote_action(payload, "policy-block", "rejected", detail, update=update)
+        return True, "chat-remote-policy-block"
+
     action, _meta = _classify_remote_action(payload)
     risk_reasons = _scan_remote_payload_risk(payload)
 
@@ -1620,6 +1859,15 @@ def try_handle_telegram_chat_action(update: dict, text: str, chat_id: str | None
             send_telegram(f"⛔ 원격 실행 차단\n- 사유: {detail}\n- 요청: {payload[:200]}")
             _log_remote_action(payload, "unknown", "rejected", detail, update=update)
             return True, "chat-remote-rejected"
+        if _looks_like_training_or_development_request(payload):
+            _log_telegram_chat_message(update, payload, chat_id)
+            send_telegram(
+                "ℹ️ 개발/훈련 범주의 요청으로 판단했지만 현재 자동 실행 규칙에는 없는 문장입니다.\n"
+                "inbox에 저장했습니다. 더 직접적인 표현으로 보내면 자동 실행될 수 있습니다.\n"
+                "예: 훈련 재개, 상태 알려줘, git status, 커밋하고 푸시해"
+            )
+            _log_remote_action(payload, "training-dev-unmapped", "inbox", "allowed scope but no action rule", update=update)
+            return True, "chat-remote-inbox"
         return False, ""
 
     if risk_reasons and action not in {"train-status", "latest-report", "pause", "resume", "restart-heartbeat", "front-video", "top-video", "git-status", "git-commit", "git-commit-push", "git-push-blocked"}:
@@ -1779,7 +2027,8 @@ def build_command_help() -> str:
         "- /restart_heartbeat : heartbeat만 재시작\n"
         "- /front : 최근 front-view mp4 재전송\n"
         "- /top : 최근 top-view mp4 재전송\n"
-        "- chat 자유문 : 안전검사 통과 시 상태/영상/git status/commit/push 일부 자동 실행\n"
+        "- chat 자유문 : 안전검사 통과 시 상태/영상/git status/commit/push/새 훈련 시작 일부 자동 실행\n"
+        "  예: 새 훈련 시작 task=Isaac-Velocity-Rough-SpotMicro-v0 envs=24576 iters=15000\n"
         "- /help : 명령 목록"
     )
 
@@ -2990,8 +3239,10 @@ def main():
                 process_pending_telegram_commands(run_dir=get_latest_run_dir())
                 sleep_with_command_poll(SUPERVISOR_POLL_SECONDS, run_dir=get_latest_run_dir())
 
+                training_alive = test_training_alive()
+
                 # Heartbeat 워치독
-                if not test_heartbeat_alive():
+                if training_alive and not test_heartbeat_alive():
                     if not _heartbeat_alert_sent:
                         write_log("WARNING: Heartbeat not alive! Restarting...")
                         send_telegram("⚠️ Training Heartbeat 감지 불가! 자동 재시작 시도 중...")

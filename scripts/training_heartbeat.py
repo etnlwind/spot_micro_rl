@@ -1703,36 +1703,29 @@ def is_run_complete(run_dir: str | None) -> bool:
     return bool(model_iters) and max(model_iters) >= MAX_ITERATIONS
 
 
+def _looks_like_training_cmdline(cmdline: str) -> bool:
+    """실제 train.py 실행 커맨드라인인지 판별."""
+    cmd_lower = cmdline.lower()
+    if "training_heartbeat" in cmd_lower or "training_supervisor" in cmd_lower or "live_monitor" in cmd_lower:
+        return False
+    return "scripts\\rsl_rl\\train.py" in cmd_lower or "scripts/rsl_rl/train.py" in cmd_lower
+
+
 def check_training_alive():
-    """훈련 프로세스가 살아있는지 확인 (자기 자신 제외, training_heartbeat 제외)."""
-    import subprocess
+    """실제 rsl_rl train.py 프로세스가 살아있는지 확인."""
     my_pid = os.getpid()
     try:
-        result = subprocess.run(
-            ["powershell", "-Command",
-             "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Select-Object ProcessId,CommandLine | Format-List"],
-            capture_output=True, text=True, timeout=15
-        )
-        # training 관련 python.exe가 있는지 확인 (heartbeat/monitor 제외)
-        current_pid = None
-        current_cmd = ""
-        for line in result.stdout.split("\n"):
-            line = line.strip()
-            if line.startswith("ProcessId"):
-                try:
-                    current_pid = int(line.split(":", 1)[1].strip())
-                except (ValueError, IndexError):
-                    current_pid = None
-            elif line.startswith("CommandLine"):
-                current_cmd = line.split(":", 1)[1].strip() if ":" in line else ""
-                # 이 PID+CommandLine 쌍을 판별
-                if current_pid and current_pid != my_pid:
-                    cmd_lower = current_cmd.lower()
-                    # heartbeat/monitor 스크립트는 제외, 훈련 프로세스만 카운트
-                    if "training_heartbeat" not in cmd_lower and "live_monitor" not in cmd_lower:
-                        return True
-                current_pid = None
-                current_cmd = ""
+        for proc in _iter_processes_safe(["pid", "name", "cmdline"]):
+            try:
+                if proc.info["pid"] == my_pid:
+                    continue
+                if proc.info["name"] and "python" not in proc.info["name"].lower():
+                    continue
+                cmdline = " ".join(proc.info["cmdline"] or [])
+                if _looks_like_training_cmdline(cmdline):
+                    return True
+            except (psutil.Error, PermissionError, OSError):
+                pass
         return False
     except Exception:
         # 오류 시 보수적으로 True 반환 (훈련 있다고 가정)
@@ -1849,29 +1842,11 @@ def main():
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             try:
-                # ── Supervisor 워치독 (자동 재시작) ──
                 current_run_dir = args.run_dir if args.run_dir else find_latest_run()
                 run_complete = is_run_complete(current_run_dir)
-                if not check_supervisor_alive():
-                    if check_user_stop():
-                        print(f"[{now}] Supervisor stopped by user (user_stop.flag exists). Skipping auto-restart.")
-                    elif run_complete:
-                        print(f"[{now}] Completed run detected. Skipping supervisor auto-restart.")
-                    elif not supervisor_alert_sent:
-                        print(f"[{now}] WARNING: Supervisor not alive! Attempting auto-restart...")
-                        send_telegram("⚠️ <b>Training Supervisor 감지 불가!</b>\n자동 재시작 시도 중...")
-                        if restart_supervisor():
-                            supervisor_alert_sent = False  # 재시작 성공 — 다음 사이클 정상 감시
-                        else:
-                            supervisor_alert_sent = True   # 재시작 실패 — 반복 알림 방지
-                else:
-                    if supervisor_alert_sent:
-                        send_telegram("✅ <b>Training Supervisor 복구 확인</b>")
-                        print(f"[{now}] Supervisor recovered.")
-                    supervisor_alert_sent = False
-
                 # ── 훈련 프로세스 확인 ──
-                if not check_training_alive():
+                training_alive = check_training_alive()
+                if not training_alive:
                     # 유지보수 모드인지 확인
                     if check_maintenance_mode():
                         if not maintenance_logged:
@@ -1893,6 +1868,25 @@ def main():
                         break
                 else:
                     maintenance_logged = False  # 훈련 복귀 시 리셋
+
+                # ── Supervisor 워치독 (훈련 생존 중일 때만 자동 재시작) ──
+                if not check_supervisor_alive():
+                    if check_user_stop():
+                        print(f"[{now}] Supervisor stopped by user (user_stop.flag exists). Skipping auto-restart.")
+                    elif run_complete:
+                        print(f"[{now}] Completed run detected. Skipping supervisor auto-restart.")
+                    elif not supervisor_alert_sent:
+                        print(f"[{now}] WARNING: Supervisor not alive! Attempting auto-restart...")
+                        send_telegram("⚠️ <b>Training Supervisor 감지 불가!</b>\n자동 재시작 시도 중...")
+                        if restart_supervisor():
+                            supervisor_alert_sent = False  # 재시작 성공 — 다음 사이클 정상 감시
+                        else:
+                            supervisor_alert_sent = True   # 재시작 실패 — 반복 알림 방지
+                else:
+                    if supervisor_alert_sent:
+                        send_telegram("✅ <b>Training Supervisor 복구 확인</b>")
+                        print(f"[{now}] Supervisor recovered.")
+                    supervisor_alert_sent = False
 
                 # 런 디렉토리 찾기
                 run_dir = current_run_dir
