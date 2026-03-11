@@ -118,6 +118,13 @@ def get_video_capture_specs(play_envs: int) -> list[dict]:
             "camera_zoom": 0.9,
         },
         {
+            "key": "front",
+            "label": "로봇 1대 정면",
+            "camera_view": "front",
+            "num_envs": 1,
+            "camera_zoom": 0.9,
+        },
+        {
             "key": "rear",
             "label": "로봇 1대 후면",
             "camera_view": "rear",
@@ -1412,7 +1419,7 @@ print(f'OK: {{count}} frames @ {{TARGET_FPS}}fps H.264 -> {{dst}}')
 
 
 def send_clip_video_set(captured_videos: dict[str, str], clip_num: int, iter_num: int, progress_pct: float, kpi_snapshot: dict, is_final: bool = False):
-    """요청된 4종 영상 세트를 순서대로 전송합니다."""
+    """요청된 영상 세트를 순서대로 전송합니다."""
     specs = get_video_capture_specs(PLAY_ENVS)
     total = len(specs)
     prefix = "🏆 최종" if is_final else f"🎬 Clip #{clip_num}"
