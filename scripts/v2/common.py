@@ -35,13 +35,13 @@ def _load_env(path: str) -> dict:
     env = {}
     if not os.path.isfile(path):
         return env
-    with open(path, "r", encoding="utf-8") as file:
+    with open(path, "r", encoding="utf-8-sig") as file:
         for line in file:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            env[key.strip()] = value.strip()
+            env[key.strip().lstrip("\ufeff")] = value.strip()
     return env
 
 
