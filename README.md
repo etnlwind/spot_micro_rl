@@ -167,6 +167,8 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
 - `--camera_zoom`: 단일 로봇 근접 촬영 거리 조정
 - `--save_contact_csv`: LF/RF/LR/RR 접촉 상태와 force CSV 저장
 - `--contact_primary_mode`: `foot`, `toe`, `aggregate`
+- `VIDEO_LENGTH`: report/video 생성 시 녹화 길이. 초가 아니라 simulation step 기준
+- `VIDEO_FPS`: report/video ZIP에 넣기 전 재인코딩 fps. 낮출수록 같은 step 수라도 더 천천히 재생됨
 
 ### 모니터링
 

@@ -599,6 +599,32 @@ def get_video_capture_specs(play_envs: int) -> list[dict]:
     ]
 
 
+def _snapshot_play_videos(run_dir: str) -> dict[str, tuple[int, int]]:
+    snapshot = {}
+    for path in glob.glob(os.path.join(run_dir, "videos", "play", "*.mp4")):
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        snapshot[path] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+def _find_updated_play_video(run_dir: str, before_snapshot: dict[str, tuple[int, int]]) -> str | None:
+    candidates: list[tuple[int, int, str]] = []
+    for path in glob.glob(os.path.join(run_dir, "videos", "play", "*.mp4")):
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        current = (stat.st_mtime_ns, stat.st_size)
+        previous = before_snapshot.get(path)
+        if previous is None or current != previous:
+            candidates.append((stat.st_mtime_ns, stat.st_size, path))
+    candidates.sort()
+    return candidates[-1][2] if candidates else None
+
+
 def find_latest_video(view_key: str, run_dir: str | None = None) -> str | None:
     search_roots = [run_dir] if run_dir else []
     if LOG_BASE not in search_roots:
@@ -655,6 +681,26 @@ def read_tfevents(run_dir: str, retries: int = 3):
 
 def get_heartbeat_history_path(run_dir: str) -> str:
     return os.path.join(run_dir, HEARTBEAT_HISTORY_JSONL)
+
+
+def load_report_history(run_dir: str) -> list[dict]:
+    history_path = get_heartbeat_history_path(run_dir)
+    records = []
+    if not os.path.isfile(history_path):
+        return records
+    try:
+        with open(history_path, "r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except Exception as err:
+        write_log(f"Failed to read heartbeat history: {err}", SUPERVISOR_LOG)
+    return records
 
 
 def _safe_float(value, digits: int = 6):
@@ -964,12 +1010,250 @@ def parse_analysis_grade(text: str) -> dict:
     return result
 
 
+def reencode_video(src_path: str, target_fps: int, log_path: str) -> str:
+    if target_fps >= 25:
+        return src_path
+    tmp_py = os.path.join(PROJECT_ROOT, "logs", "_reencode_tmp.py")
+    out_path = re.sub(r"\.mp4$", f"_{target_fps}fps.mp4", src_path)
+    py_code = f"""
+import av
+from fractions import Fraction
+
+src = r{src_path!r}
+dst = r{out_path!r}
+target_fps = {target_fps}
+
+inp = av.open(src)
+in_stream = inp.streams.video[0]
+out = av.open(dst, mode='w')
+out_stream = out.add_stream('h264', rate=target_fps)
+out_stream.width = in_stream.width
+out_stream.height = in_stream.height
+out_stream.pix_fmt = 'yuv420p'
+out_stream.time_base = Fraction(1, target_fps)
+out_stream.options = {{'crf': '18', 'preset': 'medium'}}
+
+count = 0
+for frame in inp.decode(video=0):
+    new_frame = frame.reformat(format='yuv420p')
+    new_frame.pts = count
+    new_frame.time_base = Fraction(1, target_fps)
+    for packet in out_stream.encode(new_frame):
+        out.mux(packet)
+    count += 1
+
+for packet in out_stream.encode():
+    out.mux(packet)
+
+out.close()
+inp.close()
+"""
+    try:
+        with open(tmp_py, "w", encoding="utf-8") as file:
+            file.write(py_code)
+        write_log(f"Re-encoding video to {target_fps}fps: {os.path.basename(src_path)}", log_path)
+        proc = _run_hidden_cmd(
+            _wrap_conda_command(f'set PYTHONIOENCODING=utf-8 && python "{tmp_py}"'),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            stdout = (proc.stdout or "").strip()
+            write_log(
+                f"Re-encode failed for {os.path.basename(src_path)}: rc={proc.returncode} {stderr or stdout}",
+                log_path,
+            )
+            return src_path
+        if not os.path.isfile(out_path):
+            write_log(f"Re-encode output missing for {os.path.basename(src_path)}", log_path)
+            return src_path
+        try:
+            os.remove(src_path)
+        except OSError:
+            pass
+        shutil.move(out_path, src_path)
+        return src_path
+    except Exception as err:
+        write_log(f"Re-encode error for {os.path.basename(src_path)}: {err}", log_path)
+        return src_path
+    finally:
+        try:
+            os.remove(tmp_py)
+        except OSError:
+            pass
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
+
+def export_heartbeat_history_xlsx(run_dir: str, out_path: str, log_path: str) -> str | None:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.chart import LineChart, Reference
+        from openpyxl.styles import Font
+    except Exception as err:
+        write_log(f"Heartbeat XLSX skipped (openpyxl unavailable): {err}", log_path)
+        return None
+
+    records = load_report_history(run_dir)
+    scalar_data = read_tfevents(run_dir) or {}
+    scalar_maps = {tag: {int(step): value for step, value in values} for tag, values in scalar_data.items()}
+    column_specs = [
+        ("timestamp", "timestamp"),
+        ("report_kind", "report_kind"),
+        ("cycle_num", "cycle_num"),
+        ("iteration", "iteration"),
+        ("mean_reward", "mean_reward"),
+        ("mean_episode_length", "mean_episode_length"),
+        ("survival_pct", "survival_pct"),
+        ("gait_score", "gait_score"),
+        ("stability_score", "stability_score"),
+        ("posture_style_score", "posture_style_score"),
+        ("verdict", "verdict"),
+        ("standing_height", ("primary_metrics", "standing_height")),
+        ("forward_velocity", ("primary_metrics", "forward_velocity")),
+        ("diagonal_coupling", ("primary_metrics", "diagonal_coupling")),
+        ("trot_gait", ("primary_metrics", "trot_gait")),
+        ("rear_joint_velocity", ("primary_metrics", "rear_joint_velocity")),
+        ("foot_clearance", ("primary_metrics", "foot_clearance")),
+        ("shoulder_neutral", ("primary_metrics", "shoulder_neutral")),
+        ("shoulder_symmetry", ("primary_metrics", "shoulder_symmetry")),
+        ("stance_width_penalty", ("primary_metrics", "stance_width_penalty")),
+        ("joint_vel_l2", ("penalties", "joint_vel_l2")),
+        ("action_rate_l2", ("penalties", "action_rate_l2")),
+        ("dof_acc_l2", ("penalties", "dof_acc_l2")),
+        ("ang_vel_xy_l2", ("penalties", "ang_vel_xy_l2")),
+        ("flat_orientation_l2", ("penalties", "flat_orientation_l2")),
+    ]
+
+    def _resolve_record_value(record: dict, accessor):
+        if isinstance(accessor, tuple):
+            node = record.get(accessor[0], {}) or {}
+            return node.get(accessor[1]) if isinstance(node, dict) else None
+        return record.get(accessor)
+
+    rows = []
+    if records:
+        for record in records:
+            row = {}
+            for column_name, accessor in column_specs:
+                row[column_name] = _resolve_record_value(record, accessor)
+            rows.append(row)
+    else:
+        reward_vals = scalar_data.get("Train/mean_reward", [])
+        for step, reward_value in reward_vals:
+            step = int(step)
+            rows.append(
+                {
+                    "timestamp": "",
+                    "report_kind": "tfevents",
+                    "cycle_num": "",
+                    "iteration": step,
+                    "mean_reward": reward_value,
+                    "mean_episode_length": scalar_maps.get("Train/mean_episode_length", {}).get(step),
+                    "survival_pct": scalar_maps.get("Episode_Termination/time_out", {}).get(step),
+                    "gait_score": None,
+                    "stability_score": None,
+                    "posture_style_score": None,
+                    "verdict": "",
+                    "standing_height": scalar_maps.get("Episode_Reward/standing_height", {}).get(step),
+                    "forward_velocity": scalar_maps.get("Episode_Reward/forward_velocity", {}).get(step),
+                    "diagonal_coupling": scalar_maps.get("Episode_Reward/diagonal_coupling", {}).get(step),
+                    "trot_gait": scalar_maps.get("Episode_Reward/trot_gait", {}).get(step),
+                    "rear_joint_velocity": scalar_maps.get("Episode_Reward/rear_joint_velocity", {}).get(step),
+                    "foot_clearance": scalar_maps.get("Episode_Reward/foot_clearance", {}).get(step),
+                    "shoulder_neutral": scalar_maps.get("Episode_Reward/shoulder_neutral", {}).get(step),
+                    "shoulder_symmetry": scalar_maps.get("Episode_Reward/shoulder_symmetry", {}).get(step),
+                    "stance_width_penalty": scalar_maps.get("Episode_Reward/stance_width_penalty", {}).get(step),
+                    "joint_vel_l2": scalar_maps.get("Episode_Reward/joint_vel_l2", {}).get(step),
+                    "action_rate_l2": scalar_maps.get("Episode_Reward/action_rate_l2", {}).get(step),
+                    "dof_acc_l2": scalar_maps.get("Episode_Reward/dof_acc_l2", {}).get(step),
+                    "ang_vel_xy_l2": scalar_maps.get("Episode_Reward/ang_vel_xy_l2", {}).get(step),
+                    "flat_orientation_l2": scalar_maps.get("Episode_Reward/flat_orientation_l2", {}).get(step),
+                }
+            )
+
+    if not rows:
+        write_log("Heartbeat XLSX skipped: no history rows available", log_path)
+        return None
+
+    wb = Workbook()
+    ws_overview = wb.active
+    ws_overview.title = "Overview"
+    ws_trends = wb.create_sheet("Trends")
+    ws_raw = wb.create_sheet("RawData")
+    header_font = Font(bold=True)
+    headers = [column_name for column_name, _ in column_specs]
+
+    ws_raw.append(headers)
+    for cell in ws_raw[1]:
+        cell.font = header_font
+    for row in rows:
+        ws_raw.append([row.get(header) for header in headers])
+    ws_raw.freeze_panes = "A2"
+
+    metrics = [
+        "mean_reward",
+        "mean_episode_length",
+        "standing_height",
+        "forward_velocity",
+        "diagonal_coupling",
+        "trot_gait",
+        "rear_joint_velocity",
+        "foot_clearance",
+    ]
+    ws_overview.append(["metric", "latest", "first", "delta"])
+    for cell in ws_overview[1]:
+        cell.font = header_font
+    for metric in metrics:
+        values = [row.get(metric) for row in rows if isinstance(row.get(metric), (int, float))]
+        if not values:
+            ws_overview.append([metric, None, None, None])
+            continue
+        ws_overview.append([metric, values[-1], values[0], values[-1] - values[0]])
+    ws_overview.freeze_panes = "A2"
+
+    trend_headers = ["iteration"] + metrics
+    ws_trends.append(trend_headers)
+    for cell in ws_trends[1]:
+        cell.font = header_font
+    for row in rows:
+        ws_trends.append([row.get("iteration")] + [row.get(metric) for metric in metrics])
+    ws_trends.freeze_panes = "A2"
+
+    chart_specs = [
+        ("Reward", ["mean_reward", "mean_episode_length"]),
+        ("Gait", ["forward_velocity", "diagonal_coupling", "trot_gait", "foot_clearance"]),
+    ]
+    for chart_index, (title, metric_names) in enumerate(chart_specs, start=1):
+        chart = LineChart()
+        chart.title = title
+        chart.style = 2
+        chart.y_axis.title = "value"
+        chart.x_axis.title = "iteration"
+        categories = Reference(ws_trends, min_col=1, min_row=2, max_row=ws_trends.max_row)
+        for metric_name in metric_names:
+            col_idx = trend_headers.index(metric_name) + 1
+            data_ref = Reference(ws_trends, min_col=col_idx, min_row=1, max_row=ws_trends.max_row)
+            chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(categories)
+        ws_overview.add_chart(chart, f"F{1 + (chart_index - 1) * 15}")
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    wb.save(out_path)
+    write_log(f"Heartbeat XLSX exported: {out_path}", log_path)
+    return out_path
+
+
 def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int) -> dict[str, str]:
     play_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "play.py")
     iter_num = get_checkpoint_iter(checkpoint_path)
     captured_videos: dict[str, str] = {}
     for spec in get_video_capture_specs(PLAY_ENVS):
-        pre_videos = set(glob.glob(os.path.join(run_dir, "videos", "play", "*.mp4")))
+        pre_videos = _snapshot_play_videos(run_dir)
         play_cmd = _wrap_conda_command(
             f'cd /d "{PROJECT_ROOT}" && '
             f'set PYTHONIOENCODING=utf-8 && '
@@ -989,16 +1273,16 @@ def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int) -> di
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
             except Exception:
                 pass
-        post_videos = set(glob.glob(os.path.join(run_dir, "videos", "play", "*.mp4")))
-        created = sorted(list(post_videos - pre_videos), key=os.path.getmtime)
-        latest_video = created[-1] if created else (sorted(list(post_videos), key=os.path.getmtime)[-1] if post_videos else None)
+        latest_video = _find_updated_play_video(run_dir, pre_videos)
         if not latest_video:
+            write_log(f"Recording {spec['key']} failed: no new or updated MP4 was detected", SUPERVISOR_LOG)
             continue
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         new_name = f"clip_{clip_num}_iter{iter_num}_{spec['key']}_{ts}.mp4"
         dest_path = os.path.join(run_dir, "videos", new_name)
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         shutil.copy2(latest_video, dest_path)
+        dest_path = reencode_video(dest_path, VIDEO_FPS, SUPERVISOR_LOG)
         captured_videos[spec["key"]] = dest_path
     return captured_videos
 
@@ -1040,12 +1324,18 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
     artifact_dir = os.path.join(run_dir, "artifacts")
     os.makedirs(artifact_dir, exist_ok=True)
     zip_path = os.path.join(artifact_dir, f"clip_{clip_num}_iter{iter_num}_{timestamp}.zip")
+    heartbeat_xlsx_path = export_heartbeat_history_xlsx(
+        run_dir,
+        os.path.join(artifact_dir, f"clip_{clip_num}_iter{iter_num}_{timestamp}_heartbeat_history.xlsx"),
+        SUPERVISOR_LOG,
+    )
     manifest = {
         "clip_num": clip_num,
         "iteration": iter_num,
         "checkpoint": os.path.basename(checkpoint_path),
         "run_dir": os.path.basename(run_dir),
         "videos": {key: os.path.basename(path) for key, path in captured_videos.items()},
+        "heartbeat_history_xlsx": "heartbeat_history.xlsx" if heartbeat_xlsx_path and os.path.isfile(heartbeat_xlsx_path) else None,
         "kpi_snapshot": kpi_snapshot,
         "analysis": parse_analysis_grade(analysis_text),
     }
@@ -1062,6 +1352,8 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
         archive.writestr("summary.txt", summary_text)
         archive.writestr("analysis_report.txt", analysis_text.strip() + "\n" if analysis_text.strip() else "Analysis output unavailable\n")
         archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+        if heartbeat_xlsx_path and os.path.isfile(heartbeat_xlsx_path):
+            archive.write(heartbeat_xlsx_path, "metrics/heartbeat_history.xlsx")
         for key, path in captured_videos.items():
             if path and os.path.isfile(path):
                 archive.write(path, f"videos/{key}_{os.path.basename(path)}")
