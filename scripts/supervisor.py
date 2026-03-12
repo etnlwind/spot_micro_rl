@@ -207,11 +207,6 @@ def _build_command_ack(command: str) -> str:
 def _handle_report_command(run_dir: str, checkpoint: str) -> None:
     if common.is_training_running():
         zip_path = common.find_latest_report_zip(run_dir)
-        xlsx_path = common.find_latest_report_xlsx(run_dir)
-        v23_log_path = common.get_v23_run_log_path(run_dir)
-        if not os.path.isfile(v23_log_path):
-            refreshed = common.refresh_v23_training_logs(run_dir, common.SUPERVISOR_LOG)
-            v23_log_path = refreshed.get("run_log_path") or v23_log_path
         if not zip_path:
             common.send_text("⚠️ 현재 훈련 중이며 전송할 최신 ZIP 리포트가 없습니다.", common.SUPERVISOR_LOG)
             return
@@ -220,23 +215,10 @@ def _handle_report_command(run_dir: str, checkpoint: str) -> None:
             f"📦 latest report | {os.path.basename(run_dir)} | {os.path.basename(zip_path)}",
             common.SUPERVISOR_LOG,
         )
-        if xlsx_path and os.path.isfile(xlsx_path):
-            common.send_document(
-                xlsx_path,
-                f"📊 latest workbook | {os.path.basename(run_dir)} | {os.path.basename(xlsx_path)}",
-                common.SUPERVISOR_LOG,
-            )
-        if v23_log_path and os.path.isfile(v23_log_path):
-            common.send_document(
-                v23_log_path,
-                f"📘 v23 run log | {os.path.basename(run_dir)} | {os.path.basename(v23_log_path)}",
-                common.SUPERVISOR_LOG,
-            )
         return
     with common.busy_lock("report"):
         common.update_state(mode="reporting", last_command="report", last_error="")
         report_data = common.stop_and_report(run_dir, checkpoint, common.SUPERVISOR_LOG, force=True)
-        v23_paths = common.refresh_v23_training_logs(run_dir, common.SUPERVISOR_LOG)
         common.send_text(
             common.format_report_summary_html(run_dir, checkpoint, report_data["analysis_text"], report_data["kpi_snapshot"]),
             common.SUPERVISOR_LOG,
@@ -247,18 +229,6 @@ def _handle_report_command(run_dir: str, checkpoint: str) -> None:
             f"📦 current report | {os.path.basename(run_dir)} | {os.path.basename(report_data['zip_path'])}",
             common.SUPERVISOR_LOG,
         )
-        if report_data.get("xlsx_path") and os.path.isfile(report_data["xlsx_path"]):
-            common.send_document(
-                report_data["xlsx_path"],
-                f"📊 current workbook | {os.path.basename(run_dir)} | {os.path.basename(report_data['xlsx_path'])}",
-                common.SUPERVISOR_LOG,
-            )
-        if v23_paths.get("run_log_path") and os.path.isfile(v23_paths["run_log_path"]):
-            common.send_document(
-                v23_paths["run_log_path"],
-                f"📘 v23 run log | {os.path.basename(run_dir)} | {os.path.basename(v23_paths['run_log_path'])}",
-                common.SUPERVISOR_LOG,
-            )
         common.update_state(mode="stopped", last_command="report", last_error="")
 
 
@@ -343,24 +313,13 @@ def _handle_report_local(run_dir: str, checkpoint: str) -> None:
         if not zip_path:
             raise RuntimeError("현재 훈련 중이며 전송할 최신 ZIP 리포트가 없습니다.")
         _print_local(f"latest report: {zip_path}")
-        xlsx_path = common.find_latest_report_xlsx(run_dir)
-        if xlsx_path:
-            _print_local(f"latest workbook: {xlsx_path}")
-        v23_log_path = common.get_v23_run_log_path(run_dir)
-        if os.path.isfile(v23_log_path):
-            _print_local(f"v23 run log: {v23_log_path}")
         return
     with common.busy_lock("report"):
         common.update_state(mode="reporting", last_command="report", last_error="")
         report_data = common.stop_and_report(run_dir, checkpoint, common.SUPERVISOR_LOG, force=True)
-        v23_paths = common.refresh_v23_training_logs(run_dir, common.SUPERVISOR_LOG)
         common.update_state(mode="stopped", last_command="report", last_error="")
     _print_local(common.format_report_summary(run_dir, checkpoint, report_data["analysis_text"], report_data["kpi_snapshot"]))
     _print_local(f"zip: {report_data['zip_path']}")
-    if report_data.get("xlsx_path"):
-        _print_local(f"workbook: {report_data['xlsx_path']}")
-    if v23_paths.get("run_log_path"):
-        _print_local(f"v23 run log: {v23_paths['run_log_path']}")
 
 
 def _handle_view_local(view_key: str, run_dir: str, checkpoint: str) -> None:

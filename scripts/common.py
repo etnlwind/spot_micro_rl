@@ -2345,6 +2345,8 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
         os.path.join(artifact_dir, f"clip_{clip_num}_iter{iter_num}_{timestamp}_heartbeat_history.xlsx"),
         SUPERVISOR_LOG,
     )
+    v23_paths = refresh_v23_training_logs(run_dir, SUPERVISOR_LOG)
+    v23_run_log_path = v23_paths.get("run_log_path") if v23_paths else None
     if REPORT_REQUIRE_XLSX and (not heartbeat_xlsx_path or not os.path.isfile(heartbeat_xlsx_path)):
         raise RuntimeError("Heartbeat XLSX export failed.")
     manifest = {
@@ -2354,6 +2356,7 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
         "run_dir": os.path.basename(run_dir),
         "videos": {key: os.path.basename(path) for key, path in captured_videos.items()},
         "heartbeat_history_xlsx": "heartbeat_history.xlsx" if heartbeat_xlsx_path and os.path.isfile(heartbeat_xlsx_path) else None,
+        "v23_run_log_xlsx": os.path.basename(v23_run_log_path) if v23_run_log_path and os.path.isfile(v23_run_log_path) else None,
         "kpi_snapshot": kpi_snapshot,
         "analysis": parse_analysis_grade(analysis_text),
     }
@@ -2372,6 +2375,8 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
         archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
         if heartbeat_xlsx_path and os.path.isfile(heartbeat_xlsx_path):
             archive.write(heartbeat_xlsx_path, "metrics/heartbeat_history.xlsx")
+        if v23_run_log_path and os.path.isfile(v23_run_log_path):
+            archive.write(v23_run_log_path, f"metrics/{os.path.basename(v23_run_log_path)}")
         for key, path in captured_videos.items():
             if path and os.path.isfile(path):
                 archive.write(path, f"videos/{key}_{os.path.basename(path)}")
@@ -2388,7 +2393,10 @@ def _report_zip_meets_requirements(zip_path: str) -> bool:
     try:
         with zipfile.ZipFile(zip_path, "r") as archive:
             names = set(archive.namelist())
-        return "metrics/heartbeat_history.xlsx" in names
+        return (
+            "metrics/heartbeat_history.xlsx" in names
+            and any(name.startswith("metrics/spotmicro_v23_run_") and name.endswith("_training_log.xlsx") for name in names)
+        )
     except Exception:
         return False
 
@@ -2529,16 +2537,26 @@ def format_supervisor_error_text(err: Exception) -> str:
     return "⚠️ Supervisor Alert\n• detail: 서버 로그를 확인하세요."
 
 
+def _format_kpi_multiline(kpi_line: str) -> str:
+    text = str(kpi_line or "")
+    posture_marker = " | 🧍포즈"
+    if posture_marker in text:
+        head, tail = text.split(posture_marker, 1)
+        return f"{head}\n  🧍포즈{tail}"
+    return text
+
+
 def format_report_summary(run_dir: str, checkpoint_path: str, analysis_text: str, kpi_snapshot: dict) -> str:
     grade = parse_analysis_grade(analysis_text)
     iter_num = get_checkpoint_iter(checkpoint_path)
+    kpi_text = _format_kpi_multiline(kpi_snapshot["kpi_line"])
     return (
         "📦 Report Ready\n"
         f"• run: {os.path.basename(run_dir)}\n"
         f"• checkpoint: {os.path.basename(checkpoint_path)}\n"
         f"• iter: {iter_num:,}\n"
         f"• verdict: {kpi_snapshot['verdict']}\n"
-        f"• kpi: {kpi_snapshot['kpi_line']}\n"
+        f"• kpi: \n{kpi_text}\n"
         f"• grade: {grade['Grade']}\n"
         f"• score: {grade['Score']}/13\n"
         f"• reward: {grade['Reward']}\n"
@@ -2549,13 +2567,14 @@ def format_report_summary(run_dir: str, checkpoint_path: str, analysis_text: str
 def format_report_summary_html(run_dir: str, checkpoint_path: str, analysis_text: str, kpi_snapshot: dict) -> str:
     grade = parse_analysis_grade(analysis_text)
     iter_num = get_checkpoint_iter(checkpoint_path)
+    kpi_text = html.escape(_format_kpi_multiline(kpi_snapshot["kpi_line"]))
     lines = [
         "📦 <b>REPORT READY</b>",
         f"• run: <code>{html.escape(os.path.basename(run_dir))}</code>",
         f"• checkpoint: <code>{html.escape(os.path.basename(checkpoint_path))}</code>",
         f"• iter: <code>{iter_num:,}</code>",
         f"• verdict: <b>{html.escape(str(kpi_snapshot['verdict']))}</b>",
-        f"• kpi: <code>{html.escape(str(kpi_snapshot['kpi_line']))}</code>",
+        f"• kpi: \n<code>{kpi_text}</code>",
         f"• grade: <b>{html.escape(str(grade['Grade']))}</b>",
         f"• score: <code>{html.escape(str(grade['Score']))}/13</code>",
         f"• reward: <code>{html.escape(str(grade['Reward']))}</code>",
