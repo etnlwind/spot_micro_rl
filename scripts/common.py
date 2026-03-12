@@ -1625,6 +1625,130 @@ def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], lis
     return rows, meta, events, review_rows
 
 
+def _load_v23_rows_from_workbook(workbook_path: str) -> tuple[list[dict], list[dict]]:
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        return [], []
+    if not os.path.isfile(workbook_path):
+        return [], []
+    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        run_rows: list[dict] = []
+        review_rows: list[dict] = []
+        if "RunLog_100iter" in wb.sheetnames:
+            ws_run = wb["RunLog_100iter"]
+            rows_iter = ws_run.iter_rows(values_only=True)
+            headers = next(rows_iter, None)
+            if headers:
+                for values in rows_iter:
+                    if values is None or not any(value is not None for value in values):
+                        continue
+                    run_rows.append({str(header): value for header, value in zip(headers, values) if header})
+        if "CheckpointReview" in wb.sheetnames:
+            ws_review = wb["CheckpointReview"]
+            rows_iter = ws_review.iter_rows(values_only=True)
+            headers = next(rows_iter, None)
+            if headers:
+                for values in rows_iter:
+                    if values is None or not any(value is not None for value in values):
+                        continue
+                    review_rows.append({str(header): value for header, value in zip(headers, values) if header})
+        return run_rows, review_rows
+    finally:
+        wb.close()
+
+
+def _format_v23_run_list(run_names: list[str], limit: int = 5) -> str:
+    if not run_names:
+        return ""
+    visible = run_names[:limit]
+    suffix = ""
+    if len(run_names) > limit:
+        suffix = f" ... +{len(run_names) - limit} more"
+    return ", ".join(visible) + suffix
+
+
+def _export_v23_run_workbook(run_dir: str, log_path: str) -> tuple[str | None, list[dict], list[dict]]:
+    rows, meta, events, review_rows = _build_v23_run_rows(run_dir)
+    if not rows:
+        return None, [], []
+    workbook_path = export_v23_training_workbook(get_v23_run_log_path(run_dir), rows, meta, events, review_rows, log_path)
+    return workbook_path, rows, review_rows
+
+
+def backfill_v23_run_workbooks(log_path: str, max_runs: int | None = None, overwrite: bool = False) -> dict:
+    created_runs: list[str] = []
+    skipped_runs: list[str] = []
+    failed_runs: list[str] = []
+    processed = 0
+    if not os.path.isdir(LOG_BASE):
+        return {"created_runs": created_runs, "skipped_runs": skipped_runs, "failed_runs": failed_runs}
+    candidate_run_names = []
+    for run_name in sorted(os.listdir(LOG_BASE), reverse=True):
+        candidate_run_dir = os.path.join(LOG_BASE, run_name)
+        if not os.path.isdir(candidate_run_dir):
+            continue
+        if not os.path.isfile(get_heartbeat_history_path(candidate_run_dir)):
+            continue
+        candidate_run_names.append(run_name)
+    for run_name in candidate_run_names:
+        if max_runs is not None and processed >= max_runs:
+            break
+        processed += 1
+        candidate_run_dir = os.path.join(LOG_BASE, run_name)
+        workbook_path = get_v23_run_log_path(candidate_run_dir)
+        if os.path.isfile(workbook_path) and not overwrite:
+            skipped_runs.append(run_name)
+            continue
+        try:
+            exported_path, rows, _review_rows = _export_v23_run_workbook(candidate_run_dir, log_path)
+            if exported_path and rows:
+                created_runs.append(run_name)
+            else:
+                skipped_runs.append(run_name)
+        except Exception as err:
+            failed_runs.append(run_name)
+            write_log(f"V23 backfill failed for {run_name}: {err}", log_path)
+    if created_runs:
+        write_log(f"V23 backfill created {len(created_runs)} run workbooks: {_format_v23_run_list(created_runs)}", log_path)
+    if failed_runs:
+        write_log(f"V23 backfill failed for {len(failed_runs)} runs: {_format_v23_run_list(failed_runs)}", log_path)
+    if skipped_runs:
+        write_log(f"V23 backfill skipped {len(skipped_runs)} runs: {_format_v23_run_list(skipped_runs)}", log_path)
+    return {
+        "created_runs": created_runs,
+        "skipped_runs": skipped_runs,
+        "failed_runs": failed_runs,
+        "processed_runs": processed,
+    }
+
+
+def _collect_v23_master_rows(current_run_dir: str, current_rows: list[dict], current_review_rows: list[dict], log_path: str) -> tuple[list[dict], list[dict], int, list[str]]:
+    master_rows = list(current_rows)
+    master_review_rows = list(current_review_rows)
+    run_count = 1 if current_rows else 0
+    skipped_runs: list[str] = []
+    if not os.path.isdir(LOG_BASE):
+        return master_rows, master_review_rows, run_count, skipped_runs
+    current_run_id = os.path.basename(current_run_dir.rstrip("\\/"))
+    for run_name in sorted(os.listdir(LOG_BASE)):
+        candidate_run_dir = os.path.join(LOG_BASE, run_name)
+        if not os.path.isdir(candidate_run_dir) or run_name == current_run_id:
+            continue
+        if not os.path.isfile(get_heartbeat_history_path(candidate_run_dir)):
+            continue
+        workbook_path = get_v23_run_log_path(candidate_run_dir)
+        run_rows, run_review_rows = _load_v23_rows_from_workbook(workbook_path)
+        if not run_rows:
+            skipped_runs.append(run_name)
+            continue
+        run_count += 1
+        master_rows.extend(run_rows)
+        master_review_rows.extend(run_review_rows)
+    return master_rows, master_review_rows, run_count, skipped_runs
+
+
 def _write_v23_meta_sheet(ws, meta: dict, header_font) -> None:
     ws.title = "Meta"
     ws.append(["key", "value"])
@@ -1748,24 +1872,10 @@ def export_v23_checkpoint_review_workbook(out_path: str, review_rows: list[dict]
 
 
 def refresh_v23_training_logs(run_dir: str, log_path: str) -> dict:
-    rows, meta, events, review_rows = _build_v23_run_rows(run_dir)
-    if not rows:
+    run_log_path, rows, review_rows = _export_v23_run_workbook(run_dir, log_path)
+    if not run_log_path or not rows:
         return {}
-    run_log_path = export_v23_training_workbook(get_v23_run_log_path(run_dir), rows, meta, events, review_rows, log_path)
-    master_rows: list[dict] = []
-    master_review_rows: list[dict] = []
-    run_count = 0
-    if os.path.isdir(LOG_BASE):
-        for run_name in sorted(os.listdir(LOG_BASE)):
-            candidate_run_dir = os.path.join(LOG_BASE, run_name)
-            if not os.path.isdir(candidate_run_dir):
-                continue
-            run_rows, _run_meta, run_events, run_review_rows = _build_v23_run_rows(candidate_run_dir)
-            if not run_rows:
-                continue
-            run_count += 1
-            master_rows.extend(run_rows)
-            master_review_rows.extend(run_review_rows)
+    master_rows, master_review_rows, run_count, skipped_runs = _collect_v23_master_rows(run_dir, rows, review_rows, log_path)
     master_rows.sort(key=lambda item: (str(item.get("run_id") or ""), int(item.get("iter") or 0)))
     master_meta = {
         "train_version": V23_TRAIN_VERSION,
@@ -1773,14 +1883,18 @@ def refresh_v23_training_logs(run_dir: str, log_path: str) -> dict:
         "run_count": run_count,
         "log_root": LOG_BASE,
         "note": "Master workbook rebuilt from per-run heartbeat history",
+        "skipped_run_count": len(skipped_runs),
     }
-    master_events = [{"timestamp": _now(), "event_type": "workbook_refresh", "detail": f"runs={run_count}"}]
+    master_events = [{"timestamp": _now(), "event_type": "workbook_refresh", "detail": f"runs={run_count}; skipped={len(skipped_runs)}"}]
     master_log_path = export_v23_training_workbook(get_v23_master_log_path(), master_rows, master_meta, master_events, master_review_rows, log_path)
     checkpoint_review_path = export_v23_checkpoint_review_workbook(get_v23_checkpoint_review_path(), master_review_rows, log_path)
+    if skipped_runs:
+        write_log(f"V23 master refresh skipped {len(skipped_runs)} historical runs without cached workbook: {_format_v23_run_list(skipped_runs)}", log_path)
     return {
         "run_log_path": run_log_path,
         "master_log_path": master_log_path,
         "checkpoint_review_path": checkpoint_review_path,
+        "skipped_runs": skipped_runs,
     }
 
 

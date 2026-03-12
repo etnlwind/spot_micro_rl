@@ -339,6 +339,26 @@ def _handle_view_local(view_key: str, run_dir: str, checkpoint: str) -> None:
     _print_local(f"{view_key}: {video_path}")
 
 
+def _resolve_v23_refresh_run_dir() -> str | None:
+    active_run_dir = common.resolve_active_run_dir()
+    if active_run_dir and os.path.isdir(active_run_dir):
+        return active_run_dir
+    if not os.path.isdir(common.LOG_BASE):
+        return None
+    candidates: list[str] = []
+    for run_name in os.listdir(common.LOG_BASE):
+        candidate_run_dir = os.path.join(common.LOG_BASE, run_name)
+        if not os.path.isdir(candidate_run_dir):
+            continue
+        if not os.path.isfile(common.get_heartbeat_history_path(candidate_run_dir)):
+            continue
+        candidates.append(candidate_run_dir)
+    if not candidates:
+        return None
+    candidates.sort(key=os.path.getmtime, reverse=True)
+    return candidates[0]
+
+
 def _run_local_action(action: str, args: argparse.Namespace) -> int:
     if action == "status":
         _print_local(common.build_status_text())
@@ -378,6 +398,31 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
     if action == "shutdown":
         common.request_supervisor_shutdown("cli-command")
         _print_local("supervisor shutdown requested")
+        return 0
+    if action == "v23-backfill":
+        max_runs = args.v23_max_runs if args.v23_max_runs and args.v23_max_runs > 0 else None
+        result = common.backfill_v23_run_workbooks(
+            common.SUPERVISOR_LOG,
+            max_runs=max_runs,
+            overwrite=args.v23_overwrite,
+        )
+        refresh_run_dir = _resolve_v23_refresh_run_dir()
+        refresh_summary = "master refresh skipped"
+        if refresh_run_dir:
+            refresh_result = common.refresh_v23_training_logs(refresh_run_dir, common.SUPERVISOR_LOG)
+            refresh_summary = (
+                f"master refreshed\n"
+                f"run: {os.path.basename(refresh_run_dir)}\n"
+                f"skipped: {len(refresh_result.get('skipped_runs') or [])}"
+            )
+        _print_local(
+            "v23 backfill complete\n"
+            f"processed: {result.get('processed_runs', 0)}\n"
+            f"created: {len(result.get('created_runs') or [])}\n"
+            f"skipped: {len(result.get('skipped_runs') or [])}\n"
+            f"failed: {len(result.get('failed_runs') or [])}\n"
+            f"{refresh_summary}"
+        )
         return 0
     run_dir, checkpoint = _require_context()
     if action == "report":
@@ -463,6 +508,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "  .\\supervisor.cmd --status\n"
             "  .\\supervisor.cmd --start\n"
             "  .\\supervisor.cmd --report\n"
+            "  .\\supervisor.cmd --v23-backfill --v23-max-runs 20\n"
             "  .\\supervisor.ps1 --status"
         ),
     )
@@ -480,9 +526,12 @@ def _build_parser() -> argparse.ArgumentParser:
     action_group.add_argument("--heartbeat-start", dest="action", action="store_const", const="heartbeat-start", help="heartbeat 시작")
     action_group.add_argument("--heartbeat-stop", dest="action", action="store_const", const="heartbeat-stop", help="heartbeat 중단")
     action_group.add_argument("--heartbeat-status", dest="action", action="store_const", const="heartbeat-status", help="heartbeat 상태 출력")
+    action_group.add_argument("--v23-backfill", dest="action", action="store_const", const="v23-backfill", help="V23 per-run workbook cache backfill 후 master/review refresh")
     parser.add_argument("--poll", type=int, default=common.SUPERVISOR_POLL_SECONDS, help="Telegram polling interval seconds")
     parser.add_argument("--iter-step", type=int, default=common.HEARTBEAT_ITER_STEP, help="heartbeat report iteration step")
     parser.add_argument("--heartbeat-poll", type=int, default=common.HEARTBEAT_POLL_SECONDS, help="heartbeat polling interval seconds")
+    parser.add_argument("--v23-max-runs", type=int, default=20, help="--v23-backfill 시 최근 처리할 최대 run 수 (0 이하이면 전체)")
+    parser.add_argument("--v23-overwrite", action="store_true", help="--v23-backfill 시 기존 per-run workbook도 다시 생성")
     return parser
 
 
