@@ -540,7 +540,65 @@ def get_checkpoint_iter(checkpoint_path: str | None) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _extract_cmd_option(cmdline: str, option: str) -> str:
+    pattern = rf"(?:^|\s)--{re.escape(option)}(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|(\S+))"
+    match = re.search(pattern, cmdline)
+    if not match:
+        return ""
+    for group in match.groups():
+        if group:
+            return str(group).strip()
+    return ""
+
+
+def _resolve_run_dir_from_arg(run_arg: str) -> str | None:
+    if not run_arg:
+        return None
+    candidate = str(run_arg).strip().strip('"').strip("'")
+    if not candidate:
+        return None
+    if os.path.isdir(candidate):
+        return os.path.abspath(candidate)
+    candidate_name = os.path.basename(candidate.rstrip("\\/"))
+    run_dir = os.path.join(LOG_BASE, candidate_name)
+    if os.path.isdir(run_dir):
+        return run_dir
+    return None
+
+
+def _resolve_checkpoint_from_arg(run_dir: str | None, checkpoint_arg: str) -> str | None:
+    if not checkpoint_arg:
+        return get_latest_checkpoint(run_dir)
+    candidate = str(checkpoint_arg).strip().strip('"').strip("'")
+    if not candidate:
+        return get_latest_checkpoint(run_dir)
+    if os.path.isfile(candidate):
+        return os.path.abspath(candidate)
+    if run_dir:
+        run_checkpoint = os.path.join(run_dir, os.path.basename(candidate))
+        if os.path.isfile(run_checkpoint):
+            return run_checkpoint
+    return get_latest_checkpoint(run_dir)
+
+
+def resolve_live_training_context() -> tuple[str | None, str | None]:
+    processes = list_training_processes()
+    if not processes:
+        return None, None
+    latest_run = get_latest_run_dir()
+    for entry in sorted(processes, key=lambda item: item.get("pid", 0), reverse=True):
+        cmdline = entry.get("cmdline") or ""
+        run_dir = _resolve_run_dir_from_arg(_extract_cmd_option(cmdline, "load_run")) or latest_run
+        checkpoint = _resolve_checkpoint_from_arg(run_dir, _extract_cmd_option(cmdline, "checkpoint"))
+        if run_dir or checkpoint:
+            return run_dir, checkpoint
+    return latest_run, get_latest_checkpoint(latest_run)
+
+
 def resolve_active_run_dir() -> str | None:
+    live_run_dir, _ = resolve_live_training_context()
+    if live_run_dir:
+        return live_run_dir
     state = load_state()
     active_run = state.get("active_run") or ""
     if active_run:
@@ -551,13 +609,34 @@ def resolve_active_run_dir() -> str | None:
 
 
 def resolve_active_checkpoint(run_dir: str | None = None) -> str | None:
-    run_dir = run_dir or resolve_active_run_dir()
+    live_run_dir, live_checkpoint = resolve_live_training_context()
+    if live_checkpoint:
+        if not run_dir or run_dir == live_run_dir:
+            return live_checkpoint
+    run_dir = run_dir or live_run_dir or resolve_active_run_dir()
     state = load_state()
     checkpoint = state.get("active_checkpoint") or ""
     if checkpoint and os.path.isfile(checkpoint):
         if run_dir and os.path.dirname(checkpoint) == run_dir:
             return checkpoint
     return get_latest_checkpoint(run_dir)
+
+
+def get_display_iteration(run_dir: str | None, checkpoint_path: str | None = None) -> int:
+    if run_dir and os.path.isdir(run_dir):
+        live_iter = int(build_supervisor_kpi_snapshot(run_dir).get("iter") or 0)
+        if live_iter > 0:
+            return live_iter
+    return get_checkpoint_iter(checkpoint_path)
+
+
+def _path_matches_run(path: str | None, run_dir: str | None) -> bool:
+    if not path or not run_dir:
+        return False
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(run_dir)]) == os.path.abspath(run_dir)
+    except Exception:
+        return False
 
 
 def _looks_like_training_command(name: str, cmdline: str) -> bool:
@@ -1208,18 +1287,119 @@ def posture_style_score(rewards):
     return "🔴 F", score, []
 
 
+def jitter_quality_score(rewards):
+    score = 0.0
+    metrics = [
+        ("action_rate_l2", -3.6, -6.0),
+        ("joint_vel_l2", -6.0, -10.0),
+        ("dof_acc_l2", -6.0, -12.0),
+        ("joint_oscillation", -0.20, -0.50),
+        ("foot_extension", -0.20, -0.50),
+    ]
+    count = 0
+    for name, good_th, warn_th in metrics:
+        value = rewards.get(name)
+        numeric = _safe_float(value)
+        if numeric is None:
+            continue
+        count += 1
+        if numeric >= good_th:
+            score += 100.0
+        elif numeric >= warn_th:
+            score += 65.0
+        else:
+            score += 20.0
+    if count == 0:
+        return None
+    return round(score / count, 1)
+
+
+def _trend_icon_and_pct(values, window: int = 20) -> tuple[str, float]:
+    if len(values) < 2:
+        return "📊", 0.0
+    if len(values) < window * 2:
+        if len(values) < 10:
+            return "📊", 0.0
+        split = len(values) // 2
+        first_half = values[:split]
+        second_half = values[split:]
+    else:
+        first_half = values[-(window * 2):-window]
+        second_half = values[-window:]
+    avg_first = sum(value for _, value in first_half) / len(first_half)
+    avg_second = sum(value for _, value in second_half) / len(second_half)
+    change = avg_second - avg_first
+    pct = (change / abs(avg_first) * 100.0) if avg_first not in (0, 0.0) else 0.0
+    if pct > 10.0:
+        return "📈", round(pct, 1)
+    if pct > 3.0:
+        return "↗️", round(pct, 1)
+    if pct < -10.0:
+        return "📉", round(pct, 1)
+    if pct < -3.0:
+        return "↘️", round(pct, 1)
+    return "➡️", round(pct, 1)
+
+
+def _build_heartbeat_summary(current_iter: int, rewards: dict, survival_pct: float, timeout_pct: float, fall_pct: float, gait_grade: str, gait_score: int, stab_grade: str, stab_score: int, stab_valid: bool, posture_grade: str, posture_score: int) -> list[str]:
+    summary = []
+    forward_velocity = rewards.get("forward_velocity", 0.0)
+    foot_clearance = rewards.get("foot_clearance", 0.0)
+    diagonal_coupling = rewards.get("diagonal_coupling", 0.0)
+    if current_iter < 1000:
+        if forward_velocity >= 0.75 and diagonal_coupling >= 1.3:
+            summary.append("초반 구간에서 관절 리듬과 전진 반응이 함께 나타나고 있습니다.")
+        elif forward_velocity < 0.3:
+            summary.append("초반 구간이지만 아직 전진보다 자세 유지 쪽이 우세합니다.")
+        else:
+            summary.append("초반 구간에서 locomotion 신호는 보이지만 아직 gait 품질 확정 전입니다.")
+    else:
+        if gait_score >= 8 and forward_velocity >= 0.75:
+            summary.append("관절 리듬은 형성됐고 전진도 동반되어, 단순 정지 패턴은 지난 상태입니다.")
+        elif gait_score >= 5:
+            summary.append("관절 리듬은 형성되고 있지만 전진속도와 발들기가 아직 충분히 따라오지 않습니다.")
+        else:
+            summary.append("현재까지는 gait 품질 형성이 약해 보상 구조 또는 커리큘럼 재검토가 필요할 수 있습니다.")
+    if survival_pct >= 70.0:
+        summary.append(f"생존률 {survival_pct:.1f}%로 비교적 안정적이며 종료는 timeout 비중이 높습니다.")
+    elif survival_pct >= 30.0:
+        summary.append(f"생존률 {survival_pct:.1f}% 수준으로 버티고 있으나 fall 비중 {fall_pct:.0f}%가 아직 큽니다.")
+    else:
+        summary.append(f"생존률 {survival_pct:.1f}%로 낮아 자세 안정화가 우선입니다.")
+    if stab_valid and stab_score >= 6 and posture_score >= 6:
+        summary.append("stability와 posture는 양호한 편이라, 다음 관전 포인트는 forward_velocity와 foot_clearance의 동반 상승입니다.")
+    elif foot_clearance < 0.8:
+        summary.append("발들기 신호가 약해 실제 trot이라기보다 낮은 진폭 패턴일 가능성을 열어둬야 합니다.")
+    rear_bias_signals = 0
+    if rewards.get("rear_joint_velocity", 0.0) >= 8.0:
+        rear_bias_signals += 1
+    if rewards.get("rear_forward_stride", 0.0) >= 0.2:
+        rear_bias_signals += 1
+    if rear_bias_signals >= 2:
+        summary.append("rear-driven bias 가능성은 남아 있으므로 최종 판정은 계속 영상과 함께 봐야 합니다.")
+    return summary[:3]
+
+
 def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
     result = {
         "iter": 0,
         "reward": 0.0,
+        "reward_avg10": 0.0,
         "ep_len": 0.0,
         "survival_pct": 0.0,
+        "timeout_pct": 0.0,
+        "fall_pct": 0.0,
         "verdict": "⚪ KPI unavailable",
         "reason": "TensorBoard 데이터를 읽지 못함",
+        "reasons": [],
         "gait": "N/A",
         "gait_score": 0,
         "stability": "N/A",
         "stability_score": 0,
+        "stability_valid": False,
+        "posture": "N/A",
+        "posture_score": 0,
+        "foot_jitter_score": None,
         "kpi_line": "기립 N/A | 전진 N/A | 대각 N/A",
         "caption_suffix": "⚪ KPI unavailable",
     }
@@ -1232,9 +1412,14 @@ def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
         return result
     current_iter = int(reward_vals[-1][0])
     current_reward = float(reward_vals[-1][1])
+    reward_window = reward_vals[-10:] if len(reward_vals) >= 10 else reward_vals
+    reward_avg10 = sum(v for _, v in reward_window) / len(reward_window) if reward_window else current_reward
     current_ep_len = float(ep_len_vals[-1][1]) if ep_len_vals else 0.0
     timeout = float(_latest_scalar(data, "Episode_Termination/time_out") or 0.0)
     bad_orient = float(_latest_scalar(data, "Episode_Termination/bad_orientation") or 0.0)
+    total_term = timeout + bad_orient
+    timeout_pct = (timeout / total_term * 100.0) if total_term > 0 else 0.0
+    fall_pct = (bad_orient / total_term * 100.0) if total_term > 0 else 0.0
     max_ep = 10.0 * 50
     if timeout > 0.95 and current_ep_len > 1:
         max_ep = current_ep_len
@@ -1250,6 +1435,7 @@ def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
     gait_grade, gait_score, _ = gait_quality_score(rewards)
     stab_grade, stab_score, _details, stab_valid = motion_stability_score(rewards, gait_score)
     posture_grade, posture_score, _ = posture_style_score(rewards)
+    foot_jitter_score = jitter_quality_score(rewards)
     verdict, reasons, _greens, _yellows, _reds = evaluate_training_window(current_iter, survival_pct, bad_orient, rewards)
     primary_items = []
     for metric_name, label in [("standing_height", "기립"), ("forward_velocity", "전진"), ("diagonal_coupling", "대각")]:
@@ -1260,14 +1446,22 @@ def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
         {
             "iter": current_iter,
             "reward": current_reward,
+            "reward_avg10": reward_avg10,
             "ep_len": current_ep_len,
             "survival_pct": survival_pct,
+            "timeout_pct": timeout_pct,
+            "fall_pct": fall_pct,
             "verdict": verdict,
             "reason": reasons[0] if reasons else "",
+            "reasons": reasons,
             "gait": gait_grade,
             "gait_score": gait_score,
             "stability": stab_grade,
             "stability_score": stab_score,
+            "stability_valid": stab_valid,
+            "posture": posture_grade,
+            "posture_score": posture_score,
+            "foot_jitter_score": foot_jitter_score,
             "kpi_line": " | ".join(primary_items + [f"🧍포즈 {posture_grade} {posture_score}/10"]),
             "caption_suffix": f"{verdict} | Gait {gait_grade} {gait_score}/13 | Stability {stability_label} | Posture {posture_grade} {posture_score}/10",
         }
@@ -1351,23 +1545,46 @@ def _build_status_snapshot() -> dict:
     iter_num = int(kpi_snapshot.get("iter") or 0) or get_checkpoint_iter(checkpoint)
     progress_pct = (iter_num / MAX_ITERATIONS * 100.0) if MAX_ITERATIONS > 0 else 0.0
     last_videos = state.get("last_videos") or {}
-    available_views = [key for key, path in sorted(last_videos.items()) if path and os.path.isfile(path)]
+    available_views = [
+        key
+        for key, path in sorted(last_videos.items())
+        if path and os.path.isfile(path) and _path_matches_run(path, run_dir)
+    ]
+    if not available_views and run_dir:
+        available_views = [key for key in ("front", "overview", "rear", "side", "top") if find_latest_video(key, run_dir)]
+    last_report_zip = state.get("last_report_zip") or ""
+    if not _path_matches_run(last_report_zip, run_dir):
+        last_report_zip = find_latest_report_zip(run_dir) or ""
+    heartbeat_alive = is_heartbeat_running()
+    last_heartbeat_report_text = _get_last_heartbeat_age(run_dir)
+    if heartbeat_alive:
+        last_heartbeat_text = f"alive | report {last_heartbeat_report_text}"
+    elif last_heartbeat_report_text != "N/A":
+        last_heartbeat_text = f"stopped | report {last_heartbeat_report_text}"
+    else:
+        last_heartbeat_text = "stopped"
     return {
         "state": state,
         "run_dir": run_dir,
         "checkpoint": checkpoint,
         "iter_num": iter_num,
         "training_alive": is_training_running(),
-        "heartbeat_alive": is_heartbeat_running(),
+        "heartbeat_alive": heartbeat_alive,
         "mode": str(state.get("mode", "idle")),
         "progress_text": f"{iter_num:,}/{MAX_ITERATIONS:,} ({progress_pct:.1f}%)",
         "reward_text": f"{float(kpi_snapshot.get('reward') or 0.0):.3f}" if kpi_snapshot else "N/A",
         "ep_len_text": f"{float(kpi_snapshot.get('ep_len') or 0.0):.1f}" if kpi_snapshot else "N/A",
         "verdict_text": str(kpi_snapshot.get("verdict") or "N/A") if kpi_snapshot else "N/A",
         "kpi_text": str(kpi_snapshot.get("kpi_line") or "N/A") if kpi_snapshot else "N/A",
-        "last_heartbeat_text": _get_last_heartbeat_age(run_dir),
+        "last_heartbeat_text": last_heartbeat_text,
+        "last_report_zip_name": os.path.basename(last_report_zip) if last_report_zip else "N/A",
         "available_views": available_views,
     }
+
+
+def get_v23_master_log_path() -> str:
+    return os.path.join(LOG_BASE, V23_MASTER_LOG_FILENAME)
+
 
 def get_v23_checkpoint_review_path() -> str:
     return os.path.join(LOG_BASE, V23_CHECKPOINT_REVIEW_FILENAME)
@@ -1983,21 +2200,120 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
     if not reward_vals:
         return f"⚠️ <b>HEARTBEAT</b> ({run_label})\n- metrics unavailable"
     current_iter = int(reward_vals[-1][0])
-    current_reward = float(reward_vals[-1][1])
-    current_ep_len = float(ep_len_vals[-1][1]) if ep_len_vals else 0.0
     run_dir = os.path.join(LOG_BASE, run_name)
     kpi = build_supervisor_kpi_snapshot(run_dir) if os.path.isdir(run_dir) else build_supervisor_kpi_snapshot(resolve_active_run_dir() or "")
-    return (
-        f"💓 <b>HEARTBEAT</b> ({run_label})\n"
-        f"- cycle: {cycle_num}\n"
-        f"- iter: {current_iter:,}\n"
-        f"- reward: {current_reward:.3f}\n"
-        f"- ep_len: {current_ep_len:.1f}\n"
-        f"- verdict: {html.escape(str(kpi['verdict']))}\n"
-        f"- kpi: {html.escape(str(kpi['kpi_line']))}\n"
-        f"- gait: {html.escape(str(kpi['gait']))} {kpi['gait_score']}/13\n"
-        f"- stability: {html.escape(str(kpi['stability']))} {kpi['stability_score']}/10"
+    rewards = {}
+    for tag, values in data.items():
+        if tag.startswith("Episode_Reward/") and values:
+            rewards[tag.replace("Episode_Reward/", "")] = float(values[-1][1])
+    progress_pct = (current_iter / MAX_ITERATIONS * 100.0) if MAX_ITERATIONS > 0 else 0.0
+    reasons = kpi.get("reasons") or []
+    trend_defs = [
+        ("trot_gait", "트로트"),
+        ("diagonal_coupling", "대각커플링"),
+        ("forward_velocity", "전진속도"),
+        ("standing_height", "기립높이"),
+    ]
+    trend_lines = []
+    for metric_name, label in trend_defs:
+        tag = f"Episode_Reward/{metric_name}"
+        values = data.get(tag, [])
+        if not values:
+            continue
+        icon, pct = _trend_icon_and_pct(values)
+        trend_lines.append(f"- {icon} {label}: {pct:+.1f}%")
+
+    posture_raw_lines = []
+    posture_candidates = [
+        ("stance_width_mean_raw", "stance_width_mean"),
+        ("shoulder_mean_abs_dev_from_target_raw", "shoulder_dev"),
+        ("body_roll_abs_raw", "body_roll_abs"),
+        ("body_pitch_abs_raw", "body_pitch_abs"),
+    ]
+    for metric_name, label in posture_candidates:
+        value = rewards.get(metric_name)
+        numeric = _safe_float(value, digits=4)
+        if numeric is None:
+            continue
+        posture_raw_lines.append(f"- {label}: {numeric:+.4f}")
+
+    stability_text = (
+        f"{html.escape(str(kpi['stability']))} ({int(kpi['stability_score'] or 0)}/10)"
+        if kpi.get("stability_valid")
+        else html.escape(str(kpi["stability"]))
     )
+    summary_lines = _build_heartbeat_summary(
+        current_iter=current_iter,
+        rewards=rewards,
+        survival_pct=float(kpi.get("survival_pct") or 0.0),
+        timeout_pct=float(kpi.get("timeout_pct") or 0.0),
+        fall_pct=float(kpi.get("fall_pct") or 0.0),
+        gait_grade=str(kpi.get("gait") or "N/A"),
+        gait_score=int(kpi.get("gait_score") or 0),
+        stab_grade=str(kpi.get("stability") or "N/A"),
+        stab_score=int(kpi.get("stability_score") or 0),
+        stab_valid=bool(kpi.get("stability_valid")),
+        posture_grade=str(kpi.get("posture") or "N/A"),
+        posture_score=int(kpi.get("posture_score") or 0),
+    )
+
+    lines = [
+        f"💓 <b>HEARTBEAT</b> ({run_label})",
+        "",
+        f"- iter: {current_iter:,} / {MAX_ITERATIONS:,} ({progress_pct:.1f}%)",
+        f"- reward: {float(kpi.get('reward') or 0.0):.3f} (avg10: {float(kpi.get('reward_avg10') or 0.0):.3f})",
+        f"- ep_len: {float(kpi.get('ep_len') or 0.0):.1f} | survival: {float(kpi.get('survival_pct') or 0.0):.1f}%",
+        f"- termination: timeout {float(kpi.get('timeout_pct') or 0.0):.0f}% / fall {float(kpi.get('fall_pct') or 0.0):.0f}%",
+        "",
+        f"- 운영 판정: {html.escape(str(kpi['verdict']))}",
+    ]
+    for reason in reasons[:2]:
+        lines.append(f"  - {html.escape(str(reason))}")
+    lines.extend(
+        [
+            "",
+            "- 코어 품질",
+            f"  - gait: {html.escape(str(kpi['gait']))} ({int(kpi['gait_score'] or 0)}/13)",
+            f"  - stability: {stability_text}",
+            f"  - posture/style: {html.escape(str(kpi.get('posture') or 'N/A'))} ({int(kpi.get('posture_score') or 0)}/10)",
+        ]
+    )
+    foot_jitter_score = kpi.get("foot_jitter_score")
+    if foot_jitter_score is not None:
+        lines.append(f"  - foot_jitter: {float(foot_jitter_score):.1f}/100")
+    lines.extend(
+        [
+            "",
+            "- KPI 상태",
+        ]
+    )
+    for metric_name, label in [
+        ("standing_height", "기립"),
+        ("forward_velocity", "전진"),
+        ("diagonal_coupling", "대각커플링"),
+    ]:
+        icon, state = classify_primary_kpi(metric_name, rewards.get(metric_name, 0.0))
+        lines.append(f"  - {icon} {label} {state}")
+    posture_icon, posture_state = classify_posture_metric("flat_orientation_l2", rewards.get("flat_orientation_l2", 0.0))
+    lines.append(f"  - {posture_icon} 자세수평 {posture_state}")
+    if trend_lines:
+        lines.extend(["", "- 핵심 추세"])
+        lines.extend(f"  {line}" for line in trend_lines)
+    if posture_raw_lines:
+        lines.extend(["", "- posture/raw"])
+        lines.extend(f"  {line}" for line in posture_raw_lines)
+    if summary_lines:
+        lines.extend(["", "- 해석"])
+        lines.extend(f"  {html.escape(text)}" for text in summary_lines)
+    lines.extend(
+        [
+            "",
+            "- 참고",
+            "  - contact stride/cycle은 참고 지표로만 취급",
+            f"  - next report: iter {((current_iter // HEARTBEAT_ITER_STEP) + 1) * HEARTBEAT_ITER_STEP:,}",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def parse_analysis_grade(text: str) -> dict:
@@ -2732,7 +3048,7 @@ def build_status_text() -> str:
         return f"{mapping.get(value, default)}{value}"
 
     lines = [
-        "📡 SpotMicro Command Center",
+        "👮 SUPERVISOR STATUS",
         f"• mode: {_status_light(mode, {'idle': '⚪', 'training': '🟡', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}",
         f"• training: {_status_light('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
         f"• heartbeat: {_status_light('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
@@ -2745,7 +3061,7 @@ def build_status_text() -> str:
         f"• verdict: {snapshot['verdict_text']}",
         f"• kpi: {snapshot['kpi_text']}",
         f"• last_heartbeat: {snapshot['last_heartbeat_text']}",
-        f"• last_report_zip: {os.path.basename(state.get('last_report_zip') or '') or 'N/A'}",
+        f"• last_report_zip: {snapshot['last_report_zip_name']}",
     ]
     available_views = snapshot["available_views"]
     lines.append(f"• cached_views: {', '.join(available_views) if available_views else 'none'}")
@@ -2768,7 +3084,7 @@ def format_status_html() -> str:
         return f"{mapping.get(value, default)}{html.escape(value)}"
 
     lines = [
-        "📡 <b>SPOTMICRO COMMAND CENTER</b>",
+        "👮 <b>SUPERVISOR STATUS</b>",
         f"• mode: <code>{_status_light_html(mode, {'idle': '⚪', 'training': '🟡', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}</code>",
         f"• training: <code>{_status_light_html('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
         f"• heartbeat: <code>{_status_light_html('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
@@ -2781,7 +3097,7 @@ def format_status_html() -> str:
         f"• verdict: <code>{html.escape(snapshot['verdict_text'])}</code>",
         f"• kpi: <code>{html.escape(snapshot['kpi_text'])}</code>",
         f"• last_heartbeat: <code>{html.escape(snapshot['last_heartbeat_text'])}</code>",
-        f"• last_report_zip: <code>{html.escape(os.path.basename(state.get('last_report_zip') or '') or 'N/A')}</code>",
+        f"• last_report_zip: <code>{html.escape(snapshot['last_report_zip_name'])}</code>",
     ]
     available_views = snapshot["available_views"]
     lines.append(f"• cached_views: <code>{html.escape(', '.join(available_views) if available_views else 'none')}</code>")

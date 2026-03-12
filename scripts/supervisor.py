@@ -152,7 +152,7 @@ def _is_duplicate_command(chat_id: str | None, user_id: str | None, command: str
     return previous is not None and now - previous <= _RECENT_COMMAND_WINDOW_SEC
 
 
-def _send_notice(title: str, body: str, icon: str = "🎛️") -> None:
+def _send_notice(title: str, body: str, icon: str = "👮") -> None:
     common.send_text(
         f"{icon} <b>{title}</b>\n<i>{body}</i>",
         common.SUPERVISOR_LOG,
@@ -175,7 +175,7 @@ def _build_command_ack(command: str) -> str:
     if command == "stop":
         return "⏹️ <b>STOP 요청 수신</b>\n<i>현재 훈련 프로세스를 중단합니다.</i>"
     if command == "status":
-        return "📡 <b>STATUS 요청 수신</b>\n<i>현재 상태를 조회합니다.</i>"
+        return "👮 <b>SUPERVISOR STATUS 요청 수신</b>\n<i>현재 상태를 조회합니다.</i>"
     if command == "help":
         return "❔ <b>HELP 요청 수신</b>\n<i>명령 목록을 전송합니다.</i>"
     if command == "shutdown":
@@ -245,7 +245,7 @@ def _handle_view_command(view_key: str, run_dir: str, checkpoint: str) -> None:
             return
         common.send_video(
             video_path,
-            f"📹 latest {view_key} | {os.path.basename(run_dir)} | iter {common.get_checkpoint_iter(checkpoint) if checkpoint else 0:,}",
+            f"📹 latest {view_key} | {os.path.basename(run_dir)} | iter {common.get_display_iteration(run_dir, checkpoint):,}",
             common.SUPERVISOR_LOG,
         )
         return
@@ -257,7 +257,7 @@ def _handle_view_command(view_key: str, run_dir: str, checkpoint: str) -> None:
             raise RuntimeError(f"{view_key} view was not generated.")
         common.send_video(
             video_path,
-            f"📹 current {view_key} | {os.path.basename(run_dir)} | iter {common.get_checkpoint_iter(checkpoint):,}",
+            f"📹 current {view_key} | {os.path.basename(run_dir)} | iter {common.get_display_iteration(run_dir, checkpoint):,}",
             common.SUPERVISOR_LOG,
         )
         common.update_state(mode="stopped", last_command=view_key, last_error="")
@@ -287,7 +287,7 @@ def handle_command(command: str) -> None:
         return
     if command == "shutdown":
         common.request_supervisor_shutdown("telegram-command")
-        _send_notice("COMMAND CENTER SHUTDOWN QUEUED", "Supervisor 종료 요청을 기록했습니다.", icon="🛑")
+        _send_notice("SUPERVISOR SHUTDOWN QUEUED", "Supervisor 종료 요청을 기록했습니다.", icon="👮")
         return
     if not run_dir or not checkpoint:
         _send_notice("CONTEXT NOT FOUND", "active run/checkpoint를 찾지 못했습니다.", icon="⚠️")
@@ -349,7 +349,7 @@ def _handle_view_local(view_key: str, run_dir: str, checkpoint: str) -> None:
             raise RuntimeError(f"현재 훈련 중이며 최근 {view_key} 영상을 찾지 못했습니다.")
         common.send_video(
             video_path,
-            f"📹 latest {view_key} | {os.path.basename(run_dir)} | iter {common.get_checkpoint_iter(checkpoint) if checkpoint else 0:,}",
+            f"📹 latest {view_key} | {os.path.basename(run_dir)} | iter {common.get_display_iteration(run_dir, checkpoint):,}",
             common.SUPERVISOR_LOG,
         )
         _print_local(f"latest {view_key}: {video_path}")
@@ -363,7 +363,7 @@ def _handle_view_local(view_key: str, run_dir: str, checkpoint: str) -> None:
         raise RuntimeError(f"{view_key} view was not generated.")
     common.send_video(
         video_path,
-        f"📹 current {view_key} | {os.path.basename(run_dir)} | iter {common.get_checkpoint_iter(checkpoint):,}",
+        f"📹 current {view_key} | {os.path.basename(run_dir)} | iter {common.get_display_iteration(run_dir, checkpoint):,}",
         common.SUPERVISOR_LOG,
     )
     _print_local(f"{view_key}: {video_path}")
@@ -435,7 +435,7 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
         return 0
     if action == "shutdown":
         common.request_supervisor_shutdown("cli-command")
-        _send_notice("COMMAND CENTER SHUTDOWN QUEUED", "Supervisor 종료 요청을 기록했습니다.\nsource: cli", icon="🛑")
+        _send_notice("SUPERVISOR SHUTDOWN QUEUED", "Supervisor 종료 요청을 기록했습니다.\nsource: cli", icon="👮")
         _print_local("supervisor shutdown requested")
         return 0
     if action == "v23-backfill":
@@ -492,7 +492,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
     common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
     common.update_state(last_command="startup", last_error="")
     common.send_text(
-        "🦸 <b>SPOTMICRO COMMAND CENTER ONLINE</b>\n"
+        "👮 <b>SUPERVISOR ACTIVE</b>\n"
         "<i>Supervisor is ready for commands.</i>\n\n"
         + common.help_text(),
         common.SUPERVISOR_LOG,
@@ -531,7 +531,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                 if shutdown_source:
                     common.write_log(f"Supervisor shutdown requested by {shutdown_source}", common.SUPERVISOR_LOG)
                     common.send_text(
-                        "🛑 <b>SPOTMICRO COMMAND CENTER OFFLINE</b>\n"
+                        "👮 <b>SUPERVISOR STOPPED</b>\n"
                         f"<i>Supervisor is going offline.</i>\n"
                         f"source: {shutdown_source}",
                         common.SUPERVISOR_LOG,
