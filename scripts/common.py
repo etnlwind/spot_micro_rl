@@ -2679,7 +2679,8 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
             f"  - next report: iter {((current_iter // HEARTBEAT_ITER_STEP) + 1) * HEARTBEAT_ITER_STEP:,}",
         ]
     )
-    return "\n".join(lines)
+    display_lines = [f"• {line[2:]}" if line.startswith("- ") else line for line in lines]
+    return "\n".join(display_lines)
 
 
 def parse_analysis_grade(text: str) -> dict:
