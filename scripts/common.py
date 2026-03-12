@@ -2,6 +2,7 @@ import contextlib
 import datetime
 import glob
 import hashlib
+import html
 import io
 import json
 import math
@@ -32,6 +33,9 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
+V23_TRAIN_VERSION = "V23"
+V23_MASTER_LOG_FILENAME = "spotmicro_v23_training_master_log.xlsx"
+V23_CHECKPOINT_REVIEW_FILENAME = "spotmicro_v23_checkpoint_review.xlsx"
 
 
 def _load_env(path: str) -> dict:
@@ -107,10 +111,12 @@ SUPERVISOR_LOG = os.path.join(PROJECT_ROOT, "logs", "supervisor.log")
 HEARTBEAT_LOG = os.path.join(PROJECT_ROOT, "logs", "heartbeat.log")
 SUPERVISOR_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "supervisor.pid")
 HEARTBEAT_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "heartbeat.pid")
+SUPERVISOR_SHUTDOWN_FLAG = os.path.join(PROJECT_ROOT, "logs", "supervisor.shutdown.flag")
 BUSY_LOCK_FILE = os.path.join(PROJECT_ROOT, "logs", "ops.lock")
 TRAINING_LOG = os.path.join(PROJECT_ROOT, "logs", "training_launch.log")
 ANALYZE_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "utils", "analyze_training.py")
 TG_OFFSET_FILE = os.path.join(PROJECT_ROOT, "logs", "telegram_offset.json")
+HEARTBEAT_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "heartbeat.py")
 
 TELEGRAM_ALLOWED_USER_IDS = frozenset(
     token.strip()
@@ -126,6 +132,20 @@ PRIMARY_KPI_THRESHOLDS = {
     "rear_joint_velocity": (2.0, 8.0),
     "foot_clearance": (0.20, 0.80),
 }
+
+V23_RUNLOG_COLUMNS = [
+    "run_id", "train_version", "iter", "global_step", "timestamp", "elapsed_hours", "report_kind", "cycle_num", "log_source", "fallback_source",
+    "mean_reward", "mean_reward_avg10", "mean_episode_length", "survival_pct", "timeout_pct", "fall_pct", "vf_loss", "surrogate_loss", "noise_std", "vel_err_xy", "vel_err_yaw",
+    "survival_pct_derived", "gait_score_estimated", "stability_score_estimated",
+    "forward_velocity_raw", "trot_gait_raw", "diagonal_coupling_raw", "leg_lift_raw", "foot_clearance_raw", "standing_height_raw",
+    "forward_velocity_reward", "trot_gait_reward", "diagonal_coupling_reward", "leg_lift_reward", "foot_clearance_reward", "standing_height_reward",
+    "stance_width_mean_raw", "stance_width_front_raw", "stance_width_rear_raw", "front_rear_stance_width_diff_raw", "shoulder_fl_raw", "shoulder_fr_raw", "shoulder_rl_raw", "shoulder_rr_raw", "shoulder_mean_abs_dev_from_target_raw", "shoulder_left_right_diff_raw", "shoulder_front_rear_diff_raw", "base_height_raw", "body_roll_abs_raw", "body_pitch_abs_raw",
+    "action_rate_l2_raw", "joint_vel_l2_raw", "dof_acc_l2_raw", "joint_oscillation_raw", "foot_extension_raw", "foot_joint_action_rate_l2_raw", "foot_joint_vel_l2_raw", "stance_foot_jitter_score_raw", "foot_joint_acc_l2_raw", "contact_transition_oscillation_score_estimated",
+    "front_leg_lift_mean_raw", "rear_leg_lift_mean_raw", "front_clearance_mean_raw", "rear_clearance_mean_raw", "front_propulsion_score_raw", "rear_propulsion_score_raw", "front_rear_propulsion_diff_raw", "front_rear_clearance_diff_raw", "front_rear_swing_diff_raw",
+    "stride_length_raw", "gait_cycle_period_raw", "duty_factor_mean_raw", "duty_factor_front_raw", "duty_factor_rear_raw", "contact_sequence_stability_estimated", "stance_time_mean_estimated", "swing_time_mean_estimated",
+    "gait_score_canonical", "stability_score_canonical", "posture_style_score", "foot_jitter_score", "front_rear_balance_score",
+    "hard_safety_gate_pass", "style_shortlist_candidate", "best_reward_candidate", "best_style_candidate", "manual_front_review_rank", "manual_notes",
+]
 
 _tg_offset: int | None = None
 _tg_poll_conflict_logged = False
@@ -144,9 +164,14 @@ def _normalize_windows_path(raw_path: str | None) -> str | None:
 
 
 def _resolve_conda_activate_bat() -> str | None:
+    conda_exe = os.environ.get("CONDA_EXE", "")
+    conda_dir = os.path.dirname(conda_exe) if conda_exe else ""
+    conda_root = os.path.dirname(conda_dir) if conda_dir else ""
     candidates = [
         _env.get("CONDA_ACTIVATE_BAT"),
-        os.path.join(os.path.dirname(os.environ.get("CONDA_EXE", "")), "activate.bat") if os.environ.get("CONDA_EXE") else None,
+        os.path.join(conda_dir, "activate.bat") if conda_dir else None,
+        os.path.join(conda_root, "condabin", "activate.bat") if conda_root else None,
+        os.path.join(conda_root, "condabin", "conda.bat") if conda_root else None,
     ]
     for raw_candidate in candidates:
         candidate = _normalize_windows_path(raw_candidate)
@@ -254,6 +279,31 @@ def update_state(**changes) -> dict:
     return save_state(state)
 
 
+def request_supervisor_shutdown(source: str) -> None:
+    _ensure_logs_dir()
+    with open(SUPERVISOR_SHUTDOWN_FLAG, "w", encoding="utf-8") as file:
+        file.write(f"{source}\n{_now()}\n")
+
+
+def clear_supervisor_shutdown_request() -> None:
+    try:
+        os.remove(SUPERVISOR_SHUTDOWN_FLAG)
+    except OSError:
+        pass
+
+
+def consume_supervisor_shutdown_request() -> str:
+    if not os.path.isfile(SUPERVISOR_SHUTDOWN_FLAG):
+        return ""
+    try:
+        with open(SUPERVISOR_SHUTDOWN_FLAG, "r", encoding="utf-8", errors="replace") as file:
+            source = file.readline().strip()
+    except Exception:
+        source = ""
+    clear_supervisor_shutdown_request()
+    return source or "external-request"
+
+
 def acquire_pid_lock(pid_file: str, owner_name: str, log_path: str) -> None:
     _ensure_logs_dir()
     old_pid = 0
@@ -277,6 +327,18 @@ def release_pid_lock(pid_file: str) -> None:
         pass
 
 
+def _read_live_pid_lock(pid_file: str) -> int:
+    try:
+        with open(pid_file, "r", encoding="utf-8") as file:
+            pid = int(file.read().strip())
+    except Exception:
+        return 0
+    if pid > 0 and psutil.pid_exists(pid):
+        return pid
+    release_pid_lock(pid_file)
+    return 0
+
+
 @contextlib.contextmanager
 def busy_lock(label: str):
     _ensure_logs_dir()
@@ -295,8 +357,11 @@ def busy_lock(label: str):
             pass
 
 
-def send_text(text: str, log_path: str) -> None:
-    payload = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID, "text": text}).encode("utf-8")
+def send_text(text: str, log_path: str, parse_mode: str | None = None) -> None:
+    payload_dict = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    if parse_mode:
+        payload_dict["parse_mode"] = parse_mode
+    payload = urllib.parse.urlencode(payload_dict).encode("utf-8")
     request = urllib.request.Request(f"{TG_BASE_URL}/sendMessage", data=payload)
     urllib.request.urlopen(request, timeout=15)
     write_log(f"[TG] Sent text: {text[:80].replace(chr(10), ' ')}", log_path)
@@ -575,31 +640,52 @@ def _wrap_conda_command(command: str) -> str:
     if sys.platform != "win32":
         return command
     if CONDA_ACTIVATE_BAT:
-        activate_cmd = CONDA_ACTIVATE_BAT if " " not in CONDA_ACTIVATE_BAT else f'"{CONDA_ACTIVATE_BAT}"'
+        activate_cmd = f'"{CONDA_ACTIVATE_BAT}"'
+        if os.path.basename(CONDA_ACTIVATE_BAT).lower() == "conda.bat":
+            return f"call {activate_cmd} activate {CONDA_ENV_NAME} && {command}"
         return f"call {activate_cmd} && conda activate {CONDA_ENV_NAME} && {command}"
     return f"conda activate {CONDA_ENV_NAME} && {command}"
 
 
+def _write_temp_cmd_script(command: str, prefix: str) -> str:
+    logs_dir = os.path.join(PROJECT_ROOT, "logs", "_cmd_tmp")
+    os.makedirs(logs_dir, exist_ok=True)
+    script_path = os.path.join(
+        logs_dir,
+        f"{prefix}_{datetime.datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}.cmd",
+    )
+    with open(script_path, "w", encoding="utf-8", newline="\r\n") as file:
+        file.write("@echo off\n")
+        file.write(command + "\n")
+    return script_path
+
+
 def _popen_hidden_cmd(command: str, **kwargs):
     kwargs.setdefault("cwd", PROJECT_ROOT)
-    kwargs.setdefault("creationflags", kwargs.pop("creationflags", 0))
-    kwargs.setdefault("startupinfo", kwargs.pop("startupinfo", None))
+    kwargs.setdefault("creationflags", _hidden_creationflags(kwargs.pop("creationflags", 0)))
+    kwargs.setdefault("startupinfo", kwargs.pop("startupinfo", _hidden_startupinfo()))
     kwargs["env"] = {**os.environ, "PYTHONIOENCODING": "utf-8", **kwargs.get("env", {})}
     if kwargs.get("text") or kwargs.get("universal_newlines"):
         kwargs.setdefault("encoding", "utf-8")
         kwargs.setdefault("errors", "replace")
-    return subprocess.Popen(["cmd", "/c", command], **kwargs)
+    if sys.platform == "win32":
+        script_path = _write_temp_cmd_script(command, "popen")
+        return subprocess.Popen(["cmd", "/d", "/c", script_path], **kwargs)
+    return subprocess.Popen(command, shell=True, **kwargs)
 
 
 def _run_hidden_cmd(command: str, **kwargs):
     kwargs.setdefault("cwd", PROJECT_ROOT)
-    kwargs.setdefault("creationflags", kwargs.pop("creationflags", 0))
-    kwargs.setdefault("startupinfo", kwargs.pop("startupinfo", None))
+    kwargs.setdefault("creationflags", _hidden_creationflags(kwargs.pop("creationflags", 0)))
+    kwargs.setdefault("startupinfo", kwargs.pop("startupinfo", _hidden_startupinfo()))
     kwargs["env"] = {**os.environ, "PYTHONIOENCODING": "utf-8", **kwargs.get("env", {})}
     if kwargs.get("text") or kwargs.get("universal_newlines"):
         kwargs.setdefault("encoding", "utf-8")
         kwargs.setdefault("errors", "replace")
-    return subprocess.run(["cmd", "/c", command], **kwargs)
+    if sys.platform == "win32":
+        script_path = _write_temp_cmd_script(command, "run")
+        return subprocess.run(["cmd", "/d", "/c", script_path], **kwargs)
+    return subprocess.run(command, shell=True, **kwargs)
 
 
 def _launch_training_command(command: str, launcher_name: str) -> str:
@@ -621,6 +707,118 @@ def _launch_training_command(command: str, launcher_name: str) -> str:
         env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     return launcher_path
+
+
+def _launch_background_command(command: str, launcher_name: str) -> str:
+    logs_dir = os.path.join(PROJECT_ROOT, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    launcher_path = os.path.join(logs_dir, launcher_name)
+    with open(launcher_path, "w", encoding="utf-8", newline="\n") as file:
+        file.write("@echo off\n")
+        file.write(command + "\n")
+    subprocess.Popen(
+        ["cmd", "/c", f'start "" /b cmd /c "{launcher_path}"'],
+        cwd=PROJECT_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    return launcher_path
+
+
+def _looks_like_heartbeat_command(name: str, cmdline: str) -> bool:
+    cmdline_l = cmdline.lower()
+    if "powershell" in name.lower() and "get-ciminstance" in cmdline_l:
+        return False
+    return (
+        "scripts\\heartbeat.py" in cmdline_l
+        or "scripts/heartbeat.py" in cmdline_l
+        or "scripts\\legacy\\heartbeat.py" in cmdline_l
+        or "scripts/legacy/heartbeat.py" in cmdline_l
+        or "training_heartbeat.py" in cmdline_l
+    )
+
+
+def list_heartbeat_processes() -> list[dict]:
+    processes = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            cmdline = " ".join(proc.info["cmdline"] or [])
+            if not cmdline:
+                continue
+            name = proc.info.get("name") or ""
+            if _looks_like_heartbeat_command(name, cmdline):
+                processes.append({"pid": proc.info["pid"], "name": name, "cmdline": cmdline})
+        except (psutil.Error, PermissionError, OSError):
+            pass
+    deduped = {entry["pid"]: entry for entry in processes}
+    return sorted(deduped.values(), key=lambda item: item["pid"])
+
+
+def is_heartbeat_running() -> bool:
+    if _read_live_pid_lock(HEARTBEAT_PID_FILE):
+        return True
+    return bool(list_heartbeat_processes())
+
+
+def build_heartbeat_command(iter_step: int | None = None, poll: int | None = None) -> str:
+    heartbeat_script = HEARTBEAT_SCRIPT
+    iter_step = int(iter_step or HEARTBEAT_ITER_STEP)
+    poll = int(poll or HEARTBEAT_POLL_SECONDS)
+    command = (
+        f'cd /d "{PROJECT_ROOT}" && '
+        'set PYTHONIOENCODING=utf-8 && '
+        f'python "{heartbeat_script}" --iter_step={iter_step} --poll={poll}'
+    )
+    return _wrap_conda_command(command)
+
+
+def launch_heartbeat(log_path: str, iter_step: int | None = None, poll: int | None = None) -> dict:
+    if is_heartbeat_running():
+        return {"mode": "already-running", "processes": list_heartbeat_processes()}
+    command = build_heartbeat_command(iter_step=iter_step, poll=poll)
+    write_log(f"Launching heartbeat: {command}", log_path)
+    with open(HEARTBEAT_LOG, "ab") as heartbeat_log_file:
+        proc = _popen_hidden_cmd(command, stdout=heartbeat_log_file, stderr=subprocess.STDOUT)
+    write_log(f"Heartbeat launcher PID: {proc.pid}", log_path)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        heartbeat_pid = _read_live_pid_lock(HEARTBEAT_PID_FILE)
+        if heartbeat_pid:
+            processes = list_heartbeat_processes()
+            if not processes:
+                processes = [{"pid": heartbeat_pid, "name": "python.exe", "cmdline": HEARTBEAT_SCRIPT}]
+            write_log(f"Heartbeat active PID: {heartbeat_pid}", log_path)
+            return {"mode": "started", "processes": processes}
+        if proc.poll() is not None:
+            break
+        time.sleep(0.5)
+    log_tail = _read_text_tail(HEARTBEAT_LOG)
+    raise RuntimeError(
+        "Heartbeat failed to start"
+        + (f" (launcher rc={proc.returncode})" if proc.poll() is not None else "")
+        + (f"\n{log_tail}" if log_tail else "")
+    )
+
+
+def stop_heartbeat(log_path: str) -> list[int]:
+    killed = []
+    for entry in list_heartbeat_processes():
+        try:
+            psutil.Process(entry["pid"]).kill()
+            killed.append(entry["pid"])
+            write_log(f"Killed heartbeat process PID {entry['pid']}: {entry['name']}", log_path)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    release_pid_lock(HEARTBEAT_PID_FILE)
+    return killed
+
+
+def ensure_heartbeat_running(log_path: str, iter_step: int | None = None, poll: int | None = None) -> dict:
+    if is_heartbeat_running():
+        return {"mode": "already-running", "processes": list_heartbeat_processes()}
+    return launch_heartbeat(log_path, iter_step=iter_step, poll=poll)
 
 
 def build_train_command(resume_run_dir: str | None = None, checkpoint_path: str | None = None) -> str:
@@ -759,6 +957,21 @@ def find_latest_report_zip(run_dir: str | None = None) -> str | None:
         if not root or not os.path.isdir(root):
             continue
         matches = glob.glob(os.path.join(root, "**", "*.zip"), recursive=True)
+        matches = [path for path in matches if os.path.isfile(path)]
+        if matches:
+            matches.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+            return matches[0]
+    return None
+
+
+def find_latest_report_xlsx(run_dir: str | None = None) -> str | None:
+    search_roots = [run_dir] if run_dir else []
+    if LOG_BASE not in search_roots:
+        search_roots.append(LOG_BASE)
+    for root in search_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        matches = glob.glob(os.path.join(root, "**", "clip_*_heartbeat_history.xlsx"), recursive=True)
         matches = [path for path in matches if os.path.isfile(path)]
         if matches:
             matches.sort(key=lambda path: os.path.getmtime(path), reverse=True)
@@ -1071,6 +1284,459 @@ def append_report_record(run_dir: str, record: dict | None) -> None:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         pass
+    try:
+        refresh_v23_training_logs(run_dir, SUPERVISOR_LOG)
+    except Exception as err:
+        write_log(f"V23 workbook refresh failed: {err}", SUPERVISOR_LOG)
+
+
+def get_v23_master_log_path() -> str:
+    return os.path.join(LOG_BASE, V23_MASTER_LOG_FILENAME)
+
+
+def get_v23_checkpoint_review_path() -> str:
+    return os.path.join(LOG_BASE, V23_CHECKPOINT_REVIEW_FILENAME)
+
+
+def get_v23_run_log_path(run_dir: str) -> str:
+    run_id = os.path.basename(run_dir.rstrip("\\/"))
+    return os.path.join(run_dir, f"spotmicro_v23_run_{run_id}_training_log.xlsx")
+
+
+def _scalar_value_at_or_before(data: dict, tag: str, iteration: int):
+    values = data.get(tag, [])
+    for step, value in reversed(values):
+        if int(step) <= int(iteration):
+            return _safe_float(value)
+    return None
+
+
+def _normalize_pct(value):
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
+    if abs(numeric) <= 1.0:
+        return round(numeric * 100.0, 4)
+    return numeric
+
+
+def _compute_elapsed_hours(run_dir: str, timestamp_text: str) -> float | None:
+    try:
+        started_at = datetime.datetime.fromtimestamp(os.path.getctime(run_dir))
+        current_at = datetime.datetime.fromisoformat(timestamp_text)
+        return round((current_at - started_at).total_seconds() / 3600.0, 4)
+    except Exception:
+        return None
+
+
+def _score_band(value, warn_low: float, good_low: float, good_high: float | None = None, warn_high: float | None = None) -> float | None:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
+    good_high = good_low if good_high is None else good_high
+    warn_high = good_high if warn_high is None else warn_high
+    if good_low <= numeric <= good_high:
+        return 100.0
+    if warn_low <= numeric <= warn_high:
+        return 65.0
+    return 20.0
+
+
+def _score_penalty(value, good_threshold: float, warn_threshold: float) -> float | None:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
+    if numeric >= good_threshold:
+        return 100.0
+    if numeric >= warn_threshold:
+        return 65.0
+    return 20.0
+
+
+def _load_yaml_config(file_path: str):
+    if not os.path.isfile(file_path):
+        return {}
+    try:
+        import yaml
+
+        with open(file_path, "r", encoding="utf-8") as file:
+            try:
+                return yaml.safe_load(file) or {}
+            except Exception:
+                file.seek(0)
+                return yaml.unsafe_load(file) or {}
+    except Exception:
+        return {}
+
+
+def _get_repo_git_commit() -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if proc.returncode == 0:
+            return (proc.stdout or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[float]) -> dict:
+    run_id = os.path.basename(run_dir)
+    iteration = int(record.get("iteration") or 0)
+    timestamp_text = str(record.get("timestamp") or _now())
+    rewards = {tag.replace("Episode_Reward/", ""): _scalar_value_at_or_before(data, tag, iteration) for tag in data if tag.startswith("Episode_Reward/")}
+    kpi = build_supervisor_kpi_snapshot(run_dir)
+    timeout_pct = _normalize_pct(_scalar_value_at_or_before(data, "Episode_Termination/time_out", iteration))
+    fall_pct = _normalize_pct(_scalar_value_at_or_before(data, "Episode_Termination/bad_orientation", iteration))
+    mean_reward = _scalar_value_at_or_before(data, "Train/mean_reward", iteration) or _safe_float(record.get("mean_reward"))
+    mean_ep_len = _scalar_value_at_or_before(data, "Train/mean_episode_length", iteration) or _safe_float(record.get("mean_episode_length"))
+    if mean_reward is not None:
+        reward_window.append(mean_reward)
+    mean_reward_avg10 = round(sum(reward_window[-10:]) / len(reward_window[-10:]), 6) if reward_window else None
+    survival_pct_derived = _normalize_pct(record.get("kpi_snapshot", {}).get("survival_pct") or record.get("survival_pct") or kpi.get("survival_pct"))
+
+    posture_components = [
+        _score_penalty(rewards.get("stance_width_penalty"), -0.15, -0.60),
+        _score_penalty(rewards.get("shoulder_neutral"), -0.20, -0.60),
+        _score_penalty(rewards.get("shoulder_symmetry"), -0.10, -0.40),
+        _score_band(rewards.get("standing_height"), 0.10, 0.18, 0.24, 0.30),
+        _score_penalty(rewards.get("flat_orientation_l2"), -0.015, -0.04),
+        _score_penalty(rewards.get("base_height_l2"), -0.015, -0.04),
+    ]
+    posture_values = [value for value in posture_components if value is not None]
+    posture_style_score = round(sum(posture_values) / len(posture_values), 3) if posture_values else None
+
+    jitter_components = [
+        _score_penalty(rewards.get("action_rate_l2"), -3.6, -6.0),
+        _score_penalty(rewards.get("joint_vel_l2"), -6.0, -10.0),
+        _score_penalty(rewards.get("dof_acc_l2"), -6.0, -12.0),
+        _score_penalty(rewards.get("joint_oscillation"), -0.20, -0.50),
+        _score_penalty(rewards.get("foot_extension"), -0.20, -0.50),
+    ]
+    jitter_values = [value for value in jitter_components if value is not None]
+    foot_jitter_score = round(sum(jitter_values) / len(jitter_values), 3) if jitter_values else None
+    stance_foot_jitter_score_raw = foot_jitter_score
+
+    balance_components = [
+        _score_band(rewards.get("leg_pose_symmetry"), 0.0, 0.3, 1.5, 2.5),
+        _score_band(rewards.get("rear_alternation"), 0.0, 0.2, 2.0, 3.0),
+        _score_band(rewards.get("rear_forward_stride"), 0.0, 0.2, 2.0, 3.0),
+        _score_penalty(rewards.get("same_side_penalty"), -0.05, -0.25),
+    ]
+    balance_values = [value for value in balance_components if value is not None]
+    front_rear_balance_score = round(sum(balance_values) / len(balance_values), 3) if balance_values else None
+
+    gate_pass = bool(
+        (survival_pct_derived or 0.0) >= 70.0
+        and (fall_pct is None or fall_pct <= 10.0)
+        and (_safe_float(_scalar_value_at_or_before(data, "Loss/value_function", iteration)) or 0.0) <= 5.0
+        and (kpi.get("gait_score") or 0) >= 5
+    )
+
+    fallback_parts = [
+        "locomotion_raw=reward_proxy",
+        "posture_score=proxy_reward_terms",
+        "foot_jitter_score=proxy_reward_terms",
+        "front_rear_balance_score=proxy_reward_terms",
+        "missing_posture_raw=not_exported",
+        "missing_front_rear_raw=not_exported",
+    ]
+
+    row = {column: None for column in V23_RUNLOG_COLUMNS}
+    row.update(
+        {
+            "run_id": run_id,
+            "train_version": V23_TRAIN_VERSION,
+            "iter": iteration,
+            "global_step": iteration,
+            "timestamp": timestamp_text,
+            "elapsed_hours": _compute_elapsed_hours(run_dir, timestamp_text),
+            "report_kind": record.get("report_kind") or "heartbeat",
+            "cycle_num": int(record.get("cycle_num") or 0),
+            "log_source": "heartbeat_jsonl+tfevents",
+            "fallback_source": "; ".join(fallback_parts),
+            "mean_reward": mean_reward,
+            "mean_reward_avg10": mean_reward_avg10,
+            "mean_episode_length": mean_ep_len,
+            "survival_pct": survival_pct_derived,
+            "timeout_pct": timeout_pct,
+            "fall_pct": fall_pct,
+            "vf_loss": _scalar_value_at_or_before(data, "Loss/value_function", iteration),
+            "surrogate_loss": _scalar_value_at_or_before(data, "Loss/surrogate", iteration),
+            "noise_std": _scalar_value_at_or_before(data, "Policy/mean_noise_std", iteration),
+            "vel_err_xy": _scalar_value_at_or_before(data, "Metrics/base_velocity/error_vel_xy", iteration),
+            "vel_err_yaw": _scalar_value_at_or_before(data, "Metrics/base_velocity/error_vel_yaw", iteration),
+            "survival_pct_derived": survival_pct_derived,
+            "gait_score_estimated": kpi.get("gait_score"),
+            "stability_score_estimated": kpi.get("stability_score"),
+            "forward_velocity_raw": rewards.get("forward_velocity"),
+            "trot_gait_raw": rewards.get("trot_gait"),
+            "diagonal_coupling_raw": rewards.get("diagonal_coupling"),
+            "leg_lift_raw": rewards.get("leg_lift"),
+            "foot_clearance_raw": rewards.get("foot_clearance"),
+            "standing_height_raw": rewards.get("standing_height"),
+            "forward_velocity_reward": rewards.get("forward_velocity"),
+            "trot_gait_reward": rewards.get("trot_gait"),
+            "diagonal_coupling_reward": rewards.get("diagonal_coupling"),
+            "leg_lift_reward": rewards.get("leg_lift"),
+            "foot_clearance_reward": rewards.get("foot_clearance"),
+            "standing_height_reward": rewards.get("standing_height"),
+            "shoulder_mean_abs_dev_from_target_raw": rewards.get("shoulder_neutral"),
+            "shoulder_left_right_diff_raw": rewards.get("shoulder_symmetry"),
+            "base_height_raw": rewards.get("standing_height"),
+            "body_roll_abs_raw": rewards.get("flat_orientation_l2"),
+            "body_pitch_abs_raw": rewards.get("flat_orientation_l2"),
+            "action_rate_l2_raw": rewards.get("action_rate_l2"),
+            "joint_vel_l2_raw": rewards.get("joint_vel_l2"),
+            "dof_acc_l2_raw": rewards.get("dof_acc_l2"),
+            "joint_oscillation_raw": rewards.get("joint_oscillation"),
+            "foot_extension_raw": rewards.get("foot_extension"),
+            "stance_foot_jitter_score_raw": stance_foot_jitter_score_raw,
+            "contact_transition_oscillation_score_estimated": rewards.get("joint_oscillation"),
+            "rear_leg_lift_mean_raw": rewards.get("leg_lift"),
+            "rear_clearance_mean_raw": rewards.get("foot_clearance"),
+            "rear_propulsion_score_raw": rewards.get("rear_forward_stride"),
+            "stride_length_raw": rewards.get("stride_length"),
+            "gait_cycle_period_raw": rewards.get("gait_cycle_period"),
+            "gait_score_canonical": kpi.get("gait_score"),
+            "stability_score_canonical": kpi.get("stability_score"),
+            "posture_style_score": posture_style_score,
+            "foot_jitter_score": foot_jitter_score,
+            "front_rear_balance_score": front_rear_balance_score,
+            "hard_safety_gate_pass": gate_pass,
+            "style_shortlist_candidate": False,
+            "best_reward_candidate": False,
+            "best_style_candidate": False,
+            "manual_front_review_rank": None,
+            "manual_notes": "",
+        }
+    )
+    return row
+
+
+def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], list[dict]]:
+    records = load_report_history(run_dir)
+    data = read_tfevents(run_dir) or {}
+    env_cfg = _load_yaml_config(os.path.join(run_dir, "params", "env.yaml"))
+    agent_cfg = _load_yaml_config(os.path.join(run_dir, "params", "agent.yaml"))
+    run_id = os.path.basename(run_dir)
+    rows: list[dict] = []
+    reward_window: list[float] = []
+    for record in sorted(records, key=lambda item: int(item.get("iteration") or 0)):
+        rows.append(_build_v23_row(record, run_dir, data, reward_window))
+    if rows:
+        best_reward_row = max(rows, key=lambda item: item.get("mean_reward") if item.get("mean_reward") is not None else float("-inf"))
+        best_reward_row["best_reward_candidate"] = True
+        style_rows = [row for row in rows if row.get("hard_safety_gate_pass")]
+        for row in style_rows:
+            row["style_shortlist_candidate"] = (row.get("posture_style_score") or 0.0) >= 65.0
+        if style_rows:
+            best_style_row = max(style_rows, key=lambda item: item.get("posture_style_score") if item.get("posture_style_score") is not None else float("-inf"))
+            best_style_row["best_style_candidate"] = True
+    meta = {
+        "run_id": run_id,
+        "train_version": V23_TRAIN_VERSION,
+        "git_commit": _get_repo_git_commit(),
+        "task_name": env_cfg.get("task_name") or TASK,
+        "checkpoint_source": f"{agent_cfg.get('load_run') or 'fresh'}:{agent_cfg.get('load_checkpoint') or ''}" if agent_cfg.get("resume") else "fresh",
+        "note": "V23 dedicated style/logging workbook",
+        "resume": agent_cfg.get("resume"),
+        "seed": agent_cfg.get("seed") or env_cfg.get("seed"),
+        "num_envs": env_cfg.get("scene", {}).get("num_envs") if isinstance(env_cfg.get("scene"), dict) else None,
+        "max_iterations": agent_cfg.get("max_iterations"),
+    }
+    events = []
+    if agent_cfg.get("resume"):
+        events.append({"timestamp": rows[0]["timestamp"] if rows else _now(), "event_type": "resume", "detail": meta["checkpoint_source"]})
+    events.append({"timestamp": _now(), "event_type": "workbook_refresh", "detail": "V23 workbook refreshed"})
+    review_rows = []
+    for row in rows:
+        if row.get("best_reward_candidate") or row.get("best_style_candidate") or row == rows[-1]:
+            review_rows.append({
+                "run_id": row["run_id"],
+                "iter": row["iter"],
+                "mean_reward": row["mean_reward"],
+                "survival_pct": row["survival_pct"],
+                "vf_loss": row["vf_loss"],
+                "gait_score_canonical": row["gait_score_canonical"],
+                "stability_score_canonical": row["stability_score_canonical"],
+                "posture_style_score": row["posture_style_score"],
+                "foot_jitter_score": row["foot_jitter_score"],
+                "front_rear_balance_score": row["front_rear_balance_score"],
+                "hard_safety_gate_pass": row["hard_safety_gate_pass"],
+                "style_shortlist_candidate": row["style_shortlist_candidate"],
+                "best_reward_candidate": row["best_reward_candidate"],
+                "best_style_candidate": row["best_style_candidate"],
+                "manual_front_review_rank": row["manual_front_review_rank"],
+                "manual_notes": row["manual_notes"],
+            })
+    return rows, meta, events, review_rows
+
+
+def _write_v23_meta_sheet(ws, meta: dict, header_font) -> None:
+    ws.title = "Meta"
+    ws.append(["key", "value"])
+    for cell in ws[1]:
+        cell.font = header_font
+    for key, value in meta.items():
+        ws.append([key, value])
+    ws.freeze_panes = "A2"
+
+
+def _write_v23_events_sheet(ws, events: list[dict], header_font) -> None:
+    ws.title = "Events"
+    headers = ["timestamp", "event_type", "detail"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = header_font
+    for event in events:
+        ws.append([event.get("timestamp"), event.get("event_type"), event.get("detail")])
+    ws.freeze_panes = "A2"
+
+
+def _write_v23_review_sheet(ws, review_rows: list[dict], header_font) -> None:
+    ws.title = "CheckpointReview"
+    headers = [
+        "run_id", "iter", "mean_reward", "survival_pct", "vf_loss", "gait_score_canonical", "stability_score_canonical",
+        "posture_style_score", "foot_jitter_score", "front_rear_balance_score", "hard_safety_gate_pass",
+        "style_shortlist_candidate", "best_reward_candidate", "best_style_candidate", "manual_front_review_rank", "manual_notes",
+    ]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = header_font
+    for row in review_rows:
+        ws.append([row.get(header) for header in headers])
+    ws.freeze_panes = "A2"
+
+
+def _add_v23_chart_sheet(wb, runlog_headers: list[str], runlog_rows: list[dict], header_font) -> None:
+    from openpyxl.chart import LineChart, Reference
+
+    ws_chart = wb.create_sheet("Charts")
+    ws_chart.append(runlog_headers)
+    for cell in ws_chart[1]:
+        cell.font = header_font
+    for row in runlog_rows:
+        ws_chart.append([row.get(header) for header in runlog_headers])
+    ws_chart.freeze_panes = "A2"
+    chart_groups = [
+        ("CoreTraining", ["mean_reward", "mean_episode_length", "survival_pct", "fall_pct", "vf_loss"]),
+        ("LocomotionCore", ["forward_velocity_raw", "trot_gait_raw", "diagonal_coupling_raw", "leg_lift_raw", "foot_clearance_raw", "standing_height_raw"]),
+        ("PostureStyle", ["stance_width_mean_raw", "stance_width_front_raw", "stance_width_rear_raw", "shoulder_mean_abs_dev_from_target_raw", "body_roll_abs_raw", "body_pitch_abs_raw", "posture_style_score"]),
+        ("MotionJitter", ["action_rate_l2_raw", "joint_vel_l2_raw", "dof_acc_l2_raw", "foot_joint_action_rate_l2_raw", "foot_joint_vel_l2_raw", "stance_foot_jitter_score_raw"]),
+        ("FrontRearBalance", ["front_leg_lift_mean_raw", "rear_leg_lift_mean_raw", "front_clearance_mean_raw", "rear_clearance_mean_raw", "front_propulsion_score_raw", "rear_propulsion_score_raw", "front_rear_balance_score"]),
+    ]
+    if ws_chart.max_row < 2:
+        return
+    categories = Reference(ws_chart, min_col=runlog_headers.index("iter") + 1, min_row=2, max_row=ws_chart.max_row)
+    for chart_index, (title, metric_names) in enumerate(chart_groups, start=1):
+        available = [name for name in metric_names if name in runlog_headers]
+        chart = LineChart()
+        chart.title = title
+        chart.style = 2
+        chart.y_axis.title = "value"
+        chart.x_axis.title = "iter"
+        added = False
+        for metric_name in available:
+            col_idx = runlog_headers.index(metric_name) + 1
+            has_value = any(isinstance(ws_chart.cell(row=row_idx, column=col_idx).value, (int, float)) for row_idx in range(2, ws_chart.max_row + 1))
+            if not has_value:
+                continue
+            data_ref = Reference(ws_chart, min_col=col_idx, min_row=1, max_row=ws_chart.max_row)
+            chart.add_data(data_ref, titles_from_data=True)
+            added = True
+        if not added:
+            continue
+        chart.set_categories(categories)
+        ws_chart.add_chart(chart, f"A{1 + (chart_index - 1) * 18}")
+
+
+def export_v23_training_workbook(out_path: str, rows: list[dict], meta: dict, events: list[dict], review_rows: list[dict], log_path: str) -> str | None:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except Exception as err:
+        write_log(f"V23 workbook skipped (openpyxl unavailable): {err}", log_path)
+        return None
+    wb = Workbook()
+    ws_run = wb.active
+    ws_run.title = "RunLog_100iter"
+    header_font = Font(bold=True)
+    ws_run.append(V23_RUNLOG_COLUMNS)
+    for cell in ws_run[1]:
+        cell.font = header_font
+    for row in rows:
+        ws_run.append([row.get(column) for column in V23_RUNLOG_COLUMNS])
+    ws_run.freeze_panes = "A2"
+    _write_v23_meta_sheet(wb.create_sheet("Meta"), meta, header_font)
+    _write_v23_events_sheet(wb.create_sheet("Events"), events, header_font)
+    _write_v23_review_sheet(wb.create_sheet("CheckpointReview"), review_rows, header_font)
+    _add_v23_chart_sheet(wb, V23_RUNLOG_COLUMNS, rows, header_font)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    wb.save(out_path)
+    write_log(f"V23 workbook exported: {out_path}", log_path)
+    return out_path
+
+
+def export_v23_checkpoint_review_workbook(out_path: str, review_rows: list[dict], log_path: str) -> str | None:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except Exception as err:
+        write_log(f"V23 checkpoint review skipped (openpyxl unavailable): {err}", log_path)
+        return None
+    wb = Workbook()
+    header_font = Font(bold=True)
+    _write_v23_review_sheet(wb.active, review_rows, header_font)
+    wb.active.title = "CheckpointReview"
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    wb.save(out_path)
+    write_log(f"V23 checkpoint review exported: {out_path}", log_path)
+    return out_path
+
+
+def refresh_v23_training_logs(run_dir: str, log_path: str) -> dict:
+    rows, meta, events, review_rows = _build_v23_run_rows(run_dir)
+    if not rows:
+        return {}
+    run_log_path = export_v23_training_workbook(get_v23_run_log_path(run_dir), rows, meta, events, review_rows, log_path)
+    master_rows: list[dict] = []
+    master_review_rows: list[dict] = []
+    run_count = 0
+    if os.path.isdir(LOG_BASE):
+        for run_name in sorted(os.listdir(LOG_BASE)):
+            candidate_run_dir = os.path.join(LOG_BASE, run_name)
+            if not os.path.isdir(candidate_run_dir):
+                continue
+            run_rows, _run_meta, run_events, run_review_rows = _build_v23_run_rows(candidate_run_dir)
+            if not run_rows:
+                continue
+            run_count += 1
+            master_rows.extend(run_rows)
+            master_review_rows.extend(run_review_rows)
+    master_rows.sort(key=lambda item: (str(item.get("run_id") or ""), int(item.get("iter") or 0)))
+    master_meta = {
+        "train_version": V23_TRAIN_VERSION,
+        "generated_at": _now(),
+        "run_count": run_count,
+        "log_root": LOG_BASE,
+        "note": "Master workbook rebuilt from per-run heartbeat history",
+    }
+    master_events = [{"timestamp": _now(), "event_type": "workbook_refresh", "detail": f"runs={run_count}"}]
+    master_log_path = export_v23_training_workbook(get_v23_master_log_path(), master_rows, master_meta, master_events, master_review_rows, log_path)
+    checkpoint_review_path = export_v23_checkpoint_review_workbook(get_v23_checkpoint_review_path(), master_review_rows, log_path)
+    return {
+        "run_log_path": run_log_path,
+        "master_log_path": master_log_path,
+        "checkpoint_review_path": checkpoint_review_path,
+    }
 
 
 def format_report(data: dict, run_name: str, cycle_num: int) -> str:
@@ -1212,6 +1878,55 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str, log_path: str) ->
     records = load_report_history(run_dir)
     scalar_data = read_tfevents(run_dir) or {}
     scalar_maps = {tag: {int(step): value for step, value in values} for tag, values in scalar_data.items()}
+
+    def _flatten_value_rows(prefix: str, value) -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
+        if isinstance(value, dict):
+            for key, nested_value in value.items():
+                child_prefix = f"{prefix}.{key}" if prefix else str(key)
+                rows.extend(_flatten_value_rows(child_prefix, nested_value))
+            return rows
+        if isinstance(value, (list, tuple)):
+            if all(not isinstance(item, (dict, list, tuple)) for item in value):
+                rows.append((prefix, ", ".join(str(item) for item in value)))
+                return rows
+            for index, nested_value in enumerate(value):
+                child_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+                rows.extend(_flatten_value_rows(child_prefix, nested_value))
+            return rows
+        rows.append((prefix, "" if value is None else str(value)))
+        return rows
+
+    def _load_param_rows(file_path: str) -> list[tuple[str, str]]:
+        if not os.path.isfile(file_path):
+            return []
+        try:
+            import yaml
+
+            with open(file_path, "r", encoding="utf-8") as file:
+                try:
+                    data = yaml.safe_load(file)
+                except Exception:
+                    file.seek(0)
+                    data = yaml.unsafe_load(file)
+            return _flatten_value_rows("", data)
+        except Exception as err:
+            write_log(f"Parameter sheet fallback for {os.path.basename(file_path)}: {err}", log_path)
+        rows: list[tuple[str, str]] = []
+        with open(file_path, "r", encoding="utf-8", errors="replace") as file:
+            for line_no, line in enumerate(file, start=1):
+                rows.append((f"line_{line_no:04d}", line.rstrip("\n")))
+        return rows
+
+    def _write_kv_sheet(ws, title: str, rows: list[tuple[str, str]], header_font) -> None:
+        ws.title = title
+        ws.append(["key", "value"])
+        for cell in ws[1]:
+            cell.font = header_font
+        for key, value in rows:
+            ws.append([key, value])
+        ws.freeze_panes = "A2"
+
     column_specs = [
         ("timestamp", "timestamp"),
         ("report_kind", "report_kind"),
@@ -1296,6 +2011,11 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str, log_path: str) ->
     ws_overview.title = "Overview"
     ws_trends = wb.create_sheet("Trends")
     ws_raw = wb.create_sheet("RawData")
+    ws_scalar_stats = wb.create_sheet("ScalarStats")
+    ws_scalar_series = wb.create_sheet("ScalarSeries")
+    ws_env = wb.create_sheet("EnvParams")
+    ws_agent = wb.create_sheet("AgentParams")
+    ws_report = wb.create_sheet("ReportMeta")
     header_font = Font(bold=True)
     headers = [column_name for column_name, _ in column_specs]
 
@@ -1335,6 +2055,78 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str, log_path: str) ->
         ws_trends.append([row.get("iteration")] + [row.get(metric) for metric in metrics])
     ws_trends.freeze_panes = "A2"
 
+    ws_scalar_stats.append(["tag", "last", "first", "min", "max", "delta", "points"])
+    for cell in ws_scalar_stats[1]:
+        cell.font = header_font
+    for tag in sorted(scalar_data):
+        values = scalar_data.get(tag) or []
+        if not values:
+            continue
+        numeric_values = [float(value) for _, value in values]
+        ws_scalar_stats.append(
+            [
+                tag,
+                numeric_values[-1],
+                numeric_values[0],
+                min(numeric_values),
+                max(numeric_values),
+                numeric_values[-1] - numeric_values[0],
+                len(numeric_values),
+            ]
+        )
+    ws_scalar_stats.freeze_panes = "A2"
+
+    scalar_chart_groups = [
+        ("TrainReward", ["Train/mean_reward", "Train/mean_episode_length"]),
+        ("PrimaryReward", [
+            "Episode_Reward/standing_height",
+            "Episode_Reward/forward_velocity",
+            "Episode_Reward/diagonal_coupling",
+            "Episode_Reward/trot_gait",
+        ]),
+        ("SupportReward", [
+            "Episode_Reward/rear_joint_velocity",
+            "Episode_Reward/foot_clearance",
+            "Episode_Reward/shoulder_neutral",
+            "Episode_Reward/shoulder_symmetry",
+        ]),
+        ("Penalty", [
+            "Episode_Reward/joint_vel_l2",
+            "Episode_Reward/action_rate_l2",
+            "Episode_Reward/dof_acc_l2",
+            "Episode_Reward/ang_vel_xy_l2",
+            "Episode_Reward/flat_orientation_l2",
+        ]),
+        ("Termination", [
+            "Episode_Termination/time_out",
+            "Episode_Termination/bad_orientation",
+        ]),
+    ]
+    selected_tags = []
+    for _, tags in scalar_chart_groups:
+        for tag in tags:
+            if tag in scalar_data and tag not in selected_tags:
+                selected_tags.append(tag)
+    selected_steps = sorted({int(step) for tag in selected_tags for step, _ in scalar_data.get(tag, [])})
+    ws_scalar_series.append(["iteration"] + selected_tags)
+    for cell in ws_scalar_series[1]:
+        cell.font = header_font
+    selected_maps = {tag: {int(step): value for step, value in scalar_data.get(tag, [])} for tag in selected_tags}
+    for step in selected_steps:
+        ws_scalar_series.append([step] + [selected_maps[tag].get(step) for tag in selected_tags])
+    ws_scalar_series.freeze_panes = "A2"
+
+    report_rows = [
+        ("run_dir", os.path.basename(run_dir)),
+        ("checkpoint", os.path.basename(get_latest_checkpoint(run_dir) or "")),
+        ("latest_iteration", str(rows[-1].get("iteration") if rows else "")),
+        ("history_rows", str(len(rows))),
+        ("scalar_tags", str(len(scalar_data))),
+    ]
+    _write_kv_sheet(ws_report, "ReportMeta", report_rows, header_font)
+    _write_kv_sheet(ws_env, "EnvParams", _load_param_rows(os.path.join(run_dir, "params", "env.yaml")), header_font)
+    _write_kv_sheet(ws_agent, "AgentParams", _load_param_rows(os.path.join(run_dir, "params", "agent.yaml")), header_font)
+
     chart_specs = [
         ("Reward", ["mean_reward", "mean_episode_length"]),
         ("Gait", ["forward_velocity", "diagonal_coupling", "trot_gait", "foot_clearance"]),
@@ -1352,6 +2144,23 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str, log_path: str) ->
             chart.add_data(data_ref, titles_from_data=True)
         chart.set_categories(categories)
         ws_overview.add_chart(chart, f"F{1 + (chart_index - 1) * 15}")
+
+    for chart_index, (title, metric_names) in enumerate(scalar_chart_groups, start=1):
+        available_names = [name for name in metric_names if name in selected_tags]
+        if not available_names or ws_scalar_series.max_row < 2:
+            continue
+        chart = LineChart()
+        chart.title = title
+        chart.style = 2
+        chart.y_axis.title = "value"
+        chart.x_axis.title = "iteration"
+        categories = Reference(ws_scalar_series, min_col=1, min_row=2, max_row=ws_scalar_series.max_row)
+        for metric_name in available_names:
+            col_idx = selected_tags.index(metric_name) + 2
+            data_ref = Reference(ws_scalar_series, min_col=col_idx, min_row=1, max_row=ws_scalar_series.max_row)
+            chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(categories)
+        ws_overview.add_chart(chart, f"P{1 + (chart_index - 1) * 15}")
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     wb.save(out_path)
@@ -1523,7 +2332,7 @@ def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, vid
         return ""
 
 
-def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, captured_videos: dict[str, str], kpi_snapshot: dict, analysis_text: str) -> str | None:
+def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, captured_videos: dict[str, str], kpi_snapshot: dict, analysis_text: str) -> dict | None:
     if not captured_videos:
         return None
     iter_num = get_checkpoint_iter(checkpoint_path)
@@ -1566,7 +2375,7 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
         for key, path in captured_videos.items():
             if path and os.path.isfile(path):
                 archive.write(path, f"videos/{key}_{os.path.basename(path)}")
-    return zip_path
+    return {"zip_path": zip_path, "xlsx_path": heartbeat_xlsx_path}
 
 
 def _cache_matches_current_schema(state: dict) -> bool:
@@ -1627,7 +2436,13 @@ def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bo
         and _report_zip_meets_requirements(cached_zip)
         and _checkpoint_matches_cached(checkpoint_path, state.get("last_video_checkpoint") or "", cached_videos)
     ):
-        return {"zip_path": cached_zip, "videos": cached_videos, "analysis_text": "", "kpi_snapshot": build_supervisor_kpi_snapshot(run_dir)}
+        return {
+            "zip_path": cached_zip,
+            "xlsx_path": find_latest_report_xlsx(run_dir),
+            "videos": cached_videos,
+            "analysis_text": "",
+            "kpi_snapshot": build_supervisor_kpi_snapshot(run_dir),
+        }
     videos = ensure_current_videos(run_dir, checkpoint_path, log_path=log_path, force=force)
     representative_video = select_representative_video(videos)
     iter_num = get_checkpoint_iter(checkpoint_path)
@@ -1635,7 +2450,9 @@ def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bo
     write_log(f"Generating report bundle for iter {iter_num}", log_path)
     analysis_text = run_detailed_analysis(run_dir, checkpoint_path, clip_num, representative_video)
     kpi_snapshot = build_supervisor_kpi_snapshot(run_dir)
-    zip_path = create_clip_artifact_zip(run_dir, checkpoint_path, clip_num, videos, kpi_snapshot, analysis_text)
+    artifact_paths = create_clip_artifact_zip(run_dir, checkpoint_path, clip_num, videos, kpi_snapshot, analysis_text)
+    zip_path = artifact_paths.get("zip_path") if artifact_paths else None
+    heartbeat_xlsx_path = artifact_paths.get("xlsx_path") if artifact_paths else None
     if not zip_path or not os.path.isfile(zip_path):
         raise RuntimeError("Report ZIP was not created.")
     update_state(
@@ -1647,7 +2464,13 @@ def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bo
         last_videos=videos,
         last_video_checkpoint=checkpoint_path,
     )
-    return {"zip_path": zip_path, "videos": videos, "analysis_text": analysis_text, "kpi_snapshot": kpi_snapshot}
+    return {
+        "zip_path": zip_path,
+        "xlsx_path": heartbeat_xlsx_path,
+        "videos": videos,
+        "analysis_text": analysis_text,
+        "kpi_snapshot": kpi_snapshot,
+    }
 
 
 def build_status_text() -> str:
@@ -1656,44 +2479,89 @@ def build_status_text() -> str:
     checkpoint = resolve_active_checkpoint(run_dir)
     iter_num = get_checkpoint_iter(checkpoint)
     training_alive = is_training_running()
+    heartbeat_alive = is_heartbeat_running()
     lines = [
-        "📡 Supervisor 상태",
-        f"- mode: {state.get('mode', 'idle')}",
-        f"- training: {'alive' if training_alive else 'stopped'}",
-        f"- run: {os.path.basename(run_dir) if run_dir else 'N/A'}",
-        f"- checkpoint: {os.path.basename(checkpoint) if checkpoint else 'N/A'}",
-        f"- iter: {iter_num:,}",
-        f"- last_report_zip: {os.path.basename(state.get('last_report_zip') or '') or 'N/A'}",
+        "📡 SpotMicro Command Center",
+        f"• mode: {state.get('mode', 'idle')}",
+        f"• training: {'alive' if training_alive else 'stopped'}",
+        f"• heartbeat: {'alive' if heartbeat_alive else 'stopped'}",
+        f"• run: {os.path.basename(run_dir) if run_dir else 'N/A'}",
+        f"• checkpoint: {os.path.basename(checkpoint) if checkpoint else 'N/A'}",
+        f"• iter: {iter_num:,}",
+        f"• last_report_zip: {os.path.basename(state.get('last_report_zip') or '') or 'N/A'}",
     ]
     last_videos = state.get("last_videos") or {}
     available_views = [key for key, path in sorted(last_videos.items()) if path and os.path.isfile(path)]
-    lines.append(f"- cached_views: {', '.join(available_views) if available_views else 'none'}")
+    lines.append(f"• cached_views: {', '.join(available_views) if available_views else 'none'}")
     if TELEGRAM_VERBOSE_ERRORS and state.get("last_error"):
-        lines.append(f"- last_error: {state['last_error']}")
+        lines.append(f"• last_error: {state['last_error']}")
+    return "\n".join(lines)
+
+
+def format_status_html() -> str:
+    state = load_state()
+    run_dir = resolve_active_run_dir()
+    checkpoint = resolve_active_checkpoint(run_dir)
+    iter_num = get_checkpoint_iter(checkpoint)
+    training_alive = is_training_running()
+    heartbeat_alive = is_heartbeat_running()
+    lines = [
+        "📡 <b>SPOTMICRO COMMAND CENTER</b>",
+        f"• mode: <code>{html.escape(str(state.get('mode', 'idle')))}</code>",
+        f"• training: <code>{'alive' if training_alive else 'stopped'}</code>",
+        f"• heartbeat: <code>{'alive' if heartbeat_alive else 'stopped'}</code>",
+        f"• run: <code>{html.escape(os.path.basename(run_dir) if run_dir else 'N/A')}</code>",
+        f"• checkpoint: <code>{html.escape(os.path.basename(checkpoint) if checkpoint else 'N/A')}</code>",
+        f"• iter: <code>{iter_num:,}</code>",
+        f"• last_report_zip: <code>{html.escape(os.path.basename(state.get('last_report_zip') or '') or 'N/A')}</code>",
+    ]
+    last_videos = state.get("last_videos") or {}
+    available_views = [key for key, path in sorted(last_videos.items()) if path and os.path.isfile(path)]
+    lines.append(f"• cached_views: <code>{html.escape(', '.join(available_views) if available_views else 'none')}</code>")
+    if TELEGRAM_VERBOSE_ERRORS and state.get("last_error"):
+        lines.append(f"• last_error: <code>{html.escape(str(state['last_error']))}</code>")
     return "\n".join(lines)
 
 
 def format_supervisor_error_text(err: Exception) -> str:
     if TELEGRAM_VERBOSE_ERRORS:
-        return f"⚠️ supervisor error: {err}"
-    return "⚠️ supervisor error가 발생했습니다. 상세 내용은 서버 로그를 확인하세요."
+        return f"⚠️ Supervisor Alert\n• detail: {err}"
+    return "⚠️ Supervisor Alert\n• detail: 서버 로그를 확인하세요."
 
 
 def format_report_summary(run_dir: str, checkpoint_path: str, analysis_text: str, kpi_snapshot: dict) -> str:
     grade = parse_analysis_grade(analysis_text)
     iter_num = get_checkpoint_iter(checkpoint_path)
     return (
-        "📦 Report 완료\n"
-        f"- run: {os.path.basename(run_dir)}\n"
-        f"- checkpoint: {os.path.basename(checkpoint_path)}\n"
-        f"- iter: {iter_num:,}\n"
-        f"- verdict: {kpi_snapshot['verdict']}\n"
-        f"- kpi: {kpi_snapshot['kpi_line']}\n"
-        f"- grade: {grade['Grade']}\n"
-        f"- score: {grade['Score']}/13\n"
-        f"- reward: {grade['Reward']}\n"
-        f"- trend: {grade['Trend']}"
+        "📦 Report Ready\n"
+        f"• run: {os.path.basename(run_dir)}\n"
+        f"• checkpoint: {os.path.basename(checkpoint_path)}\n"
+        f"• iter: {iter_num:,}\n"
+        f"• verdict: {kpi_snapshot['verdict']}\n"
+        f"• kpi: {kpi_snapshot['kpi_line']}\n"
+        f"• grade: {grade['Grade']}\n"
+        f"• score: {grade['Score']}/13\n"
+        f"• reward: {grade['Reward']}\n"
+        f"• trend: {grade['Trend']}"
     )
+
+
+def format_report_summary_html(run_dir: str, checkpoint_path: str, analysis_text: str, kpi_snapshot: dict) -> str:
+    grade = parse_analysis_grade(analysis_text)
+    iter_num = get_checkpoint_iter(checkpoint_path)
+    lines = [
+        "📦 <b>REPORT READY</b>",
+        f"• run: <code>{html.escape(os.path.basename(run_dir))}</code>",
+        f"• checkpoint: <code>{html.escape(os.path.basename(checkpoint_path))}</code>",
+        f"• iter: <code>{iter_num:,}</code>",
+        f"• verdict: <b>{html.escape(str(kpi_snapshot['verdict']))}</b>",
+        f"• kpi: <code>{html.escape(str(kpi_snapshot['kpi_line']))}</code>",
+        f"• grade: <b>{html.escape(str(grade['Grade']))}</b>",
+        f"• score: <code>{html.escape(str(grade['Score']))}/13</code>",
+        f"• reward: <code>{html.escape(str(grade['Reward']))}</code>",
+        f"• trend: <code>{html.escape(str(grade['Trend']))}</code>",
+    ]
+    return "\n".join(lines)
 
 
 def resolve_context() -> tuple[str | None, str | None]:
@@ -1703,17 +2571,18 @@ def resolve_context() -> tuple[str | None, str | None]:
 
 
 def command_variants() -> set[str]:
-    return {"start", "stop", "status", "report", "front", "rear", "top", "side", "help"}
+    return {"start", "stop", "status", "report", "front", "rear", "top", "side", "help", "shutdown"}
 
 
 def help_text() -> str:
     return (
-        "🛠 명령\n"
+        "Command Menu\n"
         "/start : 훈련 시작 또는 latest checkpoint 재개\n"
         "/stop : 현재 훈련만 중단\n"
         "/status : 현재 상태 조회\n"
         "/report : training 중이면 최신 zip, stopped면 현재 checkpoint 기준 새 zip 생성\n"
         "/front, /rear, /top, /side : training 중이면 최신 영상, stopped면 현재 checkpoint 기준 새 영상 생성\n"
+        "/shutdown : supervisor 종료\n"
         "/help : 명령 목록"
     )
 

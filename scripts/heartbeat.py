@@ -12,6 +12,24 @@ else:
     import common
 
 
+def _restore_last_milestone(run_dir: str, iter_step: int) -> int:
+    records = common.load_report_history(run_dir)
+    last_milestone = 0
+    for record in records:
+        try:
+            milestone = int(record.get("milestone") or 0)
+        except (TypeError, ValueError):
+            milestone = 0
+        if milestone <= 0:
+            try:
+                cycle_num = int(record.get("cycle_num") or 0)
+            except (TypeError, ValueError):
+                cycle_num = 0
+            milestone = cycle_num * int(iter_step)
+        last_milestone = max(last_milestone, milestone)
+    return last_milestone
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only heartbeat")
     parser.add_argument("--iter_step", type=int, default=common.HEARTBEAT_ITER_STEP, help="send report every N iterations")
@@ -41,7 +59,7 @@ def main() -> None:
                 run_name = os.path.basename(run_dir)
                 if run_name != last_run_name:
                     last_run_name = run_name
-                    last_sent_milestone = 0
+                    last_sent_milestone = _restore_last_milestone(run_dir, args.iter_step)
                 if milestone <= 0 or milestone <= last_sent_milestone:
                     time.sleep(args.poll)
                     continue
