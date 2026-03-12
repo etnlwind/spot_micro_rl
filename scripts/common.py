@@ -1920,23 +1920,24 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
     reward_vals = data.get("Train/mean_reward", [])
     ep_len_vals = data.get("Train/mean_episode_length", [])
     if not reward_vals:
-        return "⚠️ Heartbeat metrics unavailable"
+        return "⚠️ SpotMicro Command Center\n• heartbeat: metrics unavailable"
     current_iter = int(reward_vals[-1][0])
     current_reward = float(reward_vals[-1][1])
     current_ep_len = float(ep_len_vals[-1][1]) if ep_len_vals else 0.0
     run_dir = os.path.join(LOG_BASE, run_name)
     kpi = build_supervisor_kpi_snapshot(run_dir) if os.path.isdir(run_dir) else build_supervisor_kpi_snapshot(resolve_active_run_dir() or "")
     return (
-        "💓 Heartbeat\n"
-        f"- run: {run_name}\n"
-        f"- cycle: {cycle_num}\n"
-        f"- iter: {current_iter:,}\n"
-        f"- reward: {current_reward:.3f}\n"
-        f"- ep_len: {current_ep_len:.1f}\n"
-        f"- verdict: {kpi['verdict']}\n"
-        f"- kpi: {kpi['kpi_line']}\n"
-        f"- gait: {kpi['gait']} {kpi['gait_score']}/13\n"
-        f"- stability: {kpi['stability']} {kpi['stability_score']}/10"
+        "💓 SpotMicro Command Center\n"
+        "• heartbeat: milestone reached\n"
+        f"• run: {run_name}\n"
+        f"• cycle: {cycle_num}\n"
+        f"• iter: {current_iter:,}\n"
+        f"• reward: {current_reward:.3f}\n"
+        f"• ep_len: {current_ep_len:.1f}\n"
+        f"• verdict: {kpi['verdict']}\n"
+        f"• kpi: {kpi['kpi_line']}\n"
+        f"• gait: {kpi['gait']} {kpi['gait_score']}/13\n"
+        f"• stability: {kpi['stability']} {kpi['stability_score']}/10"
     )
 
 
