@@ -2668,11 +2668,16 @@ def build_status_text() -> str:
     iter_num = get_checkpoint_iter(checkpoint)
     training_alive = is_training_running()
     heartbeat_alive = is_heartbeat_running()
+    mode = str(state.get("mode", "idle"))
+
+    def _status_light(value: str, mapping: dict[str, str], default: str) -> str:
+        return f"{mapping.get(value, default)}{value}"
+
     lines = [
         "📡 SpotMicro Command Center",
-        f"• mode: {state.get('mode', 'idle')}",
-        f"• training: {'alive' if training_alive else 'stopped'}",
-        f"• heartbeat: {'alive' if heartbeat_alive else 'stopped'}",
+        f"• mode: {_status_light(mode, {'idle': '⚪', 'training': '🟡', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}",
+        f"• training: {_status_light('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
+        f"• heartbeat: {_status_light('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
         f"• run: {os.path.basename(run_dir) if run_dir else 'N/A'}",
         f"• checkpoint: {os.path.basename(checkpoint) if checkpoint else 'N/A'}",
         f"• iter: {iter_num:,}",
@@ -2693,11 +2698,16 @@ def format_status_html() -> str:
     iter_num = get_checkpoint_iter(checkpoint)
     training_alive = is_training_running()
     heartbeat_alive = is_heartbeat_running()
+    mode = str(state.get("mode", "idle"))
+
+    def _status_light_html(value: str, mapping: dict[str, str], default: str) -> str:
+        return f"{mapping.get(value, default)}{html.escape(value)}"
+
     lines = [
         "📡 <b>SPOTMICRO COMMAND CENTER</b>",
-        f"• mode: <code>{html.escape(str(state.get('mode', 'idle')))}</code>",
-        f"• training: <code>{'alive' if training_alive else 'stopped'}</code>",
-        f"• heartbeat: <code>{'alive' if heartbeat_alive else 'stopped'}</code>",
+        f"• mode: <code>{_status_light_html(mode, {'idle': '⚪', 'training': '🟡', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}</code>",
+        f"• training: <code>{_status_light_html('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
+        f"• heartbeat: <code>{_status_light_html('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
         f"• run: <code>{html.escape(os.path.basename(run_dir) if run_dir else 'N/A')}</code>",
         f"• checkpoint: <code>{html.escape(os.path.basename(checkpoint) if checkpoint else 'N/A')}</code>",
         f"• iter: <code>{iter_num:,}</code>",
