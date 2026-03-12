@@ -33,10 +33,12 @@ def read_tfevents(run_dir):
     return data
 
 
-def get_latest_metrics(data, n_recent=5):
+def get_latest_metrics(data, n_recent=5, max_step=None):
     """최근 N개 이터레이션의 메트릭 평균을 구합니다."""
     latest = {}
     for tag, values in data.items():
+        if max_step is not None:
+            values = [(step, value) for step, value in values if int(step) <= int(max_step)]
         if len(values) >= n_recent:
             recent = values[-n_recent:]
             latest[tag] = {
@@ -53,12 +55,16 @@ def get_latest_metrics(data, n_recent=5):
     return latest
 
 
-def get_trend(data, tag, window=50):
+def get_trend(data, tag, window=50, max_step=None):
     """메트릭의 최근 추세를 계산합니다 (상승/하락/정체)."""
-    if tag not in data or len(data[tag]) < window * 2:
+    if tag not in data:
         return "insufficient_data", 0.0
-    
     values = data[tag]
+    if max_step is not None:
+        values = [(step, value) for step, value in values if int(step) <= int(max_step)]
+    if len(values) < window * 2:
+        return "insufficient_data", 0.0
+
     first_half = values[-(window*2):-window]
     second_half = values[-window:]
     
@@ -236,7 +242,7 @@ def smoothness_assessment(rewards):
     return notes
 
 
-def generate_report(run_dir, clip_num=0):
+def generate_report(run_dir, clip_num=0, iteration=None):
     """상세 분석 리포트를 생성합니다."""
     
     print("=" * 80)
@@ -252,10 +258,12 @@ def generate_report(run_dir, clip_num=0):
         print("ERROR: Cannot read TensorBoard data!")
         return
     
-    latest = get_latest_metrics(data, n_recent=10)
+    latest = get_latest_metrics(data, n_recent=10, max_step=iteration)
     
     # Current iteration
     reward_data = data.get("Episode_Reward/track_lin_vel_xy_exp", [])
+    if iteration is not None:
+        reward_data = [(step, value) for step, value in reward_data if int(step) <= int(iteration)]
     if reward_data:
         current_iter = reward_data[-1][0]
         print(f"Current Iteration: {current_iter:,} / 15,000")
@@ -267,7 +275,7 @@ def generate_report(run_dir, clip_num=0):
     mean_reward = latest.get("Train/mean_reward", {}).get("current", 0)
     print(f"Mean Reward: {mean_reward:.1f}")
     
-    reward_trend, reward_pct = get_trend(data, "Train/mean_reward")
+    reward_trend, reward_pct = get_trend(data, "Train/mean_reward", max_step=iteration)
     print(f"Reward Trend: {reward_trend} ({reward_pct:+.1f}%)")
     print()
     
@@ -292,12 +300,12 @@ def generate_report(run_dir, clip_num=0):
     
     print("\n  [TOP 10 양수 보상 (기여)]")
     for i, (name, val) in enumerate(positive[:10]):
-        trend, pct = get_trend(data, f"Episode_Reward/{name}")
+        trend, pct = get_trend(data, f"Episode_Reward/{name}", max_step=iteration)
         print(f"    {i+1:2d}. {name:30s} = {val:+8.3f}  {trend}")
     
     print("\n  [TOP 10 음수 보상 (페널티)]")
     for i, (name, val) in enumerate(negative[:10]):
-        trend, pct = get_trend(data, f"Episode_Reward/{name}")
+        trend, pct = get_trend(data, f"Episode_Reward/{name}", max_step=iteration)
         print(f"    {i+1:2d}. {name:30s} = {val:+8.3f}  {trend}")
     
     print()
@@ -346,7 +354,7 @@ def generate_report(run_dir, clip_num=0):
     ]
     for metric in key_metrics:
         name = metric.split("/")[-1]
-        trend, pct = get_trend(data, metric)
+        trend, pct = get_trend(data, metric, max_step=iteration)
         val = latest.get(metric, {}).get("current", 0)
         print(f"  {name:30s} = {val:+10.3f}  {trend} ({pct:+.1f}%)")
     print()
@@ -405,6 +413,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Training Analysis")
     parser.add_argument("--run_dir", required=True, help="Training run directory")
     parser.add_argument("--clip_num", type=int, default=0, help="Clip number")
+    parser.add_argument("--iteration", type=int, default=None, help="Use metrics up to this iteration only")
     args = parser.parse_args()
-    
-    generate_report(args.run_dir, args.clip_num)
+
+    generate_report(args.run_dir, args.clip_num, iteration=args.iteration)

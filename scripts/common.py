@@ -102,7 +102,9 @@ REPORT_REQUIRE_XLSX = _parse_env_flag(
 SUPERVISOR_POLL_SECONDS = int(_env.get("SUPERVISOR_POLL_SECONDS", "10"))
 HEARTBEAT_POLL_SECONDS = int(_env.get("HEARTBEAT_POLL_SECONDS", _env.get("V2_HEARTBEAT_POLL_SECONDS", "30")))
 HEARTBEAT_ITER_STEP = int(_env.get("HEARTBEAT_ITER_STEP", _env.get("V2_HEARTBEAT_ITER_STEP", "100")))
-ZIP_FRAME_COUNT = int(_env.get("ZIP_FRAME_COUNT", "12"))
+ZIP_FRAME_COUNT = int(_env.get("ZIP_FRAME_COUNT", "40"))
+ZIP_IMAGE_MAX_WIDTH = int(_env.get("ZIP_IMAGE_MAX_WIDTH", "960"))
+ZIP_IMAGE_QUALITY = int(_env.get("ZIP_IMAGE_QUALITY", "78"))
 CACHE_SCHEMA_VERSION = 3
 
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", LOG_SUBDIR)
@@ -168,11 +170,17 @@ def _resolve_conda_activate_bat() -> str | None:
     conda_exe = os.environ.get("CONDA_EXE", "")
     conda_dir = os.path.dirname(conda_exe) if conda_exe else ""
     conda_root = os.path.dirname(conda_dir) if conda_dir else ""
+    python_env_dir = os.path.dirname(sys.executable) if sys.executable else ""
+    python_env_root = os.path.dirname(python_env_dir) if python_env_dir else ""
+    python_conda_root = os.path.dirname(python_env_root) if python_env_root else ""
     candidates = [
         _env.get("CONDA_ACTIVATE_BAT"),
         os.path.join(conda_dir, "activate.bat") if conda_dir else None,
         os.path.join(conda_root, "condabin", "activate.bat") if conda_root else None,
         os.path.join(conda_root, "condabin", "conda.bat") if conda_root else None,
+        os.path.join(python_conda_root, "Scripts", "activate.bat") if python_conda_root else None,
+        os.path.join(python_conda_root, "condabin", "activate.bat") if python_conda_root else None,
+        os.path.join(python_conda_root, "condabin", "conda.bat") if python_conda_root else None,
     ]
     for raw_candidate in candidates:
         candidate = _normalize_windows_path(raw_candidate)
@@ -182,6 +190,17 @@ def _resolve_conda_activate_bat() -> str | None:
 
 
 CONDA_ACTIVATE_BAT = _resolve_conda_activate_bat()
+
+
+def _running_in_target_conda_env() -> bool:
+    active_env = os.environ.get("CONDA_DEFAULT_ENV", "")
+    if active_env.lower() == CONDA_ENV_NAME.lower():
+        return True
+    prefix_name = os.path.basename(sys.prefix.rstrip("\\/")) if sys.prefix else ""
+    if prefix_name.lower() == CONDA_ENV_NAME.lower():
+        return True
+    executable_dir = os.path.basename(os.path.dirname(sys.executable).rstrip("\\/")) if sys.executable else ""
+    return executable_dir.lower() == CONDA_ENV_NAME.lower()
 
 
 def _ensure_logs_dir() -> None:
@@ -340,13 +359,40 @@ def _read_live_pid_lock(pid_file: str) -> int:
     return 0
 
 
+def _read_busy_lock_owner() -> tuple[str, int, str]:
+    try:
+        with open(BUSY_LOCK_FILE, "r", encoding="utf-8") as file:
+            lines = [line.strip() for line in file.readlines()]
+    except Exception:
+        return "", 0, ""
+    label = lines[0] if len(lines) > 0 else ""
+    try:
+        pid = int(lines[1]) if len(lines) > 1 else 0
+    except (TypeError, ValueError):
+        pid = 0
+    created_at = lines[2] if len(lines) > 2 else ""
+    return label, pid, created_at
+
+
 @contextlib.contextmanager
 def busy_lock(label: str):
     _ensure_logs_dir()
-    try:
-        fd = os.open(BUSY_LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        raise RuntimeError("Another operation is already running.")
+    while True:
+        try:
+            fd = os.open(BUSY_LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            owner_label, owner_pid, owner_created_at = _read_busy_lock_owner()
+            if owner_pid > 0 and psutil.pid_exists(owner_pid):
+                raise RuntimeError("Another operation is already running.")
+            try:
+                os.remove(BUSY_LOCK_FILE)
+            except OSError:
+                raise RuntimeError("Another operation is already running.")
+            write_log(
+                f"Removed stale ops lock label={owner_label or 'unknown'} pid={owner_pid or 0} created_at={owner_created_at or 'unknown'}",
+                SUPERVISOR_LOG,
+            )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             file.write(f"{label}\n{os.getpid()}\n{_now()}\n")
@@ -785,8 +831,10 @@ def _hidden_startupinfo():
     return startupinfo
 
 
-def _wrap_conda_command(command: str) -> str:
+def _wrap_conda_command(command: str, force_activate: bool = False) -> str:
     if sys.platform != "win32":
+        return command
+    if _running_in_target_conda_env() and not force_activate:
         return command
     if CONDA_ACTIVATE_BAT:
         activate_cmd = f'"{CONDA_ACTIVATE_BAT}"'
@@ -794,6 +842,12 @@ def _wrap_conda_command(command: str) -> str:
             return f"call {activate_cmd} activate {CONDA_ENV_NAME} && {command}"
         return f"call {activate_cmd} && conda activate {CONDA_ENV_NAME} && {command}"
     return f"conda activate {CONDA_ENV_NAME} && {command}"
+
+
+def _resolve_python_command() -> str:
+    if sys.executable:
+        return f'"{sys.executable}"'
+    return "python"
 
 
 def _write_temp_cmd_script(command: str, prefix: str) -> str:
@@ -983,10 +1037,13 @@ def build_heartbeat_command(iter_step: int | None = None, poll: int | None = Non
     heartbeat_script = HEARTBEAT_SCRIPT
     iter_step = int(iter_step or HEARTBEAT_ITER_STEP)
     poll = int(poll or HEARTBEAT_POLL_SECONDS)
+    python_cmd = 'python'
+    if _running_in_target_conda_env() and sys.executable:
+        python_cmd = f'"{sys.executable}"'
     command = (
         f'cd /d "{PROJECT_ROOT}" && '
         'set PYTHONIOENCODING=utf-8 && '
-        f'python "{heartbeat_script}" --iter_step={iter_step} --poll={poll}'
+        f'{python_cmd} "{heartbeat_script}" --iter_step={iter_step} --poll={poll}'
     )
     return _wrap_conda_command(command)
 
@@ -1055,7 +1112,7 @@ def build_train_command(resume_run_dir: str | None = None, checkpoint_path: str 
             f"--load_run={os.path.basename(resume_run_dir)}",
             f"--checkpoint={os.path.basename(checkpoint_path)}",
         ])
-    return _wrap_conda_command(" && ".join(parts[:2]) + " && " + " ".join(parts[2:]))
+    return _wrap_conda_command(" && ".join(parts[:2]) + " && " + " ".join(parts[2:]), force_activate=True)
 
 
 def launch_training(log_path: str) -> dict:
@@ -1218,6 +1275,39 @@ def read_tfevents(run_dir: str, retries: int = 3):
             if attempt < retries - 1:
                 time.sleep(2)
     return None
+
+
+def _reward_steps_from_data(data: dict) -> list[int]:
+    reward_vals = data.get("Train/mean_reward", []) if isinstance(data, dict) else []
+    return [int(step) for step, _ in reward_vals]
+
+
+def resolve_metrics_source_run_dir(run_dir: str, iteration: int, visited: set[str] | None = None) -> str:
+    candidate = os.path.abspath(run_dir)
+    seen = visited or set()
+    if candidate in seen or not os.path.isdir(candidate):
+        return candidate
+    seen.add(candidate)
+
+    agent_cfg = _load_yaml_config(os.path.join(candidate, "params", "agent.yaml"))
+    load_run = str(agent_cfg.get("load_run") or "").strip()
+    load_checkpoint = str(agent_cfg.get("load_checkpoint") or "").strip()
+    load_checkpoint_iter = get_checkpoint_iter(load_checkpoint) if load_checkpoint else 0
+    if agent_cfg.get("resume") and load_run and load_checkpoint_iter and int(iteration) <= load_checkpoint_iter:
+        source_dir = os.path.join(LOG_BASE, os.path.basename(load_run))
+        if os.path.isdir(source_dir):
+            return resolve_metrics_source_run_dir(source_dir, iteration, seen)
+
+    data = read_tfevents(candidate) or {}
+    steps = _reward_steps_from_data(data)
+    if steps and min(steps) <= int(iteration) <= max(steps):
+        return candidate
+
+    if agent_cfg.get("resume") and load_run:
+        source_dir = os.path.join(LOG_BASE, os.path.basename(load_run))
+        if os.path.isdir(source_dir):
+            return resolve_metrics_source_run_dir(source_dir, iteration, seen)
+    return candidate
 
 
 def get_heartbeat_history_path(run_dir: str) -> str:
@@ -1501,6 +1591,10 @@ def _build_heartbeat_summary(current_iter: int, rewards: dict, survival_pct: flo
 
 
 def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
+    return build_supervisor_kpi_snapshot_for_iteration(run_dir, None)
+
+
+def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | None) -> dict:
     result = {
         "iter": 0,
         "reward": 0.0,
@@ -1530,13 +1624,24 @@ def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
     ep_len_vals = data.get("Train/mean_episode_length", [])
     if not reward_vals:
         return result
-    current_iter = int(reward_vals[-1][0])
-    current_reward = float(reward_vals[-1][1])
-    reward_window = reward_vals[-10:] if len(reward_vals) >= 10 else reward_vals
+    if iteration is None:
+        current_iter = int(reward_vals[-1][0])
+        current_reward = float(reward_vals[-1][1])
+        reward_window = reward_vals[-10:] if len(reward_vals) >= 10 else reward_vals
+        current_ep_len = float(ep_len_vals[-1][1]) if ep_len_vals else 0.0
+        timeout = float(_latest_scalar(data, "Episode_Termination/time_out") or 0.0)
+        bad_orient = float(_latest_scalar(data, "Episode_Termination/bad_orientation") or 0.0)
+    else:
+        current_iter = int(iteration)
+        reward_candidates = [(step, value) for step, value in reward_vals if int(step) <= current_iter]
+        if not reward_candidates:
+            return result
+        current_reward = float(reward_candidates[-1][1])
+        reward_window = reward_candidates[-10:] if len(reward_candidates) >= 10 else reward_candidates
+        current_ep_len = float(_scalar_value_at_or_before(data, "Train/mean_episode_length", current_iter) or 0.0)
+        timeout = float(_scalar_value_at_or_before(data, "Episode_Termination/time_out", current_iter) or 0.0)
+        bad_orient = float(_scalar_value_at_or_before(data, "Episode_Termination/bad_orientation", current_iter) or 0.0)
     reward_avg10 = sum(v for _, v in reward_window) / len(reward_window) if reward_window else current_reward
-    current_ep_len = float(ep_len_vals[-1][1]) if ep_len_vals else 0.0
-    timeout = float(_latest_scalar(data, "Episode_Termination/time_out") or 0.0)
-    bad_orient = float(_latest_scalar(data, "Episode_Termination/bad_orientation") or 0.0)
     total_term = timeout + bad_orient
     timeout_pct = (timeout / total_term * 100.0) if total_term > 0 else 0.0
     fall_pct = (bad_orient / total_term * 100.0) if total_term > 0 else 0.0
@@ -1544,14 +1649,20 @@ def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
     if timeout > 0.95 and current_ep_len > 1:
         max_ep = current_ep_len
     elif ep_len_vals:
-        recent_max_ep = max(v for _, v in ep_len_vals[-50:])
+        eligible_ep = [(step, value) for step, value in ep_len_vals if iteration is None or int(step) <= current_iter]
+        recent_max_ep = max(v for _, v in eligible_ep[-50:]) if eligible_ep else 0.0
         if recent_max_ep > max_ep * 0.6:
             max_ep = recent_max_ep
     survival_pct = (current_ep_len / max_ep) * 100 if max_ep > 0 else 0.0
     rewards = {}
     for tag, vals in data.items():
         if tag.startswith("Episode_Reward/") and vals:
-            rewards[tag.replace("Episode_Reward/", "")] = float(vals[-1][1])
+            if iteration is None:
+                rewards[tag.replace("Episode_Reward/", "")] = float(vals[-1][1])
+            else:
+                value = _scalar_value_at_or_before(data, tag, current_iter)
+                if value is not None:
+                    rewards[tag.replace("Episode_Reward/", "")] = float(value)
     gait_grade, gait_score, _ = gait_quality_score(rewards)
     stab_grade, stab_score, _details, stab_valid = motion_stability_score(rewards, gait_score)
     posture_grade, posture_score, _ = posture_style_score(rewards)
@@ -1811,19 +1922,34 @@ def _get_repo_git_commit() -> str:
     return ""
 
 
-def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[float]) -> dict:
+def _coerce_reward_window_values(reward_window: list) -> list[float]:
+    values: list[float] = []
+    for item in reward_window:
+        if isinstance(item, tuple):
+            if len(item) < 2:
+                continue
+            item = item[1]
+        value = _safe_float(item)
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[float], kpi_snapshot: dict | None = None) -> dict:
     run_id = os.path.basename(run_dir)
     iteration = int(record.get("iteration") or 0)
     timestamp_text = str(record.get("timestamp") or _now())
     rewards = {tag.replace("Episode_Reward/", ""): _scalar_value_at_or_before(data, tag, iteration) for tag in data if tag.startswith("Episode_Reward/")}
-    kpi = build_supervisor_kpi_snapshot(run_dir)
+    kpi = kpi_snapshot or build_supervisor_kpi_snapshot(run_dir)
     timeout_pct = _normalize_pct(_scalar_value_at_or_before(data, "Episode_Termination/time_out", iteration))
     fall_pct = _normalize_pct(_scalar_value_at_or_before(data, "Episode_Termination/bad_orientation", iteration))
+    reward_window_values = _coerce_reward_window_values(reward_window)
     mean_reward = _scalar_value_at_or_before(data, "Train/mean_reward", iteration) or _safe_float(record.get("mean_reward"))
     mean_ep_len = _scalar_value_at_or_before(data, "Train/mean_episode_length", iteration) or _safe_float(record.get("mean_episode_length"))
     if mean_reward is not None:
         reward_window.append(mean_reward)
-    mean_reward_avg10 = round(sum(reward_window[-10:]) / len(reward_window[-10:]), 6) if reward_window else None
+        reward_window_values.append(mean_reward)
+    mean_reward_avg10 = round(sum(reward_window_values[-10:]) / len(reward_window_values[-10:]), 6) if reward_window_values else None
     survival_pct_derived = _normalize_pct(record.get("kpi_snapshot", {}).get("survival_pct") or record.get("survival_pct") or kpi.get("survival_pct"))
 
     posture_components = [
@@ -1988,6 +2114,60 @@ def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[f
         }
     )
     return row
+
+
+def build_clip_metrics_row(run_dir: str, checkpoint_path: str) -> tuple[dict | None, str | None]:
+    iteration = get_checkpoint_iter(checkpoint_path)
+    metrics_run_dir = resolve_metrics_source_run_dir(run_dir, iteration)
+    data = read_tfevents(metrics_run_dir) or {}
+    if not data:
+        return None, metrics_run_dir
+    record = {
+        "iteration": iteration,
+        "timestamp": _now(),
+        "report_kind": "clip_report",
+        "cycle_num": iteration,
+    }
+    reward_vals = data.get("Train/mean_reward", [])
+    reward_window = [value for step, value in reward_vals if int(step) <= iteration]
+    kpi_snapshot = build_supervisor_kpi_snapshot_for_iteration(metrics_run_dir, iteration)
+    row = _build_v23_row(record, metrics_run_dir, data, reward_window, kpi_snapshot=kpi_snapshot)
+    if row is not None:
+        row["artifact_run_id"] = os.path.basename(run_dir)
+        row["metrics_source_run"] = os.path.basename(metrics_run_dir)
+    return row, metrics_run_dir
+
+
+def export_clip_metrics_row_workbook(out_path: str, row: dict, metrics_run_dir: str, checkpoint_path: str, log_path: str) -> str | None:
+    meta = {
+        "run_id": os.path.basename(metrics_run_dir),
+        "train_version": V23_TRAIN_VERSION,
+        "generated_at": _now(),
+        "report_kind": "clip_report",
+        "checkpoint": os.path.basename(checkpoint_path),
+        "iteration": row.get("iter"),
+        "note": "Single-source metrics row for clip bundle",
+    }
+    events = [{"timestamp": _now(), "event_type": "clip_report", "detail": f"iter={row.get('iter')}"}]
+    review_rows = [{
+        "run_id": row.get("run_id"),
+        "iter": row.get("iter"),
+        "mean_reward": row.get("mean_reward"),
+        "survival_pct": row.get("survival_pct"),
+        "vf_loss": row.get("vf_loss"),
+        "gait_score_canonical": row.get("gait_score_canonical"),
+        "stability_score_canonical": row.get("stability_score_canonical"),
+        "posture_style_score": row.get("posture_style_score"),
+        "foot_jitter_score": row.get("foot_jitter_score"),
+        "front_rear_balance_score": row.get("front_rear_balance_score"),
+        "hard_safety_gate_pass": row.get("hard_safety_gate_pass"),
+        "style_shortlist_candidate": row.get("style_shortlist_candidate"),
+        "best_reward_candidate": row.get("best_reward_candidate"),
+        "best_style_candidate": row.get("best_style_candidate"),
+        "manual_front_review_rank": row.get("manual_front_review_rank"),
+        "manual_notes": row.get("manual_notes"),
+    }]
+    return export_v23_training_workbook(out_path, [row], meta, events, review_rows, log_path)
 
 
 def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], list[dict]]:
@@ -2838,7 +3018,7 @@ inp.close()
             file.write(py_code)
         write_log(f"Re-encoding video to {target_fps}fps: {os.path.basename(src_path)}", log_path)
         proc = _run_hidden_cmd(
-            _wrap_conda_command(f'set PYTHONIOENCODING=utf-8 && python "{tmp_py}"'),
+            _wrap_conda_command(f'set PYTHONIOENCODING=utf-8 && {_resolve_python_command()} "{tmp_py}"'),
             capture_output=True,
             text=True,
             timeout=300,
@@ -3176,6 +3356,54 @@ def export_heartbeat_history_xlsx(run_dir: str, out_path: str, log_path: str) ->
     return out_path
 
 
+def extract_video_frames(video_path: str, out_dir: str, prefix: str, frame_count: int, log_path: str) -> list[str]:
+    try:
+        import av
+    except ImportError:
+        write_log("Frame extraction skipped: PyAV not installed", log_path)
+        return []
+
+    os.makedirs(out_dir, exist_ok=True)
+    container = av.open(video_path)
+    try:
+        stream = container.streams.video[0]
+        total_frames = int(stream.frames or 0)
+
+        if total_frames <= 0:
+            total_frames = sum(1 for _ in container.decode(video=0))
+            container.close()
+            container = av.open(video_path)
+
+        if total_frames <= 0:
+            return []
+
+        sample_count = max(1, min(frame_count, total_frames))
+        if sample_count == 1:
+            selected_indices = [0]
+        else:
+            selected_indices = sorted({
+                round(index * (total_frames - 1) / (sample_count - 1)) for index in range(sample_count)
+            })
+
+        selected_set = set(selected_indices)
+        saved_paths: list[str] = []
+        for frame_index, frame in enumerate(container.decode(video=0)):
+            if frame_index not in selected_set:
+                continue
+            image = frame.to_image().convert("RGB")
+            if ZIP_IMAGE_MAX_WIDTH > 0 and image.width > ZIP_IMAGE_MAX_WIDTH:
+                scale = ZIP_IMAGE_MAX_WIDTH / image.width
+                image = image.resize((ZIP_IMAGE_MAX_WIDTH, max(1, int(image.height * scale))))
+            frame_path = os.path.join(out_dir, f"{prefix}_{frame_index:04d}.jpg")
+            image.save(frame_path, format="JPEG", quality=ZIP_IMAGE_QUALITY, optimize=True)
+            saved_paths.append(frame_path)
+            if len(saved_paths) >= len(selected_indices):
+                break
+        return saved_paths
+    finally:
+        container.close()
+
+
 def _build_play_command(
     checkpoint_path: str,
     play_script: str,
@@ -3194,7 +3422,7 @@ def _build_play_command(
     )
     if headless:
         command += " --headless"
-    return _wrap_conda_command(command)
+    return _wrap_conda_command(command, force_activate=True)
 
 
 def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int, log_path: str, headless: bool) -> dict[str, str]:
@@ -3316,13 +3544,16 @@ def select_representative_video(captured_videos: dict[str, str]) -> str | None:
     return next(iter(captured_videos.values()), None)
 
 
-def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, video_path: str | None) -> str:
+def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, video_path: str | None, iteration: int | None = None) -> str:
     del checkpoint_path, video_path
     if not os.path.isfile(ANALYZE_SCRIPT):
         return ""
     try:
+        command = [sys.executable, ANALYZE_SCRIPT, "--run_dir", run_dir, "--clip_num", str(clip_num)]
+        if iteration is not None:
+            command.extend(["--iteration", str(int(iteration))])
         proc = subprocess.run(
-            [sys.executable, ANALYZE_SCRIPT, "--run_dir", run_dir, "--clip_num", str(clip_num)],
+            command,
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -3340,51 +3571,105 @@ def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, vid
         return ""
 
 
-def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, captured_videos: dict[str, str], kpi_snapshot: dict, analysis_text: str) -> dict | None:
+def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, captured_videos: dict[str, str], kpi_snapshot: dict, analysis_text: str, metrics_row: dict | None = None, metrics_run_dir: str | None = None) -> dict | None:
     if not captured_videos:
         return None
     iter_num = get_checkpoint_iter(checkpoint_path)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     artifact_dir = os.path.join(run_dir, "artifacts")
     os.makedirs(artifact_dir, exist_ok=True)
+    artifact_root = os.path.join(artifact_dir, f"clip_{clip_num}_iter{iter_num}_{timestamp}")
+    metrics_root = os.path.join(artifact_root, "metrics")
+    frames_root = os.path.join(artifact_root, "frames")
+    os.makedirs(metrics_root, exist_ok=True)
+    os.makedirs(frames_root, exist_ok=True)
     zip_path = os.path.join(artifact_dir, f"clip_{clip_num}_iter{iter_num}_{timestamp}.zip")
     heartbeat_xlsx_path = export_heartbeat_history_xlsx(
         run_dir,
-        os.path.join(artifact_dir, f"clip_{clip_num}_iter{iter_num}_{timestamp}_heartbeat_history.xlsx"),
+        os.path.join(metrics_root, "heartbeat_history.xlsx"),
         SUPERVISOR_LOG,
     )
     v23_paths = refresh_v23_training_logs(run_dir, SUPERVISOR_LOG)
     v23_run_log_path = v23_paths.get("run_log_path") if v23_paths else None
+    v23_master_log_path = v23_paths.get("master_log_path") if v23_paths else None
+    v23_checkpoint_review_path = v23_paths.get("checkpoint_review_path") if v23_paths else None
+    clip_metrics_workbook_path = None
+    if metrics_row and metrics_run_dir:
+        clip_metrics_workbook_path = export_clip_metrics_row_workbook(
+            os.path.join(metrics_root, f"clip_metrics_iter{iter_num}.xlsx"),
+            metrics_row,
+            metrics_run_dir,
+            checkpoint_path,
+            SUPERVISOR_LOG,
+        )
     if REPORT_REQUIRE_XLSX and (not heartbeat_xlsx_path or not os.path.isfile(heartbeat_xlsx_path)):
         raise RuntimeError("Heartbeat XLSX export failed.")
+    frame_counts = {}
+    for spec in get_video_capture_specs(PLAY_ENVS):
+        video_path = captured_videos.get(spec["key"])
+        if not video_path or not os.path.isfile(video_path):
+            continue
+        saved_frames = extract_video_frames(
+            video_path,
+            os.path.join(frames_root, spec["key"]),
+            spec["key"],
+            ZIP_FRAME_COUNT,
+            SUPERVISOR_LOG,
+        )
+        frame_counts[spec["key"]] = len(saved_frames)
     manifest = {
         "clip_num": clip_num,
         "iteration": iter_num,
         "checkpoint": os.path.basename(checkpoint_path),
         "run_dir": os.path.basename(run_dir),
+        "zip_frame_count": ZIP_FRAME_COUNT,
         "videos": {key: os.path.basename(path) for key, path in captured_videos.items()},
+        "frames": frame_counts,
         "heartbeat_history_xlsx": "heartbeat_history.xlsx" if heartbeat_xlsx_path and os.path.isfile(heartbeat_xlsx_path) else None,
         "v23_run_log_xlsx": os.path.basename(v23_run_log_path) if v23_run_log_path and os.path.isfile(v23_run_log_path) else None,
+        "v23_master_log_xlsx": os.path.basename(v23_master_log_path) if v23_master_log_path and os.path.isfile(v23_master_log_path) else None,
+        "v23_checkpoint_review_xlsx": os.path.basename(v23_checkpoint_review_path) if v23_checkpoint_review_path and os.path.isfile(v23_checkpoint_review_path) else None,
+        "clip_metrics_row_xlsx": os.path.basename(clip_metrics_workbook_path) if clip_metrics_workbook_path and os.path.isfile(clip_metrics_workbook_path) else None,
+        "metrics_source_run": os.path.basename(metrics_run_dir) if metrics_run_dir else os.path.basename(run_dir),
         "kpi_snapshot": kpi_snapshot,
         "analysis": parse_analysis_grade(analysis_text),
     }
+    if metrics_row:
+        manifest["metrics_row"] = metrics_row
     summary_text = (
         f"clip_num={clip_num}\n"
         f"iteration={iter_num}\n"
         f"checkpoint={os.path.basename(checkpoint_path)}\n"
         f"run_dir={os.path.basename(run_dir)}\n"
+        f"metrics_source_run={os.path.basename(metrics_run_dir) if metrics_run_dir else os.path.basename(run_dir)}\n"
         f"verdict={kpi_snapshot['verdict']}\n"
         f"kpi_line={kpi_snapshot['kpi_line']}\n"
         f"reason={kpi_snapshot['reason']}\n"
     )
+    summary_path = os.path.join(metrics_root, "summary.txt")
+    with open(summary_path, "w", encoding="utf-8") as file:
+        file.write(summary_text)
+    analysis_path = os.path.join(metrics_root, "analysis_report.txt")
+    with open(analysis_path, "w", encoding="utf-8") as file:
+        file.write(analysis_text.strip() + "\n" if analysis_text.strip() else "Analysis output unavailable\n")
+    manifest_path = os.path.join(metrics_root, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as file:
+        json.dump(manifest, file, indent=2, ensure_ascii=False)
+    if metrics_row:
+        clip_metrics_json_path = os.path.join(metrics_root, f"clip_metrics_iter{iter_num}.json")
+        with open(clip_metrics_json_path, "w", encoding="utf-8") as file:
+            json.dump(metrics_row, file, indent=2, ensure_ascii=False)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("summary.txt", summary_text)
-        archive.writestr("analysis_report.txt", analysis_text.strip() + "\n" if analysis_text.strip() else "Analysis output unavailable\n")
-        archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
-        if heartbeat_xlsx_path and os.path.isfile(heartbeat_xlsx_path):
-            archive.write(heartbeat_xlsx_path, "metrics/heartbeat_history.xlsx")
+        for root, _, files in os.walk(artifact_root):
+            for name in files:
+                file_path = os.path.join(root, name)
+                archive.write(file_path, os.path.relpath(file_path, artifact_root))
         if v23_run_log_path and os.path.isfile(v23_run_log_path):
             archive.write(v23_run_log_path, f"metrics/{os.path.basename(v23_run_log_path)}")
+        if v23_master_log_path and os.path.isfile(v23_master_log_path):
+            archive.write(v23_master_log_path, f"metrics/{os.path.basename(v23_master_log_path)}")
+        if v23_checkpoint_review_path and os.path.isfile(v23_checkpoint_review_path):
+            archive.write(v23_checkpoint_review_path, f"metrics/{os.path.basename(v23_checkpoint_review_path)}")
         for key, path in captured_videos.items():
             if path and os.path.isfile(path):
                 archive.write(path, f"videos/{key}_{os.path.basename(path)}")
@@ -3464,9 +3749,20 @@ def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bo
     iter_num = get_checkpoint_iter(checkpoint_path)
     clip_num = max(1, iter_num)
     write_log(f"Generating report bundle for iter {iter_num}", log_path)
-    analysis_text = run_detailed_analysis(run_dir, checkpoint_path, clip_num, representative_video)
-    kpi_snapshot = build_supervisor_kpi_snapshot(run_dir)
-    artifact_paths = create_clip_artifact_zip(run_dir, checkpoint_path, clip_num, videos, kpi_snapshot, analysis_text)
+    metrics_row, metrics_run_dir = build_clip_metrics_row(run_dir, checkpoint_path)
+    effective_metrics_run_dir = metrics_run_dir or run_dir
+    analysis_text = run_detailed_analysis(effective_metrics_run_dir, checkpoint_path, clip_num, representative_video, iteration=iter_num)
+    kpi_snapshot = build_supervisor_kpi_snapshot_for_iteration(effective_metrics_run_dir, iter_num)
+    artifact_paths = create_clip_artifact_zip(
+        run_dir,
+        checkpoint_path,
+        clip_num,
+        videos,
+        kpi_snapshot,
+        analysis_text,
+        metrics_row=metrics_row,
+        metrics_run_dir=effective_metrics_run_dir,
+    )
     zip_path = artifact_paths.get("zip_path") if artifact_paths else None
     heartbeat_xlsx_path = artifact_paths.get("xlsx_path") if artifact_paths else None
     if not zip_path or not os.path.isfile(zip_path):
@@ -3486,6 +3782,8 @@ def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bo
         "videos": videos,
         "analysis_text": analysis_text,
         "kpi_snapshot": kpi_snapshot,
+        "metrics_row": metrics_row,
+        "metrics_run_dir": effective_metrics_run_dir,
     }
 
 

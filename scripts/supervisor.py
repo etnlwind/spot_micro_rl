@@ -11,6 +11,7 @@ SCRIPT_DIR = os.path.dirname(SCRIPT_PATH)
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 _BOOTSTRAP_ENV_VAR = "SPOT_MICRO_SUPERVISOR_BOOTSTRAPPED"
+_BACKGROUND_LAUNCH_ENV_VAR = "SPOT_MICRO_SUPERVISOR_BACKGROUND"
 
 
 def _load_bootstrap_env(path: str) -> dict[str, str]:
@@ -345,7 +346,55 @@ def handle_command(command: str, checkpoint_iter: int | None = None) -> None:
 
 
 def _print_local(message: str) -> None:
-    print(message, flush=True)
+    try:
+        print(message, flush=True)
+    except OSError:
+        common.write_log(f"Local console output suppressed: {message}", common.SUPERVISOR_LOG)
+
+
+def _build_listen_command(args: argparse.Namespace) -> list[str]:
+    return [
+        sys.executable,
+        SCRIPT_PATH,
+        "--listen",
+        "--poll",
+        str(args.poll),
+        "--iter-step",
+        str(args.iter_step),
+        "--heartbeat-poll",
+        str(args.heartbeat_poll),
+    ]
+
+
+def _run_supervisor_background(args: argparse.Namespace) -> int:
+    if sys.platform != "win32":
+        raise RuntimeError("background supervisor launch is only supported on Windows")
+    live_pid = common._read_live_pid_lock(common.SUPERVISOR_PID_FILE)
+    if live_pid:
+        _print_local(f"supervisor already running (pid {live_pid})")
+        return 0
+    child_env = dict(os.environ)
+    child_env.pop(_BACKGROUND_LAUNCH_ENV_VAR, None)
+    creationflags = 0
+    for flag_name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"):
+        creationflags |= int(getattr(subprocess, flag_name, 0) or 0)
+    subprocess.Popen(
+        _build_listen_command(args),
+        cwd=PROJECT_ROOT,
+        env=child_env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=creationflags,
+    )
+    time.sleep(3)
+    live_pid = common._read_live_pid_lock(common.SUPERVISOR_PID_FILE)
+    if live_pid:
+        _print_local(f"supervisor launched in background (pid {live_pid})")
+        _print_local("use supervisor.cmd --status to inspect or supervisor.cmd --shutdown to stop")
+        return 0
+    raise RuntimeError("supervisor background launch did not acquire the supervisor lock")
 
 
 def _require_context() -> tuple[str, str]:
@@ -601,6 +650,7 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "examples:\n"
             "  .\\supervisor.cmd --listen\n"
+            "  .\\supervisor.cmd --listen --foreground\n"
             "  .\\supervisor.cmd --status\n"
             "  .\\supervisor.cmd --start\n"
             "  .\\supervisor.cmd --report\n"
@@ -609,7 +659,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     action_group = parser.add_mutually_exclusive_group()
-    action_group.add_argument("--listen", dest="action", action="store_const", const="listen", help="Telegram supervisor loop 실행")
+    action_group.add_argument("--listen", dest="action", action="store_const", const="listen", help="Telegram supervisor loop 실행 (supervisor.cmd에서는 기본 background 상주 실행)")
     action_group.add_argument("--start", dest="action", action="store_const", const="start", help="훈련 시작 또는 latest checkpoint 재개")
     action_group.add_argument("--stop", dest="action", action="store_const", const="stop", help="현재 훈련 중단")
     action_group.add_argument("--status", dest="action", action="store_const", const="status", help="현재 상태 출력")
@@ -641,6 +691,8 @@ def main() -> None:
         parser.print_help()
         return
     if args.action == "listen":
+        if os.environ.get(_BACKGROUND_LAUNCH_ENV_VAR) == "1":
+            raise SystemExit(_run_supervisor_background(args))
         raise SystemExit(_run_supervisor_loop(args))
     try:
         raise SystemExit(_run_local_action(args.action, args))
