@@ -117,6 +117,7 @@ TRAINING_LOG = os.path.join(PROJECT_ROOT, "logs", "training_launch.log")
 ANALYZE_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "utils", "analyze_training.py")
 TG_OFFSET_FILE = os.path.join(PROJECT_ROOT, "logs", "telegram_offset.json")
 HEARTBEAT_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "heartbeat.py")
+SUPERVISOR_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "supervisor.py")
 
 TELEGRAM_ALLOWED_USER_IDS = frozenset(
     token.strip()
@@ -841,26 +842,73 @@ def _looks_like_heartbeat_command(name: str, cmdline: str) -> bool:
     )
 
 
-def list_heartbeat_processes() -> list[dict]:
+def _looks_like_supervisor_command(name: str, cmdline: str) -> bool:
+    cmdline_l = cmdline.lower()
+    return "scripts\\supervisor.py" in cmdline_l or "scripts/supervisor.py" in cmdline_l
+
+
+def _list_matching_processes(match_fn) -> list[dict]:
     processes = []
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
         try:
             cmdline = " ".join(proc.info["cmdline"] or [])
             if not cmdline:
                 continue
             name = proc.info.get("name") or ""
-            if _looks_like_heartbeat_command(name, cmdline):
-                processes.append({"pid": proc.info["pid"], "name": name, "cmdline": cmdline})
+            if match_fn(name, cmdline):
+                processes.append(
+                    {
+                        "pid": proc.info["pid"],
+                        "name": name,
+                        "cmdline": cmdline,
+                        "create_time": float(proc.info.get("create_time") or 0.0),
+                    }
+                )
         except (psutil.Error, PermissionError, OSError):
             pass
     deduped = {entry["pid"]: entry for entry in processes}
     return sorted(deduped.values(), key=lambda item: item["pid"])
 
 
+def list_heartbeat_processes() -> list[dict]:
+    return _list_matching_processes(_looks_like_heartbeat_command)
+
+
+def list_supervisor_processes() -> list[dict]:
+    return _list_matching_processes(_looks_like_supervisor_command)
+
+
 def is_heartbeat_running() -> bool:
     if _read_live_pid_lock(HEARTBEAT_PID_FILE):
         return True
     return bool(list_heartbeat_processes())
+
+
+def _select_process_entry(processes: list[dict], pid_file: str | None = None) -> dict | None:
+    preferred_pid = _read_live_pid_lock(pid_file) if pid_file else 0
+    if preferred_pid:
+        for entry in processes:
+            if int(entry.get("pid") or 0) == preferred_pid:
+                return entry
+    if not processes:
+        return None
+    return max(processes, key=lambda item: (float(item.get("create_time") or 0.0), int(item.get("pid") or 0)))
+
+
+def _process_status_version_text(processes: list[dict], watched_files: list[str], pid_file: str | None = None) -> str:
+    repo_version = (_get_repo_git_commit() or "unknown")[:7]
+    active_entry = _select_process_entry(processes, pid_file=pid_file)
+    if not active_entry:
+        return f"{repo_version} | stopped"
+    latest_file_mtime = 0.0
+    for path in watched_files:
+        try:
+            latest_file_mtime = max(latest_file_mtime, os.path.getmtime(path))
+        except OSError:
+            continue
+    started_at = float(active_entry.get("create_time") or 0.0)
+    freshness = "latest" if started_at >= latest_file_mtime else "stale"
+    return f"{repo_version} | {freshness} | pid {int(active_entry.get('pid') or 0)}"
 
 
 def build_heartbeat_command(iter_step: int | None = None, poll: int | None = None) -> str:
@@ -1567,6 +1615,16 @@ def _build_status_snapshot() -> dict:
         last_heartbeat_text = f"stopped | report {last_heartbeat_report_text}"
     else:
         last_heartbeat_text = "stopped"
+    supervisor_version_text = _process_status_version_text(
+        list_supervisor_processes(),
+        [SUPERVISOR_SCRIPT, __file__],
+        pid_file=SUPERVISOR_PID_FILE,
+    )
+    heartbeat_version_text = _process_status_version_text(
+        list_heartbeat_processes(),
+        [HEARTBEAT_SCRIPT, __file__],
+        pid_file=HEARTBEAT_PID_FILE,
+    )
     return {
         "state": state,
         "run_dir": run_dir,
@@ -1583,6 +1641,8 @@ def _build_status_snapshot() -> dict:
         "last_heartbeat_text": last_heartbeat_text,
         "last_report_zip_name": os.path.basename(last_report_zip) if last_report_zip else "N/A",
         "available_views": available_views,
+        "supervisor_version_text": supervisor_version_text,
+        "heartbeat_version_text": heartbeat_version_text,
     }
 
 
@@ -3056,6 +3116,8 @@ def build_status_text() -> str:
         f"• mode: {_status_light(mode, {'idle': '⚪', 'training': '🟡', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}",
         f"• training: {_status_light('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
         f"• heartbeat: {_status_light('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
+        f"• supervisor_version: {snapshot['supervisor_version_text']}",
+        f"• heartbeat_version: {snapshot['heartbeat_version_text']}",
         f"• run: {os.path.basename(run_dir) if run_dir else 'N/A'}",
         f"• checkpoint: {os.path.basename(checkpoint) if checkpoint else 'N/A'}",
         f"• iter: {iter_num:,}",
@@ -3092,6 +3154,8 @@ def format_status_html() -> str:
         f"• mode: <code>{_status_light_html(mode, {'idle': '⚪', 'training': '🟡', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}</code>",
         f"• training: <code>{_status_light_html('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
         f"• heartbeat: <code>{_status_light_html('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
+        f"• supervisor_version: <code>{html.escape(snapshot['supervisor_version_text'])}</code>",
+        f"• heartbeat_version: <code>{html.escape(snapshot['heartbeat_version_text'])}</code>",
         f"• run: <code>{html.escape(os.path.basename(run_dir) if run_dir else 'N/A')}</code>",
         f"• checkpoint: <code>{html.escape(os.path.basename(checkpoint) if checkpoint else 'N/A')}</code>",
         f"• iter: <code>{iter_num:,}</code>",
