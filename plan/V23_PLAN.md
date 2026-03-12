@@ -1,4 +1,7 @@
-# V23 Plan — Phase 1 Style-Refinement Preparation
+# V23 Plan — Phase 1 Style-Refinement and Reporting Baseline
+
+> 갱신: 2026-03-12
+> 상태: instrumentation / reporting baseline은 대부분 구현 완료. 남은 초점은 posture-first refinement 실험과 결과 해석.
 
 ## 1. 목표
 
@@ -12,11 +15,36 @@ V23의 목적은 locomotion core를 유지한 채, **commercial-style quadruped 
 
 ## 2. 현재 출발점
 
-- 학습 버전 태그: `V20`
-- 운영/아티팩트 버전: `V22`
-- 최종 검증 런: `logs/rsl_rl/spot_micro_flat/2026-03-11_02-39-01`
-- 최종 checkpoint: `model_15000.pt`
-- 최신 artifact: `clip_1005_iter15000_20260311_132732.zip`
+- 코드상 학습 버전 태그: `TRAIN_VERSION = "V23"`
+- 현재 active run 스냅샷: `logs/rsl_rl/spot_micro_flat/2026-03-11_22-38-08`
+- 현재 active checkpoint 스냅샷: `model_600.pt`
+- 이전 최종 검증 런: `logs/rsl_rl/spot_micro_flat/2026-03-11_02-39-01`
+- 이전 최종 검증 checkpoint: `model_15000.pt`
+- 최신 known report artifact snapshot: `clip_600_iter600_20260312_134125.zip`
+
+## 2.5 2026-03-12 기준 이미 끝난 것
+
+아래 항목은 더 이상 “계획”이 아니라 active 코드에 이미 반영된 baseline이다.
+
+### 운영 신뢰도
+
+- active run / checkpoint를 live process 기준으로 해석
+- stopped 상태에서 same-run 최신 checkpoint 우선 선택
+- stale cached ZIP/video를 active run path로 필터링
+- `status`에 supervisor/heartbeat version + freshness + pid 표시
+
+### V23 계측 / 로그
+
+- raw posture/style/jitter metric export
+- per-run V23 workbook export
+- V23 master workbook / checkpoint review workbook export
+- heartbeat history JSONL 기록
+
+### heartbeat / report 해석층
+
+- detailed heartbeat formatter 복원
+- KPI / trend / top rewards / learning metrics / AI summary 포함
+- Telegram 실전 전송으로 포맷 검증 완료
 
 ## 3. 이번 런에 대한 해석
 
@@ -41,7 +69,7 @@ V23 1차의 진짜 목표는 아래 3개다.
 2. posture/style KPI를 신뢰 가능하게 추가
 3. posture-first refinement를 매우 좁게 1차 적용
 
-### 4.1 운영 레이어 전제 (2026-03-11 밤 정리)
+### 4.1 운영 레이어 전제 (현재 active baseline)
 
 - active 운영 엔트리포인트
   - `scripts/supervisor.py`
@@ -62,11 +90,13 @@ V23 1차의 진짜 목표는 아래 3개다.
   - `top`
   - `side`
   - `help`
+  - `shutdown`
 - 설계 원칙
   - `start` / `stop`만 훈련 상태를 바꾼다
   - `report/front/rear/top/side`는 훈련 중이면 최신 산출물만 전송한다
   - `report/front/rear/top/side`는 정지 상태에서만 현재 checkpoint 기준 산출물을 새로 생성한다
   - active 경로에서는 auto-resume / emergency resume / supervisor-heartbeat 상호복구 루프를 사용하지 않는다
+  - active run / checkpoint는 live process와 same-run latest checkpoint를 우선한다
 
 이번 단계에서 하지 않을 것:
 
@@ -79,6 +109,8 @@ V23 1차의 진짜 목표는 아래 3개다.
 
 ### 5.1 A0 — instrumentation / reporting only
 
+상태: **대부분 완료**
+
 변경 범위:
 
 - heartbeat/history fallback export 개선
@@ -87,6 +119,12 @@ V23 1차의 진짜 목표는 아래 3개다.
 - posture/style KPI 추가
 - heartbeat 리포트에 Posture/Style 블록 추가
 
+완료 메모:
+
+- heartbeat detailed formatter 복원 완료
+- workbook refresh / backfill / fallback export 완료
+- posture/style KPI가 active report layer에 연결됨
+
 이 단계에서는 reward를 건드리지 않는다.
 
 목표:
@@ -94,6 +132,8 @@ V23 1차의 진짜 목표는 아래 3개다.
 - 다음 실험부터 결과 해석이 가능하도록 계측 기반을 정비
 
 ### 5.2 A1 — posture-first refinement only
+
+상태: **다음 실험 주제**
 
 변경 범위:
 

@@ -1,20 +1,52 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-03-11  
-**Project Status**: V20 학습 결과 검증 완료, V22 운영/아티팩트 체계 정리 완료, 운영 스크립트 단순화 완료, V23 준비 시작  
-**Current Iteration**: `logs/rsl_rl/spot_micro_flat/2026-03-11_02-39-01` 기준 15.0K 최종 검증 완료
+**Last Updated**: 2026-03-12  
+**Project Status**: V23 코드/운영 레이어 활성화, live-context 운영 안정화, 상세 heartbeat 포맷 복원 완료  
+**Current Active Run Snapshot**: `logs/rsl_rl/spot_micro_flat/2026-03-11_22-38-08` / `model_600.pt` / iter 613 snapshot
 
 ---
 
-## 📌 Current Status Snapshot (V20/V22, V23 준비)
+## 📌 Current Status Snapshot (V23 active codebase)
+
+### 2026-03-12 운영 안정화 완료
+
+이번 세션에서 운영 레이어에 다음 변경이 실제 반영됐다.
+
+1. active run / checkpoint 해석이 stale `state.json`보다 live process cmdline을 우선 사용하도록 정리
+2. training stopped 상태에서 같은 run 안의 최신 checkpoint를 우선 선택하도록 수정
+3. `status`에 `supervisor_version`, `heartbeat_version`, `latest/stale`, `pid` 표시 추가
+4. heartbeat를 legacy 수준의 상세 분석 구조로 복원
+5. heartbeat Telegram 포맷을 실제 수동 전송으로 검증하며 최종 조정
+
+최근 핵심 커밋:
+
+- `b78f89f` Prefer latest checkpoint after training stops
+- `6485446` Add supervisor and heartbeat version status
+- `44d7169` Restore detailed heartbeat report sections
+- `de58e68` Refine heartbeat section formatting
+
+현재 active 운영 상태 스냅샷:
+
+| 항목 | 값 |
+|------|-----|
+| active run | `2026-03-11_22-38-08` |
+| checkpoint | `model_600.pt` |
+| mode | `training` |
+| supervisor | `de58e68 | latest` |
+| heartbeat | `de58e68 | latest` |
+
+중요:
+
+- 아래 역사 섹션은 프로젝트 전체 의사결정 배경을 보존하기 위한 연대기다.
+- 가장 최신 active handoff는 `plan/MEMORY.md`, `plan/CURRENT_STATE_2026-03-12.md`를 먼저 본다.
 
 ### 학습 버전과 운영 버전 분리
 
-- **학습 버전 태그**: `TRAIN_VERSION = "V20"`
-- **운영/아티팩트 버전**: **V22**
-- **다음 준비 버전**: **V23**
+- **현재 코드 기준 학습 버전 태그**: `TRAIN_VERSION = "V23"`
+- **운영/아티팩트 레이어**: V23 workbook + live-context + rich heartbeat
+- **현재 focus**: V23 posture/style refinement 실험을 운영 안정화 위에서 이어가기
 
-V22는 새 reward curriculum 버전이라기보다, V20 훈련 결과를 더 정확하게 읽고 재검토하기 위한 운영/아티팩트 레이어 정비다. V23은 다시 학습 전략 쪽 의사결정으로 넘어가기 위한 준비 단계다.
+V22는 V20 결과를 더 잘 읽기 위한 운영/아티팩트 정비 단계였다. 2026-03-12 기준으로는 V23 코드와 운영 레이어가 active 경로에 실제 반영되어 있으며, 남은 것은 “운영 정리”가 아니라 “V23 실험 자체의 다음 의사결정”이다.
 
 핵심 문서:
 
@@ -41,12 +73,13 @@ V22는 새 reward curriculum 버전이라기보다, V20 훈련 결과를 더 정
 - `scripts/legacy/supervisor.py`, `scripts/legacy/heartbeat.py`는 과거 V21/V22 운영 코드 참고용 보관본
 - active 경로에서는 auto-resume / emergency resume / supervisor-heartbeat 상호복구 루프를 제거
 - `start` / `stop`만 훈련 상태를 바꾸고, `report/front/rear/top/side`는 훈련 중이면 최신 산출물만 전송하고 정지 상태에서만 현재 checkpoint 기준으로 새로 생성
+- 이후 2026-03-12에 same-run latest checkpoint 우선 선택, run-matched cache filtering, version/freshness status 표시가 추가됨
 
 ### Heartbeat / Supervisor 역할
 
 | 컴포넌트 | 역할 | 출력 |
 |----------|------|------|
-| `heartbeat.py` | read-only 상태 감시, KPI 분류, heartbeat 전송 | 텍스트 + 그래프 |
+| `heartbeat.py` | read-only 상태 감시, KPI 분류, 상세 heartbeat 전송 | 텍스트 |
 | `supervisor.py` | Telegram 명령 처리, 훈련 시작/중단, 보고서/영상 전송 | 텍스트 + 비디오 + ZIP |
 
 참고:
@@ -54,6 +87,7 @@ V22는 새 reward curriculum 버전이라기보다, V20 훈련 결과를 더 정
 - 과거 V21/V22 문서의 `training_heartbeat.py`, `training_supervisor.py` 표기는 역사적 명칭이다
 - 현재 active 파일은 `heartbeat.py`, `supervisor.py`
 - 구 코드는 `scripts/legacy/` 아래에 참고용으로 남겨둔다
+- `shutdown` 명령도 active supervisor 명령 셋에 포함된다
 
 ### V21에서 우선 보는 KPI
 
