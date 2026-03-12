@@ -166,7 +166,12 @@ def _build_command_ack(command: str) -> str:
     checkpoint_name = os.path.basename(checkpoint) if checkpoint else "N/A"
     training_running = common.is_training_running()
     if command == "start":
-        return "🚀 <b>START 요청 수신</b>\n<i>latest checkpoint 기준으로 훈련 시작 또는 재개를 준비합니다.</i>"
+        return (
+            "🚀 <b>START 요청 수신</b>\n"
+            f"<i>run: {run_name}</i>\n"
+            f"<i>checkpoint: {checkpoint_name}</i>\n"
+            "<i>현재 supervisor context 기준으로 훈련 시작 또는 재개를 준비합니다.</i>"
+        )
     if command == "stop":
         return "⏹️ <b>STOP 요청 수신</b>\n<i>현재 훈련 프로세스를 중단합니다.</i>"
     if command == "status":
@@ -312,12 +317,27 @@ def _handle_report_local(run_dir: str, checkpoint: str) -> None:
         zip_path = common.find_latest_report_zip(run_dir)
         if not zip_path:
             raise RuntimeError("현재 훈련 중이며 전송할 최신 ZIP 리포트가 없습니다.")
+        common.send_document(
+            zip_path,
+            f"📦 latest report | {os.path.basename(run_dir)} | {os.path.basename(zip_path)}",
+            common.SUPERVISOR_LOG,
+        )
         _print_local(f"latest report: {zip_path}")
         return
     with common.busy_lock("report"):
         common.update_state(mode="reporting", last_command="report", last_error="")
         report_data = common.stop_and_report(run_dir, checkpoint, common.SUPERVISOR_LOG, force=True)
         common.update_state(mode="stopped", last_command="report", last_error="")
+    common.send_text(
+        common.format_report_summary_html(run_dir, checkpoint, report_data["analysis_text"], report_data["kpi_snapshot"]),
+        common.SUPERVISOR_LOG,
+        parse_mode="HTML",
+    )
+    common.send_document(
+        report_data["zip_path"],
+        f"📦 current report | {os.path.basename(run_dir)} | {os.path.basename(report_data['zip_path'])}",
+        common.SUPERVISOR_LOG,
+    )
     _print_local(common.format_report_summary(run_dir, checkpoint, report_data["analysis_text"], report_data["kpi_snapshot"]))
     _print_local(f"zip: {report_data['zip_path']}")
 
@@ -327,6 +347,11 @@ def _handle_view_local(view_key: str, run_dir: str, checkpoint: str) -> None:
         video_path = common.find_latest_video(view_key, run_dir)
         if not video_path:
             raise RuntimeError(f"현재 훈련 중이며 최근 {view_key} 영상을 찾지 못했습니다.")
+        common.send_video(
+            video_path,
+            f"📹 latest {view_key} | {os.path.basename(run_dir)} | iter {common.get_checkpoint_iter(checkpoint) if checkpoint else 0:,}",
+            common.SUPERVISOR_LOG,
+        )
         _print_local(f"latest {view_key}: {video_path}")
         return
     with common.busy_lock(view_key):
@@ -336,6 +361,11 @@ def _handle_view_local(view_key: str, run_dir: str, checkpoint: str) -> None:
     video_path = videos.get(view_key)
     if not video_path:
         raise RuntimeError(f"{view_key} view was not generated.")
+    common.send_video(
+        video_path,
+        f"📹 current {view_key} | {os.path.basename(run_dir)} | iter {common.get_checkpoint_iter(checkpoint):,}",
+        common.SUPERVISOR_LOG,
+    )
     _print_local(f"{view_key}: {video_path}")
 
 
@@ -361,6 +391,7 @@ def _resolve_v23_refresh_run_dir() -> str | None:
 
 def _run_local_action(action: str, args: argparse.Namespace) -> int:
     if action == "status":
+        common.send_text(common.format_status_html(), common.SUPERVISOR_LOG, parse_mode="HTML")
         _print_local(common.build_status_text())
         return 0
     if action == "start":
@@ -369,34 +400,42 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
         run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
         checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "fresh"
         if result["mode"] == "already-running":
+            _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nsource: cli", icon="🚀")
             _print_local(f"training already running\nrun: {run_name}\ncheckpoint: {checkpoint_name}")
         else:
+            _send_notice("TRAINING LAUNCH REQUESTED", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nsource: cli", icon="🚀")
             _print_local(f"training launch requested\nrun: {run_name}\ncheckpoint: {checkpoint_name}")
         return 0
     if action == "stop":
         result = common.stop_training(common.SUPERVISOR_LOG)
         checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A"
+        _send_notice("TRAINING STOPPED", f"killed: {len(result['killed'])}\ncheckpoint: {checkpoint_name}\nsource: cli", icon="⏹️")
         _print_local(f"training stopped\nkilled: {len(result['killed'])}\ncheckpoint: {checkpoint_name}")
         return 0
     if action == "heartbeat-start":
         result = common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
+        _send_notice("HEARTBEAT ACTIVE", f"mode: {result['mode']}\nsource: cli", icon="💓")
         _print_local(f"heartbeat: {result['mode']}")
         return 0
     if action == "heartbeat-stop":
         killed = common.stop_heartbeat(common.SUPERVISOR_LOG)
+        _send_notice("HEARTBEAT STOPPED", f"killed: {len(killed)}\nsource: cli", icon="💓")
         _print_local(f"heartbeat stopped\nkilled: {len(killed)}")
         return 0
     if action == "heartbeat-status":
         processes = common.list_heartbeat_processes()
         if not processes:
+            _send_notice("HEARTBEAT STATUS", "stopped\nsource: cli", icon="💓")
             _print_local("heartbeat: stopped")
             return 0
         lines = [f"heartbeat: alive ({len(processes)})"]
         lines.extend(f"- pid {entry['pid']}: {entry['name']}" for entry in processes)
+        _send_notice("HEARTBEAT STATUS", f"alive: {len(processes)}\nsource: cli", icon="💓")
         _print_local("\n".join(lines))
         return 0
     if action == "shutdown":
         common.request_supervisor_shutdown("cli-command")
+        _send_notice("COMMAND CENTER SHUTDOWN QUEUED", "Supervisor 종료 요청을 기록했습니다.\nsource: cli", icon="🛑")
         _print_local("supervisor shutdown requested")
         return 0
     if action == "v23-backfill":
@@ -422,6 +461,18 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
             f"skipped: {len(result.get('skipped_runs') or [])}\n"
             f"failed: {len(result.get('failed_runs') or [])}\n"
             f"{refresh_summary}"
+        )
+        _send_notice(
+            "V23 BACKFILL COMPLETE",
+            (
+                f"processed: {result.get('processed_runs', 0)}\n"
+                f"created: {len(result.get('created_runs') or [])}\n"
+                f"skipped: {len(result.get('skipped_runs') or [])}\n"
+                f"failed: {len(result.get('failed_runs') or [])}\n"
+                f"{refresh_summary}\n"
+                "source: cli"
+            ),
+            icon="📚",
         )
         return 0
     run_dir, checkpoint = _require_context()
@@ -546,7 +597,15 @@ def main() -> None:
         return
     if args.action == "listen":
         raise SystemExit(_run_supervisor_loop(args))
-    raise SystemExit(_run_local_action(args.action, args))
+    try:
+        raise SystemExit(_run_local_action(args.action, args))
+    except SystemExit:
+        raise
+    except Exception as err:
+        common.update_state(last_error=str(err))
+        common.write_log("Local command error:\n" + common.capture_exception(), common.SUPERVISOR_LOG)
+        _send_notice("LOCAL COMMAND FAILED", f"action: {args.action}\ndetail: {err}", icon="⚠️")
+        raise
 
 
 if __name__ == "__main__":

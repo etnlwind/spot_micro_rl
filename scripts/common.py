@@ -543,14 +543,11 @@ def get_checkpoint_iter(checkpoint_path: str | None) -> int:
 def resolve_active_run_dir() -> str | None:
     state = load_state()
     active_run = state.get("active_run") or ""
-    latest_run = get_latest_run_dir()
     if active_run:
         active_path = os.path.join(LOG_BASE, active_run)
         if os.path.isdir(active_path):
-            if latest_run and os.path.basename(latest_run) > active_run:
-                return latest_run
             return active_path
-    return latest_run
+    return get_latest_run_dir()
 
 
 def resolve_active_checkpoint(run_dir: str | None = None) -> str | None:
