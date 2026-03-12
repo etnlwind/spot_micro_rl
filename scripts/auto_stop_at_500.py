@@ -67,6 +67,7 @@ def get_current_iter():
 def kill_all():
     import psutil
     my_pid = os.getpid()
+    # Legacy training_* names are kept here so stale old processes can still be cleaned up.
     targets = ["train.py", "heartbeat.py", "supervisor.py", "training_heartbeat", "training_supervisor",
                "tensorboard", "milestone_monitor"]
     killed = []

@@ -1,4 +1,5 @@
 import argparse
+import collections
 import os
 import sys
 import time
@@ -10,6 +11,36 @@ else:
     if SCRIPT_DIR not in sys.path:
         sys.path.insert(0, SCRIPT_DIR)
     import common
+
+
+_RECENT_UPDATE_IDS = collections.deque(maxlen=128)
+_RECENT_UPDATE_ID_SET: set[int] = set()
+_RECENT_COMMAND_WINDOW_SEC = 15.0
+_RECENT_COMMAND_TIMES: dict[tuple[str | None, str | None, str], float] = {}
+
+
+def _remember_update_id(update_id: int) -> bool:
+    if update_id <= 0:
+        return True
+    if update_id in _RECENT_UPDATE_ID_SET:
+        return False
+    if len(_RECENT_UPDATE_IDS) == _RECENT_UPDATE_IDS.maxlen:
+        evicted = _RECENT_UPDATE_IDS.popleft()
+        _RECENT_UPDATE_ID_SET.discard(evicted)
+    _RECENT_UPDATE_IDS.append(update_id)
+    _RECENT_UPDATE_ID_SET.add(update_id)
+    return True
+
+
+def _is_duplicate_command(chat_id: str | None, user_id: str | None, command: str) -> bool:
+    now = time.monotonic()
+    expired = [key for key, timestamp in _RECENT_COMMAND_TIMES.items() if now - timestamp > _RECENT_COMMAND_WINDOW_SEC]
+    for key in expired:
+        _RECENT_COMMAND_TIMES.pop(key, None)
+    dedupe_key = (chat_id, user_id, command)
+    previous = _RECENT_COMMAND_TIMES.get(dedupe_key)
+    _RECENT_COMMAND_TIMES[dedupe_key] = now
+    return previous is not None and now - previous <= _RECENT_COMMAND_WINDOW_SEC
 
 
 def _build_command_ack(command: str) -> str:
@@ -152,7 +183,11 @@ def main() -> None:
     try:
         while True:
             try:
-                for update in common.fetch_updates(timeout_sec=0):
+                for update in common.fetch_updates(timeout_sec=0, log_path=common.SUPERVISOR_LOG):
+                    update_id = int(update.get("update_id", 0) or 0)
+                    if not _remember_update_id(update_id):
+                        common.write_log(f"Skipped duplicate Telegram update_id={update_id}", common.SUPERVISOR_LOG)
+                        continue
                     text, chat_id, user_id = common.extract_message(update)
                     if not text:
                         continue
@@ -164,6 +199,12 @@ def main() -> None:
                         continue
                     command = common.normalize_command(text)
                     if command not in common.command_variants():
+                        continue
+                    if _is_duplicate_command(chat_id, user_id, command):
+                        common.write_log(
+                            f"Skipped duplicate Telegram command chat_id={chat_id} user_id={user_id} command={command}",
+                            common.SUPERVISOR_LOG,
+                        )
                         continue
                     common.send_text(_build_command_ack(command), common.SUPERVISOR_LOG)
                     handle_command(command)

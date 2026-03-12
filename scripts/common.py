@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -127,6 +128,7 @@ PRIMARY_KPI_THRESHOLDS = {
 }
 
 _tg_offset: int | None = None
+_tg_poll_conflict_logged = False
 
 
 def _normalize_windows_path(raw_path: str | None) -> str | None:
@@ -347,13 +349,39 @@ def send_document(file_path: str, caption: str, log_path: str) -> None:
     write_log(f"[TG] Sent document: {os.path.basename(file_path)}", log_path)
 
 
-def _telegram_get_updates(offset: int, timeout_sec: int = 0) -> list[dict]:
+def _telegram_get_updates(offset: int, timeout_sec: int = 0) -> list[dict] | None:
     query = urllib.parse.urlencode({"offset": offset, "timeout": timeout_sec})
     url = f"{TG_BASE_URL}/getUpdates?{query}"
-    response = json.loads(urllib.request.urlopen(url, timeout=max(15, timeout_sec + 5)).read().decode("utf-8"))
+    try:
+        response = json.loads(urllib.request.urlopen(url, timeout=max(15, timeout_sec + 5)).read().decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        if err.code == 409:
+            return None
+        raise
     if not response.get("ok"):
         return []
     return response.get("result") or []
+
+
+def _handle_telegram_poll_conflict(log_path: str | None) -> None:
+    global _tg_poll_conflict_logged
+    if _tg_poll_conflict_logged:
+        return
+    if log_path:
+        write_log(
+            "Telegram polling conflict detected (HTTP 409). Another client is using getUpdates; supervisor will retry.",
+            log_path,
+        )
+    _tg_poll_conflict_logged = True
+
+
+def _clear_telegram_poll_conflict(log_path: str | None) -> None:
+    global _tg_poll_conflict_logged
+    if not _tg_poll_conflict_logged:
+        return
+    if log_path:
+        write_log("Telegram polling conflict cleared.", log_path)
+    _tg_poll_conflict_logged = False
 
 
 def prime_update_offset(log_path: str) -> int:
@@ -364,6 +392,12 @@ def prime_update_offset(log_path: str) -> int:
         write_log(f"Telegram offset restored: {stored_offset}", log_path)
         return stored_offset
     updates = _telegram_get_updates(0, timeout_sec=0)
+    if updates is None:
+        _tg_offset = 0
+        _handle_telegram_poll_conflict(log_path)
+        write_log("Telegram offset prime deferred until polling conflict clears.", log_path)
+        return 0
+    _clear_telegram_poll_conflict(log_path)
     next_offset = 0
     for update in updates:
         next_offset = max(next_offset, int(update.get("update_id", 0)) + 1)
@@ -373,11 +407,15 @@ def prime_update_offset(log_path: str) -> int:
     return next_offset
 
 
-def fetch_updates(timeout_sec: int = 0) -> list[dict]:
+def fetch_updates(timeout_sec: int = 0, log_path: str | None = None) -> list[dict]:
     global _tg_offset
     if _tg_offset is None:
         _tg_offset = load_telegram_offset()
     updates = _telegram_get_updates(_tg_offset, timeout_sec=timeout_sec)
+    if updates is None:
+        _handle_telegram_poll_conflict(log_path)
+        return []
+    _clear_telegram_poll_conflict(log_path)
     for update in updates:
         _tg_offset = max(_tg_offset, int(update.get("update_id", 0)) + 1)
     if updates:

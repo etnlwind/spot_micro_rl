@@ -1,4 +1,5 @@
 import psutil
+# Legacy training_* names are kept here so stale old processes can still be cleaned up.
 targets = ['train.py', 'supervisor.py', 'heartbeat.py', 'training_supervisor', 'training_heartbeat']
 for p in psutil.process_iter():
     try:
