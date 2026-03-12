@@ -14,7 +14,7 @@ from . import agents
 
 gym.register(
     id="Isaac-Velocity-Flat-SpotMicro-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.spot_micro_rl_env:SpotMicroManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.spot_micro_rl_env_cfg:SpotMicroFlatEnvCfg",
@@ -24,7 +24,7 @@ gym.register(
 
 gym.register(
     id="Isaac-Velocity-Rough-SpotMicro-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.spot_micro_rl_env:SpotMicroManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.spot_micro_rl_env_cfg:SpotMicroRoughEnvCfg",
@@ -34,7 +34,7 @@ gym.register(
 
 gym.register(
     id="Isaac-Velocity-Rough-SpotMicro-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.spot_micro_rl_env:SpotMicroManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.spot_micro_rl_env_cfg:SpotMicroRoughEnvCfg_PLAY",
@@ -44,7 +44,7 @@ gym.register(
 
 gym.register(
     id="Isaac-Velocity-Flat-SteepSlope-SpotMicro-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.spot_micro_rl_env:SpotMicroManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.spot_micro_rl_env_cfg:SpotMicroFlatOnSteepSlopePlayCfg",

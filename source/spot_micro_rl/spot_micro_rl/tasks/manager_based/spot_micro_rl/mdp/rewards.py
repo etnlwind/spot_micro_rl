@@ -29,6 +29,215 @@ def _contact_state(contact_sensor: ContactSensor, body_ids, threshold: float) ->
     return _contact_force_peak(contact_sensor, body_ids) > threshold
 
 
+V23_RAW_EXPORT_TERMS = [
+    "stance_width_mean_raw",
+    "stance_width_front_raw",
+    "stance_width_rear_raw",
+    "front_rear_stance_width_diff_raw",
+    "shoulder_fl_raw",
+    "shoulder_fr_raw",
+    "shoulder_rl_raw",
+    "shoulder_rr_raw",
+    "shoulder_mean_abs_dev_from_target_raw",
+    "shoulder_left_right_diff_raw",
+    "shoulder_front_rear_diff_raw",
+    "front_leg_lift_mean_raw",
+    "rear_leg_lift_mean_raw",
+    "front_clearance_mean_raw",
+    "rear_clearance_mean_raw",
+    "front_propulsion_score_raw",
+    "rear_propulsion_score_raw",
+    "front_rear_propulsion_diff_raw",
+    "front_rear_clearance_diff_raw",
+    "front_rear_swing_diff_raw",
+]
+
+_V23_SHOULDER_JOINT_NAMES = [
+    "front_left_shoulder",
+    "front_right_shoulder",
+    "rear_left_shoulder",
+    "rear_right_shoulder",
+]
+_V23_LEG_JOINT_NAMES = [
+    "front_left_leg",
+    "front_right_leg",
+    "rear_left_leg",
+    "rear_right_leg",
+]
+_V23_FOOT_BODY_NAMES = [
+    "front_left_foot_link",
+    "front_right_foot_link",
+    "rear_left_foot_link",
+    "rear_right_foot_link",
+]
+
+
+def _compute_heading_xy(quat_w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    w, x, y, z = quat_w[:, 0], quat_w[:, 1], quat_w[:, 2], quat_w[:, 3]
+    heading_x = 1.0 - 2.0 * (y * y + z * z)
+    heading_y = 2.0 * (x * y + w * z)
+    return heading_x, heading_y
+
+
+def _ensure_v23_raw_metric_state(env: ManagerBasedRLEnv) -> bool:
+    if not hasattr(env, "_v23_raw_metric_episode_sums"):
+        env._v23_raw_metric_episode_sums = {
+            name: torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+            for name in V23_RAW_EXPORT_TERMS
+        }
+    else:
+        for name in V23_RAW_EXPORT_TERMS:
+            if name not in env._v23_raw_metric_episode_sums:
+                env._v23_raw_metric_episode_sums[name] = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+
+    cache = getattr(env, "_v23_raw_metric_cache", None)
+    if cache is not None:
+        return bool(cache.get("enabled", False))
+
+    robot = env.scene["robot"]
+    contact_sensor = env.scene.sensors.get("contact_forces", None)
+    if contact_sensor is None:
+        env._v23_raw_metric_cache = {"enabled": False}
+        return False
+
+    shoulder_joint_ids, _ = robot.find_joints(_V23_SHOULDER_JOINT_NAMES, preserve_order=True)
+    leg_joint_ids, _ = robot.find_joints(_V23_LEG_JOINT_NAMES, preserve_order=True)
+    foot_body_ids, _ = robot.find_bodies(_V23_FOOT_BODY_NAMES, preserve_order=True)
+    contact_body_ids, _ = contact_sensor.find_bodies(_V23_FOOT_BODY_NAMES, preserve_order=True)
+
+    try:
+        shoulder_cfg = env.reward_manager.get_term_cfg("shoulder_neutral")
+        target_angles = shoulder_cfg.params.get("target_angles")
+    except Exception:
+        target_angles = None
+    if target_angles is None or len(target_angles) != 4:
+        target_angles = [-0.04, -0.04, -0.04, -0.04]
+
+    try:
+        clearance_cfg = env.reward_manager.get_term_cfg("foot_clearance")
+        target_clearance = float(clearance_cfg.params.get("target_clearance", 0.03))
+    except Exception:
+        target_clearance = 0.03
+
+    try:
+        propulsion_cfg = env.reward_manager.get_term_cfg("stance_propulsion")
+        target_push_vel = float(propulsion_cfg.params.get("target_push_vel", 0.3))
+        contact_threshold = float(propulsion_cfg.params.get("contact_threshold", 1.0))
+    except Exception:
+        target_push_vel = 0.3
+        contact_threshold = 1.0
+
+    env._v23_raw_metric_cache = {
+        "enabled": True,
+        "shoulder_joint_ids": shoulder_joint_ids,
+        "leg_joint_ids": leg_joint_ids,
+        "foot_body_ids": foot_body_ids,
+        "contact_body_ids": contact_body_ids,
+        "shoulder_targets": torch.tensor(target_angles, dtype=torch.float, device=env.device),
+        "target_clearance": target_clearance,
+        "target_push_vel": target_push_vel,
+        "contact_threshold": contact_threshold,
+    }
+    return True
+
+
+def compute_v23_raw_metrics(env: ManagerBasedRLEnv) -> dict[str, torch.Tensor]:
+    if not _ensure_v23_raw_metric_state(env):
+        return {}
+
+    cache = env._v23_raw_metric_cache
+    robot: Articulation = env.scene["robot"]
+    contact_sensor: ContactSensor = env.scene.sensors["contact_forces"]
+
+    contacts = _contact_state(contact_sensor, cache["contact_body_ids"], cache["contact_threshold"]).float()
+    swing_mask = 1.0 - contacts
+    front_swing_count = swing_mask[:, :2].sum(dim=1).clamp(min=1.0)
+    rear_swing_count = swing_mask[:, 2:].sum(dim=1).clamp(min=1.0)
+    front_stance_count = contacts[:, :2].sum(dim=1).clamp(min=1.0)
+    rear_stance_count = contacts[:, 2:].sum(dim=1).clamp(min=1.0)
+
+    shoulder_angles = robot.data.joint_pos[:, cache["shoulder_joint_ids"]]
+    shoulder_targets = cache["shoulder_targets"].to(device=shoulder_angles.device, dtype=shoulder_angles.dtype)
+    shoulder_dev = torch.abs(shoulder_angles - shoulder_targets)
+
+    foot_pos_xy = robot.data.body_pos_w[:, cache["foot_body_ids"], :2]
+    root_pos_xy = robot.data.root_pos_w[:, :2].unsqueeze(1)
+    rel_xy = foot_pos_xy - root_pos_xy
+    heading_x, heading_y = _compute_heading_xy(robot.data.root_quat_w)
+    body_y = -heading_y.unsqueeze(1) * rel_xy[:, :, 0] + heading_x.unsqueeze(1) * rel_xy[:, :, 1]
+    front_width = torch.abs(body_y[:, 0] - body_y[:, 1])
+    rear_width = torch.abs(body_y[:, 2] - body_y[:, 3])
+
+    leg_angles = torch.abs(robot.data.joint_pos[:, cache["leg_joint_ids"]])
+    front_leg_lift = (leg_angles[:, :2] * swing_mask[:, :2]).sum(dim=1) / front_swing_count
+    rear_leg_lift = (leg_angles[:, 2:] * swing_mask[:, 2:]).sum(dim=1) / rear_swing_count
+
+    foot_height = robot.data.body_pos_w[:, cache["foot_body_ids"], 2] - env.scene.env_origins[:, 2].unsqueeze(1)
+    front_clearance = (foot_height[:, :2] * swing_mask[:, :2]).sum(dim=1) / front_swing_count
+    rear_clearance = (foot_height[:, 2:] * swing_mask[:, 2:]).sum(dim=1) / rear_swing_count
+
+    foot_vel_w = robot.data.body_vel_w[:, cache["foot_body_ids"], :3]
+    foot_heading_vel = foot_vel_w[:, :, 0] * heading_x.unsqueeze(1) + foot_vel_w[:, :, 1] * heading_y.unsqueeze(1)
+    body_vel_w = robot.data.root_lin_vel_w
+    body_heading_vel = body_vel_w[:, 0] * heading_x + body_vel_w[:, 1] * heading_y
+    relative_vel = foot_heading_vel - body_heading_vel.unsqueeze(1)
+    push_magnitude = torch.clamp(-relative_vel, min=0.0)
+    normalized_push = torch.clamp(push_magnitude / (cache["target_push_vel"] + 1e-6), 0.0, 1.0)
+    front_propulsion = (normalized_push[:, :2] * contacts[:, :2]).sum(dim=1) / front_stance_count
+    rear_propulsion = (normalized_push[:, 2:] * contacts[:, 2:]).sum(dim=1) / rear_stance_count
+
+    shoulder_fl = shoulder_angles[:, 0]
+    shoulder_fr = shoulder_angles[:, 1]
+    shoulder_rl = shoulder_angles[:, 2]
+    shoulder_rr = shoulder_angles[:, 3]
+
+    front_swing_ratio = swing_mask[:, :2].mean(dim=1)
+    rear_swing_ratio = swing_mask[:, 2:].mean(dim=1)
+
+    return {
+        "stance_width_mean_raw": (front_width + rear_width) / 2.0,
+        "stance_width_front_raw": front_width,
+        "stance_width_rear_raw": rear_width,
+        "front_rear_stance_width_diff_raw": torch.abs(front_width - rear_width),
+        "shoulder_fl_raw": shoulder_fl,
+        "shoulder_fr_raw": shoulder_fr,
+        "shoulder_rl_raw": shoulder_rl,
+        "shoulder_rr_raw": shoulder_rr,
+        "shoulder_mean_abs_dev_from_target_raw": shoulder_dev.mean(dim=1),
+        "shoulder_left_right_diff_raw": (torch.abs(shoulder_fl - shoulder_fr) + torch.abs(shoulder_rl - shoulder_rr)) / 2.0,
+        "shoulder_front_rear_diff_raw": (torch.abs(shoulder_fl - shoulder_rl) + torch.abs(shoulder_fr - shoulder_rr)) / 2.0,
+        "front_leg_lift_mean_raw": front_leg_lift,
+        "rear_leg_lift_mean_raw": rear_leg_lift,
+        "front_clearance_mean_raw": front_clearance,
+        "rear_clearance_mean_raw": rear_clearance,
+        "front_propulsion_score_raw": front_propulsion,
+        "rear_propulsion_score_raw": rear_propulsion,
+        "front_rear_propulsion_diff_raw": torch.abs(front_propulsion - rear_propulsion),
+        "front_rear_clearance_diff_raw": torch.abs(front_clearance - rear_clearance),
+        "front_rear_swing_diff_raw": torch.abs(front_swing_ratio - rear_swing_ratio),
+    }
+
+
+def accumulate_v23_raw_metrics(env: ManagerBasedRLEnv) -> None:
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return
+    for name, values in metrics.items():
+        env._v23_raw_metric_episode_sums[name] += values * env.step_dt
+
+
+def reset_v23_raw_metric_extras(env: ManagerBasedRLEnv, env_ids) -> dict[str, torch.Tensor]:
+    if not hasattr(env, "_v23_raw_metric_episode_sums"):
+        return {}
+    if env_ids is None:
+        env_ids = slice(None)
+    extras = {}
+    for name, buffer in env._v23_raw_metric_episode_sums.items():
+        extras[f"Episode_Reward/{name}"] = torch.mean(buffer[env_ids]) / env.max_episode_length_s
+        buffer[env_ids] = 0.0
+    return extras
+
+
 def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Penalize joint position deviation from a target value."""
     # extract the used quantities (to enable type-hinting)

@@ -1440,13 +1440,43 @@ def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[f
         and (kpi.get("gait_score") or 0) >= 5
     )
 
+    has_posture_raw = any(
+        rewards.get(name) is not None
+        for name in (
+            "stance_width_mean_raw",
+            "stance_width_front_raw",
+            "stance_width_rear_raw",
+            "shoulder_fl_raw",
+            "shoulder_fr_raw",
+            "shoulder_rl_raw",
+            "shoulder_rr_raw",
+            "shoulder_mean_abs_dev_from_target_raw",
+            "shoulder_left_right_diff_raw",
+            "shoulder_front_rear_diff_raw",
+        )
+    )
+    has_front_rear_raw = any(
+        rewards.get(name) is not None
+        for name in (
+            "front_leg_lift_mean_raw",
+            "rear_leg_lift_mean_raw",
+            "front_clearance_mean_raw",
+            "rear_clearance_mean_raw",
+            "front_propulsion_score_raw",
+            "rear_propulsion_score_raw",
+            "front_rear_propulsion_diff_raw",
+            "front_rear_clearance_diff_raw",
+            "front_rear_swing_diff_raw",
+        )
+    )
+
     fallback_parts = [
         "locomotion_raw=reward_proxy",
         "posture_score=proxy_reward_terms",
         "foot_jitter_score=proxy_reward_terms",
         "front_rear_balance_score=proxy_reward_terms",
-        "missing_posture_raw=not_exported",
-        "missing_front_rear_raw=not_exported",
+        f"posture_raw={'env_export' if has_posture_raw else 'not_exported'}",
+        f"front_rear_raw={'env_export' if has_front_rear_raw else 'not_exported'}",
     ]
 
     row = {column: None for column in V23_RUNLOG_COLUMNS}
@@ -1488,8 +1518,17 @@ def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[f
             "leg_lift_reward": rewards.get("leg_lift"),
             "foot_clearance_reward": rewards.get("foot_clearance"),
             "standing_height_reward": rewards.get("standing_height"),
-            "shoulder_mean_abs_dev_from_target_raw": rewards.get("shoulder_neutral"),
-            "shoulder_left_right_diff_raw": rewards.get("shoulder_symmetry"),
+            "stance_width_mean_raw": rewards.get("stance_width_mean_raw"),
+            "stance_width_front_raw": rewards.get("stance_width_front_raw"),
+            "stance_width_rear_raw": rewards.get("stance_width_rear_raw"),
+            "front_rear_stance_width_diff_raw": rewards.get("front_rear_stance_width_diff_raw"),
+            "shoulder_fl_raw": rewards.get("shoulder_fl_raw"),
+            "shoulder_fr_raw": rewards.get("shoulder_fr_raw"),
+            "shoulder_rl_raw": rewards.get("shoulder_rl_raw"),
+            "shoulder_rr_raw": rewards.get("shoulder_rr_raw"),
+            "shoulder_mean_abs_dev_from_target_raw": rewards.get("shoulder_mean_abs_dev_from_target_raw") or rewards.get("shoulder_neutral"),
+            "shoulder_left_right_diff_raw": rewards.get("shoulder_left_right_diff_raw") or rewards.get("shoulder_symmetry"),
+            "shoulder_front_rear_diff_raw": rewards.get("shoulder_front_rear_diff_raw"),
             "base_height_raw": rewards.get("standing_height"),
             "body_roll_abs_raw": rewards.get("flat_orientation_l2"),
             "body_pitch_abs_raw": rewards.get("flat_orientation_l2"),
@@ -1500,9 +1539,15 @@ def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[f
             "foot_extension_raw": rewards.get("foot_extension"),
             "stance_foot_jitter_score_raw": stance_foot_jitter_score_raw,
             "contact_transition_oscillation_score_estimated": rewards.get("joint_oscillation"),
-            "rear_leg_lift_mean_raw": rewards.get("leg_lift"),
-            "rear_clearance_mean_raw": rewards.get("foot_clearance"),
-            "rear_propulsion_score_raw": rewards.get("rear_forward_stride"),
+            "front_leg_lift_mean_raw": rewards.get("front_leg_lift_mean_raw"),
+            "rear_leg_lift_mean_raw": rewards.get("rear_leg_lift_mean_raw") or rewards.get("leg_lift"),
+            "front_clearance_mean_raw": rewards.get("front_clearance_mean_raw"),
+            "rear_clearance_mean_raw": rewards.get("rear_clearance_mean_raw") or rewards.get("foot_clearance"),
+            "front_propulsion_score_raw": rewards.get("front_propulsion_score_raw"),
+            "rear_propulsion_score_raw": rewards.get("rear_propulsion_score_raw") or rewards.get("rear_forward_stride"),
+            "front_rear_propulsion_diff_raw": rewards.get("front_rear_propulsion_diff_raw"),
+            "front_rear_clearance_diff_raw": rewards.get("front_rear_clearance_diff_raw"),
+            "front_rear_swing_diff_raw": rewards.get("front_rear_swing_diff_raw"),
             "stride_length_raw": rewards.get("stride_length"),
             "gait_cycle_period_raw": rewards.get("gait_cycle_period"),
             "gait_score_canonical": kpi.get("gait_score"),
