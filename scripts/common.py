@@ -2679,7 +2679,27 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
             f"  - next report: iter {((current_iter // HEARTBEAT_ITER_STEP) + 1) * HEARTBEAT_ITER_STEP:,}",
         ]
     )
-    display_lines = [f"• {line[2:]}" if line.startswith("- ") else line for line in lines]
+    display_lines = []
+    decision_section = False
+    icon_starters = "🟢🟡🔴🔵⚪📈📉↗↘➡🌟⭐🟠🥚🐣🐥🐕🦮🏆📎💀🎯🧭🦿🛡️🧍✅⛔🔧🧠🏅💣📊👍❗"
+    for line in lines:
+        if line.startswith("- 운영 판정:"):
+            decision_section = True
+        if not decision_section and line.startswith("- "):
+            display_lines.append(f"• {line[2:]}")
+        elif decision_section and line.startswith("- "):
+            content = line[2:]
+            display_lines.append(f"<b>{content}</b>")
+        elif decision_section and line.startswith("  - "):
+            content = line[4:]
+            if content[:1] in icon_starters:
+                display_lines.append(content)
+            else:
+                display_lines.append(f"• {content}")
+        elif decision_section and line.startswith("  "):
+            display_lines.append(line[2:])
+        else:
+            display_lines.append(line)
     return "\n".join(display_lines)
 
 
