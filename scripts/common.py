@@ -614,12 +614,16 @@ def resolve_active_checkpoint(run_dir: str | None = None) -> str | None:
         if not run_dir or run_dir == live_run_dir:
             return live_checkpoint
     run_dir = run_dir or live_run_dir or resolve_active_run_dir()
+    latest_checkpoint = get_latest_checkpoint(run_dir)
     state = load_state()
     checkpoint = state.get("active_checkpoint") or ""
     if checkpoint and os.path.isfile(checkpoint):
-        if run_dir and os.path.dirname(checkpoint) == run_dir:
+        checkpoint = os.path.abspath(checkpoint)
+        if run_dir and os.path.dirname(checkpoint) == os.path.abspath(run_dir):
+            if latest_checkpoint and get_checkpoint_iter(latest_checkpoint) > get_checkpoint_iter(checkpoint):
+                return latest_checkpoint
             return checkpoint
-    return get_latest_checkpoint(run_dir)
+    return latest_checkpoint
 
 
 def get_display_iteration(run_dir: str | None, checkpoint_path: str | None = None) -> int:
