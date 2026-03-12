@@ -523,6 +523,48 @@ def get_latest_run_dir() -> str | None:
     return os.path.join(LOG_BASE, runs[-1]) if runs else None
 
 
+def _list_run_dirs() -> list[str]:
+    if not os.path.isdir(LOG_BASE):
+        return []
+    run_dirs = [os.path.join(LOG_BASE, name) for name in os.listdir(LOG_BASE) if os.path.isdir(os.path.join(LOG_BASE, name))]
+    run_dirs.sort(key=lambda path: (os.path.getmtime(path), path), reverse=True)
+    return run_dirs
+
+
+def _extract_event_pid(event_path: str) -> int:
+    match = re.search(r"events\.out\.tfevents\.\d+\.[^.]+\.(\d+)\.\d+$", os.path.basename(event_path))
+    return int(match.group(1)) if match else 0
+
+
+def _get_latest_event_file(run_dir: str | None) -> str | None:
+    if not run_dir or not os.path.isdir(run_dir):
+        return None
+    event_paths = [path for path in glob.glob(os.path.join(run_dir, "events.out.tfevents*")) if os.path.isfile(path)]
+    if not event_paths:
+        return None
+    event_paths.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    return event_paths[0]
+
+
+def _find_live_run_dir_for_process(entry: dict) -> str | None:
+    pid = int(entry.get("pid") or 0)
+    created_at = float(entry.get("create_time") or 0.0)
+    run_dirs = _list_run_dirs()
+    if not run_dirs:
+        return None
+    if pid > 0:
+        for run_dir in run_dirs:
+            for event_path in glob.glob(os.path.join(run_dir, "events.out.tfevents*")):
+                if _extract_event_pid(event_path) == pid:
+                    return run_dir
+    if created_at > 0.0:
+        # If the run directory exists but no events have been written yet, prefer a directory created alongside the process.
+        recent_run_dirs = [path for path in run_dirs if os.path.getmtime(path) >= created_at - 120.0]
+        if recent_run_dirs:
+            return recent_run_dirs[0]
+    return None
+
+
 def get_latest_checkpoint(run_dir: str | None) -> str | None:
     if not run_dir or not os.path.isdir(run_dir):
         return None
@@ -532,6 +574,18 @@ def get_latest_checkpoint(run_dir: str | None) -> str | None:
         return None
     matches.sort(key=lambda path: get_checkpoint_iter(path))
     return matches[-1]
+
+
+def get_checkpoint_by_iter(run_dir: str | None, iter_num: int) -> str | None:
+    if not run_dir or not os.path.isdir(run_dir):
+        return None
+    iter_num = int(iter_num or 0)
+    if iter_num <= 0:
+        return None
+    checkpoint_path = os.path.join(run_dir, f"model_{iter_num}.pt")
+    if os.path.isfile(checkpoint_path):
+        return checkpoint_path
+    return None
 
 
 def get_checkpoint_iter(checkpoint_path: str | None) -> int:
@@ -589,8 +643,12 @@ def resolve_live_training_context() -> tuple[str | None, str | None]:
     latest_run = get_latest_run_dir()
     for entry in sorted(processes, key=lambda item: item.get("pid", 0), reverse=True):
         cmdline = entry.get("cmdline") or ""
-        run_dir = _resolve_run_dir_from_arg(_extract_cmd_option(cmdline, "load_run")) or latest_run
-        checkpoint = _resolve_checkpoint_from_arg(run_dir, _extract_cmd_option(cmdline, "checkpoint"))
+        resume_run_dir = _resolve_run_dir_from_arg(_extract_cmd_option(cmdline, "load_run"))
+        live_run_dir = _find_live_run_dir_for_process(entry) or latest_run or resume_run_dir
+        checkpoint = get_latest_checkpoint(live_run_dir)
+        if not checkpoint:
+            checkpoint = _resolve_checkpoint_from_arg(resume_run_dir or live_run_dir, _extract_cmd_option(cmdline, "checkpoint"))
+        run_dir = live_run_dir or resume_run_dir or latest_run
         if run_dir or checkpoint:
             return run_dir, checkpoint
     return latest_run, get_latest_checkpoint(latest_run)
@@ -600,13 +658,16 @@ def resolve_active_run_dir() -> str | None:
     live_run_dir, _ = resolve_live_training_context()
     if live_run_dir:
         return live_run_dir
+    latest_run = get_latest_run_dir()
     state = load_state()
     active_run = state.get("active_run") or ""
     if active_run:
         active_path = os.path.join(LOG_BASE, active_run)
         if os.path.isdir(active_path):
+            if latest_run and os.path.basename(latest_run) > os.path.basename(active_path):
+                return latest_run
             return active_path
-    return get_latest_run_dir()
+    return latest_run
 
 
 def resolve_active_checkpoint(run_dir: str | None = None) -> str | None:
@@ -670,14 +731,21 @@ def _looks_like_training_command(name: str, cmdline: str) -> bool:
 
 def list_training_processes() -> list[dict]:
     processes = []
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
         try:
             cmdline = " ".join(proc.info["cmdline"] or [])
             if not cmdline:
                 continue
             name = proc.info.get("name") or ""
             if _looks_like_training_command(name, cmdline):
-                processes.append({"pid": proc.info["pid"], "name": name, "cmdline": cmdline})
+                processes.append(
+                    {
+                        "pid": proc.info["pid"],
+                        "name": name,
+                        "cmdline": cmdline,
+                        "create_time": float(proc.info.get("create_time") or 0.0),
+                    }
+                )
         except (psutil.Error, PermissionError, OSError):
             pass
     deduped = {entry["pid"]: entry for entry in processes}
@@ -1016,9 +1084,10 @@ def launch_training(log_path: str) -> dict:
 
 
 def stop_training(log_path: str) -> dict:
+    live_run_dir, _live_checkpoint = resolve_live_training_context()
     killed = kill_training_processes(log_path)
-    active_run = resolve_active_run_dir()
-    active_checkpoint = resolve_active_checkpoint(active_run)
+    active_run = live_run_dir or resolve_active_run_dir()
+    active_checkpoint = get_latest_checkpoint(active_run) or resolve_active_checkpoint(active_run)
     update_state(
         mode="stopped",
         active_run=os.path.basename(active_run) if active_run else "",
@@ -1133,10 +1202,9 @@ def read_tfevents(run_dir: str, retries: int = 3):
         from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
     except ImportError:
         return None
-    event_files = [name for name in os.listdir(run_dir) if name.startswith("events.out.tfevents")]
-    if not event_files:
+    event_path = _get_latest_event_file(run_dir)
+    if not event_path:
         return None
-    event_path = os.path.join(run_dir, event_files[0])
     for attempt in range(retries):
         try:
             accumulator = EventAccumulator(event_path)
@@ -3565,8 +3633,8 @@ def help_text() -> str:
         "/start : 훈련 시작 또는 latest checkpoint 재개\n"
         "/stop : 현재 훈련만 중단\n"
         "/status : 현재 상태 조회\n"
-        "/report : training 중이면 최신 zip, stopped면 현재 checkpoint 기준 새 zip 생성\n"
-        "/front, /rear, /top, /side : training 중이면 최신 영상, stopped면 현재 checkpoint 기준 새 영상 생성\n"
+        "/report [iter] : training 중이면 최신 zip, stopped면 지정 iter 또는 최신 checkpoint 기준 새 zip 생성\n"
+        "/front [iter], /rear [iter], /top [iter], /side [iter] : training 중이면 최신 영상, stopped면 지정 iter 또는 최신 checkpoint 기준 새 영상 생성\n"
         "/shutdown : supervisor 종료\n"
         "/help : 명령 목록"
     )

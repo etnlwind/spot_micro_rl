@@ -141,12 +141,12 @@ def _remember_update_id(update_id: int) -> bool:
     return True
 
 
-def _is_duplicate_command(chat_id: str | None, user_id: str | None, command: str) -> bool:
+def _is_duplicate_command(chat_id: str | None, user_id: str | None, command_key: str) -> bool:
     now = time.monotonic()
     expired = [key for key, timestamp in _RECENT_COMMAND_TIMES.items() if now - timestamp > _RECENT_COMMAND_WINDOW_SEC]
     for key in expired:
         _RECENT_COMMAND_TIMES.pop(key, None)
-    dedupe_key = (chat_id, user_id, command)
+    dedupe_key = (chat_id, user_id, command_key)
     previous = _RECENT_COMMAND_TIMES.get(dedupe_key)
     _RECENT_COMMAND_TIMES[dedupe_key] = now
     return previous is not None and now - previous <= _RECENT_COMMAND_WINDOW_SEC
@@ -160,11 +160,43 @@ def _send_notice(title: str, body: str, icon: str = "👮") -> None:
     )
 
 
-def _build_command_ack(command: str) -> str:
-    run_dir, checkpoint = common.resolve_context()
+def _parse_command_request(text: str) -> tuple[str, str]:
+    stripped = (text or "").strip()
+    if not stripped:
+        return "", ""
+    parts = stripped.split(maxsplit=1)
+    command = common.normalize_command(parts[0])
+    arg_text = parts[1].strip() if len(parts) > 1 else ""
+    return command, arg_text
+
+
+def _parse_checkpoint_iter(arg_text: str) -> int | None:
+    if not arg_text:
+        return None
+    if not arg_text.isdigit():
+        raise ValueError("checkpoint iteration must be a positive integer, e.g. /report 1000")
+    iter_num = int(arg_text)
+    if iter_num <= 0:
+        raise ValueError("checkpoint iteration must be greater than zero")
+    return iter_num
+
+
+def _resolve_requested_checkpoint(run_dir: str | None, checkpoint_iter: int | None) -> str | None:
+    if checkpoint_iter is None:
+        return common.resolve_active_checkpoint(run_dir)
+    checkpoint = common.get_checkpoint_by_iter(run_dir, checkpoint_iter)
+    if checkpoint:
+        return checkpoint
+    raise RuntimeError(f"checkpoint model_{checkpoint_iter}.pt not found in run {os.path.basename(run_dir) if run_dir else 'N/A'}")
+
+
+def _build_command_ack(command: str, checkpoint_iter: int | None = None) -> str:
+    run_dir = common.resolve_active_run_dir()
+    checkpoint = _resolve_requested_checkpoint(run_dir, checkpoint_iter)
     run_name = os.path.basename(run_dir) if run_dir else "N/A"
     checkpoint_name = os.path.basename(checkpoint) if checkpoint else "N/A"
     training_running = common.is_training_running()
+    checkpoint_hint = f"\n<i>requested checkpoint: model_{checkpoint_iter}.pt</i>" if checkpoint_iter is not None else ""
     if command == "start":
         return (
             "🚀 <b>START 요청 수신</b>\n"
@@ -186,12 +218,14 @@ def _build_command_ack(command: str) -> str:
                 "📦 <b>REPORT 요청 수신</b>\n"
                 f"<i>run: {run_name}</i>\n"
                 "<i>훈련 중이므로 최신 ZIP 리포트를 찾아 전송합니다.</i>"
+                f"{checkpoint_hint}"
             )
         return (
             "📦 <b>REPORT 요청 수신</b>\n"
             f"<i>run: {run_name}</i>\n"
             f"<i>checkpoint: {checkpoint_name}</i>\n"
             "<i>현재 checkpoint 기준으로 영상, 분석, ZIP 리포트를 생성합니다.</i>"
+            f"{checkpoint_hint}"
         )
     if command in {"front", "rear", "top", "side"}:
         if training_running:
@@ -199,18 +233,23 @@ def _build_command_ack(command: str) -> str:
                 f"🎥 <b>{command.upper()} 요청 수신</b>\n"
                 f"<i>run: {run_name}</i>\n"
                 f"<i>훈련 중이므로 최신 {command} 영상을 찾아 전송합니다.</i>"
+                f"{checkpoint_hint}"
             )
         return (
             f"🎥 <b>{command.upper()} 요청 수신</b>\n"
             f"<i>run: {run_name}</i>\n"
             f"<i>checkpoint: {checkpoint_name}</i>\n"
             f"<i>현재 checkpoint 기준으로 {command} 영상을 생성합니다.</i>"
+            f"{checkpoint_hint}"
         )
     return f"🎛️ <b>{command.upper()} 요청 수신</b>"
 
 
-def _handle_report_command(run_dir: str, checkpoint: str) -> None:
+def _handle_report_command(run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
     if common.is_training_running():
+        if checkpoint_iter is not None:
+            common.send_text("⚠️ 특정 iteration 리포트는 훈련이 정지된 상태에서만 생성할 수 있습니다.", common.SUPERVISOR_LOG)
+            return
         zip_path = common.find_latest_report_zip(run_dir)
         if not zip_path:
             common.send_text("⚠️ 현재 훈련 중이며 전송할 최신 ZIP 리포트가 없습니다.", common.SUPERVISOR_LOG)
@@ -237,8 +276,11 @@ def _handle_report_command(run_dir: str, checkpoint: str) -> None:
         common.update_state(mode="stopped", last_command="report", last_error="")
 
 
-def _handle_view_command(view_key: str, run_dir: str, checkpoint: str) -> None:
+def _handle_view_command(view_key: str, run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
     if common.is_training_running():
+        if checkpoint_iter is not None:
+            common.send_text(f"⚠️ 특정 iteration {view_key} 영상은 훈련이 정지된 상태에서만 생성할 수 있습니다.", common.SUPERVISOR_LOG)
+            return
         video_path = common.find_latest_video(view_key, run_dir)
         if not video_path:
             common.send_text(f"⚠️ 현재 훈련 중이며 최근 {view_key} 영상을 찾지 못했습니다.", common.SUPERVISOR_LOG)
@@ -263,8 +305,9 @@ def _handle_view_command(view_key: str, run_dir: str, checkpoint: str) -> None:
         common.update_state(mode="stopped", last_command=view_key, last_error="")
 
 
-def handle_command(command: str) -> None:
-    run_dir, checkpoint = common.resolve_context()
+def handle_command(command: str, checkpoint_iter: int | None = None) -> None:
+    run_dir = common.resolve_active_run_dir()
+    checkpoint = _resolve_requested_checkpoint(run_dir, checkpoint_iter)
     if command == "help":
         _send_notice("COMMAND MENU", common.help_text().replace("\n", "\n"), icon="❔")
         return
@@ -293,10 +336,10 @@ def handle_command(command: str) -> None:
         _send_notice("CONTEXT NOT FOUND", "active run/checkpoint를 찾지 못했습니다.", icon="⚠️")
         return
     if command == "report":
-        _handle_report_command(run_dir, checkpoint)
+        _handle_report_command(run_dir, checkpoint, checkpoint_iter=checkpoint_iter)
         return
     if command in {"front", "rear", "top", "side"}:
-        _handle_view_command(command, run_dir, checkpoint)
+        _handle_view_command(command, run_dir, checkpoint, checkpoint_iter=checkpoint_iter)
         return
     _send_notice("UNKNOWN COMMAND", f"{command}\n\n{common.help_text()}", icon="⚠️")
 
@@ -516,17 +559,19 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             common.SUPERVISOR_LOG,
                         )
                         continue
-                    command = common.normalize_command(text)
+                    command, arg_text = _parse_command_request(text)
                     if command not in common.command_variants():
                         continue
-                    if _is_duplicate_command(chat_id, user_id, command):
+                    command_key = f"{command} {arg_text}".strip()
+                    if _is_duplicate_command(chat_id, user_id, command_key):
                         common.write_log(
-                            f"Skipped duplicate Telegram command chat_id={chat_id} user_id={user_id} command={command}",
+                            f"Skipped duplicate Telegram command chat_id={chat_id} user_id={user_id} command={command_key}",
                             common.SUPERVISOR_LOG,
                         )
                         continue
-                    common.send_text(_build_command_ack(command), common.SUPERVISOR_LOG, parse_mode="HTML")
-                    handle_command(command)
+                    checkpoint_iter = _parse_checkpoint_iter(arg_text)
+                    common.send_text(_build_command_ack(command, checkpoint_iter=checkpoint_iter), common.SUPERVISOR_LOG, parse_mode="HTML")
+                    handle_command(command, checkpoint_iter=checkpoint_iter)
                 shutdown_source = common.consume_supervisor_shutdown_request()
                 if shutdown_source:
                     common.write_log(f"Supervisor shutdown requested by {shutdown_source}", common.SUPERVISOR_LOG)
