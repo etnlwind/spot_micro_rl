@@ -66,7 +66,7 @@ def main() -> None:
                 report_text = common.format_report(data, run_name, cycle_num=(milestone // args.iter_step))
                 record = common.build_report_record(data, run_name, cycle_num=(milestone // args.iter_step), report_kind="heartbeat")
                 common.append_report_record(run_dir, record)
-                common.send_text(report_text, common.HEARTBEAT_LOG)
+                common.send_text(report_text, common.HEARTBEAT_LOG, parse_mode="HTML")
                 last_sent_milestone = milestone
             except Exception as err:
                 common.write_log(f"Heartbeat loop error: {err}\n{common.capture_exception()}", common.HEARTBEAT_LOG)

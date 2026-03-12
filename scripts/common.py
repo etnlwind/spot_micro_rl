@@ -1919,25 +1919,27 @@ def refresh_v23_training_logs(run_dir: str, log_path: str) -> dict:
 def format_report(data: dict, run_name: str, cycle_num: int) -> str:
     reward_vals = data.get("Train/mean_reward", [])
     ep_len_vals = data.get("Train/mean_episode_length", [])
+    run_label = html.escape(str(run_name))
+    match = re.match(r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})$", str(run_name or ""))
+    if match:
+        run_label = f"{match.group(1)} {match.group(2)}:{match.group(3)}:{match.group(4)}"
     if not reward_vals:
-        return "⚠️ SpotMicro Command Center\n• heartbeat: metrics unavailable"
+        return f"⚠️ <b>HEARTBEAT</b> ({run_label})\n🟢 metrics unavailable"
     current_iter = int(reward_vals[-1][0])
     current_reward = float(reward_vals[-1][1])
     current_ep_len = float(ep_len_vals[-1][1]) if ep_len_vals else 0.0
     run_dir = os.path.join(LOG_BASE, run_name)
     kpi = build_supervisor_kpi_snapshot(run_dir) if os.path.isdir(run_dir) else build_supervisor_kpi_snapshot(resolve_active_run_dir() or "")
     return (
-        "💓 SpotMicro Command Center\n"
-        "• heartbeat: milestone reached\n"
-        f"• run: {run_name}\n"
-        f"• cycle: {cycle_num}\n"
-        f"• iter: {current_iter:,}\n"
-        f"• reward: {current_reward:.3f}\n"
-        f"• ep_len: {current_ep_len:.1f}\n"
-        f"• verdict: {kpi['verdict']}\n"
-        f"• kpi: {kpi['kpi_line']}\n"
-        f"• gait: {kpi['gait']} {kpi['gait_score']}/13\n"
-        f"• stability: {kpi['stability']} {kpi['stability_score']}/10"
+        f"💓 <b>HEARTBEAT</b> ({run_label})\n"
+        f"🟢 cycle: {cycle_num}\n"
+        f"🟢 iter: {current_iter:,}\n"
+        f"🟢 reward: {current_reward:.3f}\n"
+        f"🟢 ep_len: {current_ep_len:.1f}\n"
+        f"🟢 verdict: {html.escape(str(kpi['verdict']))}\n"
+        f"🟢 kpi: {html.escape(str(kpi['kpi_line']))}\n"
+        f"🟢 gait: {html.escape(str(kpi['gait']))} {kpi['gait_score']}/13\n"
+        f"🟢 stability: {html.escape(str(kpi['stability']))} {kpi['stability_score']}/10"
     )
 
 
