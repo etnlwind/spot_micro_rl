@@ -2271,7 +2271,53 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
         if tag.startswith("Episode_Reward/") and values:
             rewards[tag.replace("Episode_Reward/", "")] = float(values[-1][1])
     progress_pct = (current_iter / MAX_ITERATIONS * 100.0) if MAX_ITERATIONS > 0 else 0.0
+    max_iter = MAX_ITERATIONS
     reasons = kpi.get("reasons") or []
+    reward_avg10 = float(kpi.get("reward_avg10") or 0.0)
+    survival_pct = float(kpi.get("survival_pct") or 0.0)
+    timeout_pct = float(kpi.get("timeout_pct") or 0.0)
+    fall_pct = float(kpi.get("fall_pct") or 0.0)
+    current_reward = float(kpi.get("reward") or 0.0)
+    current_ep_len = float(kpi.get("ep_len") or 0.0)
+    gait_grade = str(kpi.get("gait") or "N/A")
+    gait_score = int(kpi.get("gait_score") or 0)
+    stab_grade = str(kpi.get("stability") or "N/A")
+    stab_score = int(kpi.get("stability_score") or 0)
+    stab_valid = bool(kpi.get("stability_valid"))
+    posture_grade = str(kpi.get("posture") or "N/A")
+    posture_score = int(kpi.get("posture_score") or 0)
+    bad_orient = float(_latest_scalar(data, "Episode_Termination/bad_orientation") or 0.0)
+    reward_icon, reward_pct = _trend_icon_and_pct(reward_vals)
+    ep_icon, _ep_pct = _trend_icon_and_pct(ep_len_vals) if ep_len_vals else ("📊", 0.0)
+    all_reward_values = [float(v) for _, v in reward_vals]
+    best_reward = max(all_reward_values)
+    worst_reward = min(all_reward_values)
+    best_iter = int(reward_vals[all_reward_values.index(best_reward)][0])
+    positive = sorted([(name, value) for name, value in rewards.items() if value > 0.001], key=lambda item: item[1], reverse=True)
+    negative = sorted([(name, value) for name, value in rewards.items() if value < -0.001], key=lambda item: item[1])
+
+    primary_kpi_defs = [
+        ("standing_height", "기립높이"),
+        ("forward_velocity", "전진속도"),
+        ("diagonal_coupling", "대각커플링"),
+        ("trot_gait", "트로트패턴"),
+        ("rear_joint_velocity", "뒷다리활성"),
+        ("foot_clearance", "발들기"),
+    ]
+    primary_kpi_lines = []
+    primary_green_count = 0
+    primary_yellow_count = 0
+    for metric_name, label in primary_kpi_defs:
+        tag = f"Episode_Reward/{metric_name}"
+        value = rewards.get(metric_name, 0.0)
+        icon, pct = _trend_icon_and_pct(data.get(tag, [])) if tag in data else ("📊", 0.0)
+        state_icon, state_label = classify_primary_kpi(metric_name, value)
+        if state_label == "양호":
+            primary_green_count += 1
+        elif state_label == "형성중":
+            primary_yellow_count += 1
+        primary_kpi_lines.append(f"- {state_icon} {label}: {value:+.4f} {icon} ({pct:+.1f}%) [{state_label}]")
+
     trend_defs = [
         ("trot_gait", "트로트"),
         ("diagonal_coupling", "대각커플링"),
@@ -2287,6 +2333,56 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
         icon, pct = _trend_icon_and_pct(values)
         trend_lines.append(f"- {icon} {label}: {pct:+.1f}%")
 
+    key_trend_lines = []
+    trend_metrics = [
+        ("trot_gait", "트로트패턴", ""),
+        ("diagonal_coupling", "관절커플링", "[운동학]"),
+        ("leg_lift", "다리들기", ""),
+        ("rear_joint_velocity", "뒷다리속도", "[관절]"),
+        ("standing_height", "기립높이", ""),
+        ("foot_clearance", "발들기", ""),
+        ("forward_velocity", "전진속도", ""),
+        ("stride_length", "보폭", "[접촉]"),
+        ("gait_cycle_period", "걸음주기", "[접촉]"),
+        ("rear_forward_stride", "뒷다리보폭", "[접촉]"),
+        ("rear_alternation", "뒷다리교대", "[접촉]"),
+        ("swing_stride", "스윙보폭", "[접촉]"),
+        ("stance_propulsion", "스탠스추진", "[접촉]"),
+    ]
+    for metric_name, label, tag_type in trend_metrics:
+        tag = f"Episode_Reward/{metric_name}"
+        values = data.get(tag, [])
+        if not values:
+            continue
+        value = rewards.get(metric_name, 0.0)
+        icon, pct = _trend_icon_and_pct(values)
+        suffix = f" {tag_type}" if tag_type else ""
+        key_trend_lines.append(f"- {icon} {label}: {value:+.4f} ({pct:+.1f}%){suffix}")
+
+    penalty_trend_lines = []
+    penalty_metrics = [
+        ("joint_vel_l2", "관절속도"),
+        ("action_rate_l2", "행동변화"),
+        ("dof_acc_l2", "관절가속"),
+        ("ang_vel_xy_l2", "각속도"),
+        ("same_side_penalty", "동측보행"),
+        ("dof_pos_limits", "관절한계"),
+        ("undesired_contacts", "불필요접촉"),
+        ("flat_orientation_l2", "자세기울기"),
+        ("shoulder_neutral", "어깨중립"),
+        ("shoulder_symmetry", "어깨대칭"),
+        ("foot_extension", "발뻗기"),
+        ("feet_below_knees", "무릎아래발"),
+    ]
+    for metric_name, label in penalty_metrics:
+        tag = f"Episode_Reward/{metric_name}"
+        values = data.get(tag, [])
+        if not values:
+            continue
+        value = rewards.get(metric_name, 0.0)
+        icon, pct = _trend_icon_and_pct(values)
+        penalty_trend_lines.append(f"- {icon} {label}: {value:+.4f} ({pct:+.1f}%)")
+
     posture_raw_lines = []
     posture_candidates = [
         ("stance_width_mean_raw", "stance_width_mean"),
@@ -2301,33 +2397,184 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
             continue
         posture_raw_lines.append(f"- {label}: {numeric:+.4f}")
 
+    action_rate = abs(rewards.get("action_rate_l2", 0.0))
+    joint_vel = abs(rewards.get("joint_vel_l2", 0.0))
+    dof_acc = abs(rewards.get("dof_acc_l2", 0.0))
+    smooth_total = action_rate + joint_vel + dof_acc
+    if smooth_total < 10:
+        smooth_label = "매우 부드러움 ✅"
+    elif smooth_total < 30:
+        smooth_label = "적당히 부드러움 🟡"
+    elif smooth_total < 60:
+        smooth_label = "거친 편 🟠"
+    else:
+        smooth_label = "매우 거침 🔴"
+
+    vf_loss = float(_latest_scalar(data, "Loss/value_function") or 0.0)
+    surr_loss = float(_latest_scalar(data, "Loss/surrogate") or 0.0)
+    noise_std = float(_latest_scalar(data, "Policy/mean_noise_std") or 0.0)
+    vel_xy = float(_latest_scalar(data, "Metrics/base_velocity/error_vel_xy") or 0.0)
+    vel_yaw = float(_latest_scalar(data, "Metrics/base_velocity/error_vel_yaw") or 0.0)
+
+    history_lines = []
+    noise_vals = data.get("Policy/mean_noise_std", [])
+    snap_iters = set()
+    step = 200
+    snap_iter = int(reward_vals[0][0])
+    while snap_iter <= current_iter:
+        snap_iters.add(snap_iter)
+        snap_iter += step
+    snap_iters.add(int(current_iter))
+    for scalar_step, reward_value in reward_vals:
+        iter_value = int(scalar_step)
+        if iter_value not in snap_iters:
+            continue
+        snap_iters.discard(iter_value)
+        ep_value = next((v for st, v in ep_len_vals if int(st) == iter_value), current_ep_len)
+        noise_value = next((v for st, v in noise_vals if int(st) == iter_value), None)
+        noise_text = f"{float(noise_value):.3f}" if noise_value is not None else "?"
+        history_lines.append(f"{iter_value:>6} | {float(reward_value):>7.1f} | {float(ep_value):>5.1f} | {noise_text}")
+
+    early_n = min(20, len(reward_vals) // 3) or 1
+    late_n = min(20, len(reward_vals) // 3) or 1
+    early_avg = sum(v for _, v in reward_vals[:early_n]) / early_n
+    late_avg = sum(v for _, v in reward_vals[-late_n:]) / late_n
+    improvement = late_avg - early_avg
+    improving_keys = []
+    declining_keys = []
+    key_change_metrics = [
+        ("trot_gait", "트로트"),
+        ("diagonal_coupling", "대각선"),
+        ("leg_lift", "다리들기"),
+        ("rear_joint_velocity", "뒷다리"),
+        ("standing_height", "기립"),
+        ("foot_clearance", "발들기"),
+        ("forward_velocity", "전진"),
+    ]
+    for metric_name, label in key_change_metrics:
+        tag = f"Episode_Reward/{metric_name}"
+        values = data.get(tag, [])
+        if len(values) < 4:
+            continue
+        half = len(values) // 2
+        old_avg = sum(v for _, v in values[:half]) / len(values[:half])
+        new_avg = sum(v for _, v in values[half:]) / len(values[half:])
+        pct = ((new_avg - old_avg) / abs(old_avg) * 100.0) if old_avg not in (0, 0.0) else 0.0
+        if pct > 5.0:
+            improving_keys.append((label, pct))
+        elif pct < -5.0:
+            declining_keys.append((label, pct))
+
+    forward_velocity = rewards.get("forward_velocity", 0.0)
+    diagonal_coupling = rewards.get("diagonal_coupling", 0.0)
+    foot_clearance = rewards.get("foot_clearance", 0.0)
+    trot_gait = rewards.get("trot_gait", 0.0)
+    if survival_pct < 5.0:
+        phase_icon = "🥚"
+        phase = "1단계: 기립 학습 초기"
+        phase_desc = "로봇이 즉시 넘어짐. 페널티 회피 학습 중"
+    elif survival_pct < 20.0:
+        phase_icon = "🐣"
+        phase = "2단계: 기립 시도"
+        phase_desc = "짧게 서있기 시작. 균형 학습 중"
+    elif survival_pct < 50.0:
+        phase_icon = "🐥"
+        phase = "3단계: 관절 패턴 형성"
+        extras = []
+        if foot_clearance > 0.5:
+            extras.append(f"발들기 {foot_clearance:.1f}")
+        if trot_gait > 0.3:
+            extras.append(f"트로트 {trot_gait:.2f}")
+        phase_desc = f"관절 리듬 출현 ({', '.join(extras)}) — 실제 보행 여부는 영상 확인 필요" if extras else "관절 리듬 출현 (실제 보행 여부는 영상 확인 필요)"
+    elif survival_pct >= 50.0 and diagonal_coupling > 1.0 and forward_velocity > 0.5:
+        kin_parts = [f"커플링 {diagonal_coupling:.1f}", f"전진 {forward_velocity:.1f}"]
+        if foot_clearance > 0.8:
+            kin_parts.append(f"발들기 {foot_clearance:.1f}")
+        if trot_gait > 0.5:
+            kin_parts.append(f"트로트 {trot_gait:.2f}")
+        kin_text = " + ".join(kin_parts)
+        if survival_pct >= 80.0:
+            phase_icon = "🦮"
+            phase = "5단계: 안정화 + 운동학 활성"
+            phase_desc = f"생존 {survival_pct:.0f}% + {kin_text} — 영상 최종 확인"
+        else:
+            phase_icon = "🐕"
+            phase = "4단계: 보행 발달 후보"
+            phase_desc = f"{kin_text} 활성 — rear-driven 가능성 있음 (영상 확인)"
+    elif survival_pct >= 80.0:
+        phase_icon = "🦮"
+        phase = "5단계: 생존 안정화 (운동학 미확인)"
+        phase_desc = "생존은 안정적이나 관절 커플링/전진 속도가 아직 약함"
+    else:
+        phase_icon = "🐕"
+        phase = "4단계: 보행 발달 후보"
+        phase_desc = "관절 커플링 발달 중 — rear-driven일 가능성 있음 (영상 확인)"
+
+    good_points = []
+    if improvement > 0:
+        good_points.append(f"보상 {improvement:+.1f} 개선 ({early_avg:.1f} → {late_avg:.1f})")
+    if noise_vals:
+        noise_first = float(noise_vals[0][1])
+        noise_last = float(noise_vals[-1][1])
+        if noise_last < noise_first * 0.95:
+            good_points.append(f"탐색 안정화 (noise {noise_first:.3f} → {noise_last:.3f})")
+    if timeout_pct > 0:
+        good_points.append(f"timeout 비율 {timeout_pct:.0f}% (생존 개시)")
+    if improving_keys:
+        names = ", ".join(f"{name}({pct:+.0f}%)" for name, pct in improving_keys[:3])
+        good_points.append(f"개선 중: {names}")
+    if reward_pct > 3.0:
+        good_points.append(f"최근 보상 추세 상승 ({reward_pct:+.1f}%)")
+    if not good_points:
+        good_points.append("아직 뚜렷한 개선 신호 없음 (초기 단계)")
+
+    problems = []
+    if survival_pct < 5.0:
+        problems.append(f"즉사 수준 생존율: {current_ep_len:.1f}steps ({survival_pct:.1f}%)")
+    elif survival_pct < 20.0:
+        problems.append(f"낮은 생존율: {survival_pct:.1f}%")
+    if bad_orient > 0.9:
+        problems.append(f"bad_orientation {bad_orient*100:.0f}% — 거의 항상 넘어짐")
+    if declining_keys:
+        names = ", ".join(f"{name}({pct:+.0f}%)" for name, pct in declining_keys[:3])
+        problems.append(f"하락 중: {names}")
+    if improvement < 0:
+        problems.append(f"보상 악화 ({improvement:+.1f})")
+    if smooth_total > 40.0:
+        problems.append(f"페널티 지배적 (smooth={smooth_total:.1f})")
+    if gait_score < 2 and current_iter > 3000:
+        problems.append(f"iter {current_iter:,}인데 걸음걸이 미형성")
+    if not problems:
+        problems.append("현재 특이 사항 없음")
+
     stability_text = (
         f"{html.escape(str(kpi['stability']))} ({int(kpi['stability_score'] or 0)}/10)"
-        if kpi.get("stability_valid")
+        if stab_valid
         else html.escape(str(kpi["stability"]))
     )
     summary_lines = _build_heartbeat_summary(
         current_iter=current_iter,
         rewards=rewards,
-        survival_pct=float(kpi.get("survival_pct") or 0.0),
-        timeout_pct=float(kpi.get("timeout_pct") or 0.0),
-        fall_pct=float(kpi.get("fall_pct") or 0.0),
-        gait_grade=str(kpi.get("gait") or "N/A"),
-        gait_score=int(kpi.get("gait_score") or 0),
-        stab_grade=str(kpi.get("stability") or "N/A"),
-        stab_score=int(kpi.get("stability_score") or 0),
-        stab_valid=bool(kpi.get("stability_valid")),
-        posture_grade=str(kpi.get("posture") or "N/A"),
-        posture_score=int(kpi.get("posture_score") or 0),
+        survival_pct=survival_pct,
+        timeout_pct=timeout_pct,
+        fall_pct=fall_pct,
+        gait_grade=gait_grade,
+        gait_score=gait_score,
+        stab_grade=stab_grade,
+        stab_score=stab_score,
+        stab_valid=stab_valid,
+        posture_grade=posture_grade,
+        posture_score=posture_score,
     )
 
     lines = [
         f"💓 <b>HEARTBEAT</b> ({run_label})",
         "",
         f"- iter: {current_iter:,} / {MAX_ITERATIONS:,} ({progress_pct:.1f}%)",
-        f"- reward: {float(kpi.get('reward') or 0.0):.3f} (avg10: {float(kpi.get('reward_avg10') or 0.0):.3f})",
-        f"- ep_len: {float(kpi.get('ep_len') or 0.0):.1f} | survival: {float(kpi.get('survival_pct') or 0.0):.1f}%",
-        f"- termination: timeout {float(kpi.get('timeout_pct') or 0.0):.0f}% / fall {float(kpi.get('fall_pct') or 0.0):.0f}%",
+        f"- reward: {current_reward:.3f} (avg10: {reward_avg10:.3f})",
+        f"- ep_len: {current_ep_len:.1f} | survival: {survival_pct:.1f}%",
+        f"- termination: timeout {timeout_pct:.0f}% / fall {fall_pct:.0f}%",
+        f"- best/worst: {best_reward:.1f} @iter {best_iter:,} / {worst_reward:.1f}",
         "",
         f"- 운영 판정: {html.escape(str(kpi['verdict']))}",
     ]
@@ -2336,10 +2583,18 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
     lines.extend(
         [
             "",
+            "- 우선 KPI (gait quality first)",
+        ]
+    )
+    lines.extend(f"  {html.escape(text)}" for text in primary_kpi_lines)
+    lines.extend(
+        [
+            "",
             "- 코어 품질",
-            f"  - gait: {html.escape(str(kpi['gait']))} ({int(kpi['gait_score'] or 0)}/13)",
+            f"  - gait: {html.escape(gait_grade)} ({gait_score}/13)",
             f"  - stability: {stability_text}",
-            f"  - posture/style: {html.escape(str(kpi.get('posture') or 'N/A'))} ({int(kpi.get('posture_score') or 0)}/10)",
+            f"  - posture/style: {html.escape(posture_grade)} ({posture_score}/10)",
+            f"  - primary KPI mix: green {primary_green_count} / yellow {primary_yellow_count}",
         ]
     )
     foot_jitter_score = kpi.get("foot_jitter_score")
@@ -2363,17 +2618,64 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
     if trend_lines:
         lines.extend(["", "- 핵심 추세"])
         lines.extend(f"  {line}" for line in trend_lines)
+    if key_trend_lines:
+        lines.extend(["", "- 보행 보상 추세"])
+        lines.extend(f"  {html.escape(text)}" for text in key_trend_lines)
+    if penalty_trend_lines:
+        lines.extend(["", "- 페널티 추세"])
+        lines.extend(f"  {html.escape(text)}" for text in penalty_trend_lines)
+    lines.extend(
+        [
+            "",
+            "- 동작 품질",
+            f"  - {smooth_label} (action={action_rate:.1f} joint={joint_vel:.1f} acc={dof_acc:.1f})",
+            "",
+            "- 학습 지표",
+            f"  - VF Loss: {vf_loss:.1f}",
+            f"  - Surrogate: {surr_loss:.5f}",
+            f"  - Noise std: {noise_std:.3f}",
+            f"  - Vel err (xy): {vel_xy:.4f}",
+            f"  - Vel err (yaw): {vel_yaw:.4f}",
+        ]
+    )
+    if positive:
+        lines.extend(["", "- TOP5 기여 보상"])
+        for index, (name, value) in enumerate(positive[:5], start=1):
+            tag = f"Episode_Reward/{name}"
+            icon, _pct = _trend_icon_and_pct(data.get(tag, []))
+            lines.append(f"  - {index}. {html.escape(name)}: {value:+.4f} {icon}")
+    if negative:
+        lines.extend(["", "- TOP5 패널티"])
+        for index, (name, value) in enumerate(negative[:5], start=1):
+            tag = f"Episode_Reward/{name}"
+            icon, _pct = _trend_icon_and_pct(data.get(tag, []))
+            lines.append(f"  - {index}. {html.escape(name)}: {value:+.4f} {icon}")
+    if history_lines:
+        lines.extend(["", "- 보상 추이", "  <code>Iter   | Reward  | EpLen | Noise</code>"])
+        lines.extend(f"  <code>{html.escape(text)}</code>" for text in history_lines)
+    lines.extend(
+        [
+            "",
+            f"- 학습 단계: {phase_icon} {html.escape(phase)}",
+            f"  - {html.escape(phase_desc)}",
+            "",
+            "- 좋은 점",
+        ]
+    )
+    lines.extend(f"  - {html.escape(text)}" for text in good_points[:4])
+    lines.extend(["", "- 문제점"])
+    lines.extend(f"  - {html.escape(text)}" for text in problems[:4])
     if posture_raw_lines:
         lines.extend(["", "- posture/raw"])
         lines.extend(f"  {line}" for line in posture_raw_lines)
     if summary_lines:
-        lines.extend(["", "- 해석"])
+        lines.extend(["", "- AI 분석 의견"])
         lines.extend(f"  {html.escape(text)}" for text in summary_lines)
     lines.extend(
         [
             "",
             "- 참고",
-            "  - contact stride/cycle은 참고 지표로만 취급",
+            "  - contact stride/cycle 계열은 참고 지표로만 취급",
             f"  - next report: iter {((current_iter // HEARTBEAT_ITER_STEP) + 1) * HEARTBEAT_ITER_STEP:,}",
         ]
     )
