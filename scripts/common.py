@@ -1924,7 +1924,7 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
     if match:
         run_label = f"{match.group(1)} {match.group(2)}:{match.group(3)}:{match.group(4)}"
     if not reward_vals:
-        return f"⚠️ <b>HEARTBEAT</b> ({run_label})\n🟢 metrics unavailable"
+        return f"⚠️ <b>HEARTBEAT</b> ({run_label})\n- metrics unavailable"
     current_iter = int(reward_vals[-1][0])
     current_reward = float(reward_vals[-1][1])
     current_ep_len = float(ep_len_vals[-1][1]) if ep_len_vals else 0.0
@@ -1932,14 +1932,14 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
     kpi = build_supervisor_kpi_snapshot(run_dir) if os.path.isdir(run_dir) else build_supervisor_kpi_snapshot(resolve_active_run_dir() or "")
     return (
         f"💓 <b>HEARTBEAT</b> ({run_label})\n"
-        f"🟢 cycle: {cycle_num}\n"
-        f"🟢 iter: {current_iter:,}\n"
-        f"🟢 reward: {current_reward:.3f}\n"
-        f"🟢 ep_len: {current_ep_len:.1f}\n"
-        f"🟢 verdict: {html.escape(str(kpi['verdict']))}\n"
-        f"🟢 kpi: {html.escape(str(kpi['kpi_line']))}\n"
-        f"🟢 gait: {html.escape(str(kpi['gait']))} {kpi['gait_score']}/13\n"
-        f"🟢 stability: {html.escape(str(kpi['stability']))} {kpi['stability_score']}/10"
+        f"- cycle: {cycle_num}\n"
+        f"- iter: {current_iter:,}\n"
+        f"- reward: {current_reward:.3f}\n"
+        f"- ep_len: {current_ep_len:.1f}\n"
+        f"- verdict: {html.escape(str(kpi['verdict']))}\n"
+        f"- kpi: {html.escape(str(kpi['kpi_line']))}\n"
+        f"- gait: {html.escape(str(kpi['gait']))} {kpi['gait_score']}/13\n"
+        f"- stability: {html.escape(str(kpi['stability']))} {kpi['stability_score']}/10"
     )
 
 
