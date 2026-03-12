@@ -1212,6 +1212,7 @@ def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
     result = {
         "iter": 0,
         "reward": 0.0,
+        "ep_len": 0.0,
         "survival_pct": 0.0,
         "verdict": "⚪ KPI unavailable",
         "reason": "TensorBoard 데이터를 읽지 못함",
@@ -1259,6 +1260,7 @@ def build_supervisor_kpi_snapshot(run_dir: str) -> dict:
         {
             "iter": current_iter,
             "reward": current_reward,
+            "ep_len": current_ep_len,
             "survival_pct": survival_pct,
             "verdict": verdict,
             "reason": reasons[0] if reasons else "",
@@ -1308,9 +1310,64 @@ def append_report_record(run_dir: str, record: dict | None) -> None:
         write_log(f"V23 workbook refresh failed: {err}", SUPERVISOR_LOG)
 
 
-def get_v23_master_log_path() -> str:
-    return os.path.join(LOG_BASE, V23_MASTER_LOG_FILENAME)
+def _format_relative_age(timestamp_text: str | None) -> str:
+    if not timestamp_text:
+        return "N/A"
+    try:
+        target = datetime.datetime.fromisoformat(str(timestamp_text))
+    except (TypeError, ValueError):
+        return "N/A"
+    delta = datetime.datetime.now() - target
+    total_seconds = max(int(delta.total_seconds()), 0)
+    if total_seconds < 60:
+        return "just now"
+    if total_seconds < 3600:
+        return f"{total_seconds // 60}m ago"
+    if total_seconds < 86400:
+        return f"{total_seconds // 3600}h ago"
+    return f"{total_seconds // 86400}d ago"
 
+
+def _get_last_heartbeat_age(run_dir: str | None) -> str:
+    if not run_dir or not os.path.isdir(run_dir):
+        return "N/A"
+    records = load_report_history(run_dir)
+    for record in reversed(records):
+        timestamp_text = record.get("timestamp")
+        if timestamp_text:
+            return _format_relative_age(timestamp_text)
+    history_path = get_heartbeat_history_path(run_dir)
+    if os.path.isfile(history_path):
+        history_updated_at = datetime.datetime.fromtimestamp(os.path.getmtime(history_path)).isoformat(timespec="seconds")
+        return _format_relative_age(history_updated_at)
+    return "N/A"
+
+
+def _build_status_snapshot() -> dict:
+    state = load_state()
+    run_dir = resolve_active_run_dir()
+    checkpoint = resolve_active_checkpoint(run_dir)
+    kpi_snapshot = build_supervisor_kpi_snapshot(run_dir) if run_dir and os.path.isdir(run_dir) else {}
+    iter_num = int(kpi_snapshot.get("iter") or 0) or get_checkpoint_iter(checkpoint)
+    progress_pct = (iter_num / MAX_ITERATIONS * 100.0) if MAX_ITERATIONS > 0 else 0.0
+    last_videos = state.get("last_videos") or {}
+    available_views = [key for key, path in sorted(last_videos.items()) if path and os.path.isfile(path)]
+    return {
+        "state": state,
+        "run_dir": run_dir,
+        "checkpoint": checkpoint,
+        "iter_num": iter_num,
+        "training_alive": is_training_running(),
+        "heartbeat_alive": is_heartbeat_running(),
+        "mode": str(state.get("mode", "idle")),
+        "progress_text": f"{iter_num:,}/{MAX_ITERATIONS:,} ({progress_pct:.1f}%)",
+        "reward_text": f"{float(kpi_snapshot.get('reward') or 0.0):.3f}" if kpi_snapshot else "N/A",
+        "ep_len_text": f"{float(kpi_snapshot.get('ep_len') or 0.0):.1f}" if kpi_snapshot else "N/A",
+        "verdict_text": str(kpi_snapshot.get("verdict") or "N/A") if kpi_snapshot else "N/A",
+        "kpi_text": str(kpi_snapshot.get("kpi_line") or "N/A") if kpi_snapshot else "N/A",
+        "last_heartbeat_text": _get_last_heartbeat_age(run_dir),
+        "available_views": available_views,
+    }
 
 def get_v23_checkpoint_review_path() -> str:
     return os.path.join(LOG_BASE, V23_CHECKPOINT_REVIEW_FILENAME)
@@ -2662,13 +2719,14 @@ def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bo
 
 
 def build_status_text() -> str:
-    state = load_state()
-    run_dir = resolve_active_run_dir()
-    checkpoint = resolve_active_checkpoint(run_dir)
-    iter_num = get_checkpoint_iter(checkpoint)
-    training_alive = is_training_running()
-    heartbeat_alive = is_heartbeat_running()
-    mode = str(state.get("mode", "idle"))
+    snapshot = _build_status_snapshot()
+    state = snapshot["state"]
+    run_dir = snapshot["run_dir"]
+    checkpoint = snapshot["checkpoint"]
+    iter_num = snapshot["iter_num"]
+    training_alive = snapshot["training_alive"]
+    heartbeat_alive = snapshot["heartbeat_alive"]
+    mode = snapshot["mode"]
 
     def _status_light(value: str, mapping: dict[str, str], default: str) -> str:
         return f"{mapping.get(value, default)}{value}"
@@ -2681,10 +2739,15 @@ def build_status_text() -> str:
         f"• run: {os.path.basename(run_dir) if run_dir else 'N/A'}",
         f"• checkpoint: {os.path.basename(checkpoint) if checkpoint else 'N/A'}",
         f"• iter: {iter_num:,}",
+        f"• progress: {snapshot['progress_text']}",
+        f"• reward: {snapshot['reward_text']}",
+        f"• ep_len: {snapshot['ep_len_text']}",
+        f"• verdict: {snapshot['verdict_text']}",
+        f"• kpi: {snapshot['kpi_text']}",
+        f"• last_heartbeat: {snapshot['last_heartbeat_text']}",
         f"• last_report_zip: {os.path.basename(state.get('last_report_zip') or '') or 'N/A'}",
     ]
-    last_videos = state.get("last_videos") or {}
-    available_views = [key for key, path in sorted(last_videos.items()) if path and os.path.isfile(path)]
+    available_views = snapshot["available_views"]
     lines.append(f"• cached_views: {', '.join(available_views) if available_views else 'none'}")
     if TELEGRAM_VERBOSE_ERRORS and state.get("last_error"):
         lines.append(f"• last_error: {state['last_error']}")
@@ -2692,13 +2755,14 @@ def build_status_text() -> str:
 
 
 def format_status_html() -> str:
-    state = load_state()
-    run_dir = resolve_active_run_dir()
-    checkpoint = resolve_active_checkpoint(run_dir)
-    iter_num = get_checkpoint_iter(checkpoint)
-    training_alive = is_training_running()
-    heartbeat_alive = is_heartbeat_running()
-    mode = str(state.get("mode", "idle"))
+    snapshot = _build_status_snapshot()
+    state = snapshot["state"]
+    run_dir = snapshot["run_dir"]
+    checkpoint = snapshot["checkpoint"]
+    iter_num = snapshot["iter_num"]
+    training_alive = snapshot["training_alive"]
+    heartbeat_alive = snapshot["heartbeat_alive"]
+    mode = snapshot["mode"]
 
     def _status_light_html(value: str, mapping: dict[str, str], default: str) -> str:
         return f"{mapping.get(value, default)}{html.escape(value)}"
@@ -2711,10 +2775,15 @@ def format_status_html() -> str:
         f"• run: <code>{html.escape(os.path.basename(run_dir) if run_dir else 'N/A')}</code>",
         f"• checkpoint: <code>{html.escape(os.path.basename(checkpoint) if checkpoint else 'N/A')}</code>",
         f"• iter: <code>{iter_num:,}</code>",
+        f"• progress: <code>{html.escape(snapshot['progress_text'])}</code>",
+        f"• reward: <code>{html.escape(snapshot['reward_text'])}</code>",
+        f"• ep_len: <code>{html.escape(snapshot['ep_len_text'])}</code>",
+        f"• verdict: <code>{html.escape(snapshot['verdict_text'])}</code>",
+        f"• kpi: <code>{html.escape(snapshot['kpi_text'])}</code>",
+        f"• last_heartbeat: <code>{html.escape(snapshot['last_heartbeat_text'])}</code>",
         f"• last_report_zip: <code>{html.escape(os.path.basename(state.get('last_report_zip') or '') or 'N/A')}</code>",
     ]
-    last_videos = state.get("last_videos") or {}
-    available_views = [key for key, path in sorted(last_videos.items()) if path and os.path.isfile(path)]
+    available_views = snapshot["available_views"]
     lines.append(f"• cached_views: <code>{html.escape(', '.join(available_views) if available_views else 'none')}</code>")
     if TELEGRAM_VERBOSE_ERRORS and state.get("last_error"):
         lines.append(f"• last_error: <code>{html.escape(str(state['last_error']))}</code>")
