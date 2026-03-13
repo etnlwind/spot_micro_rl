@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V23"
+TRAIN_VERSION = "V24"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -153,6 +153,12 @@ class SpotMicroRewardCurriculumCfg:
             "ramp1_end": 3000,
             "ramp2_start": 5500,
             "ramp2_end": 8000,
+            "validity_ramp_start": 200,
+            "validity_ramp_end": 600,
+            "validity_limb_usage_initial": -3.0,
+            "validity_limb_usage_final": -12.0,
+            "validity_rear_diff_initial": -2.0,
+            "validity_rear_diff_final": -8.0,
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -538,6 +544,36 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "contact_threshold": 1.0,
                 "target_clearance": 0.06,
                 "target_fwd_vel": 0.3,
+                "min_vel": 0.05,
+            },
+        )
+
+        # V24: 특정 다리 미사용 exploit를 줄이기 위한 최소 limb usage 페널티
+        self.rewards.limb_usage_min_penalty = RewTerm(
+            func=custom_mdp.limb_usage_min_penalty,
+            weight=-12.0,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "min_usage": 0.30,
+                "contact_target": 0.50,
+                "propulsion_target": 0.30,
+                "leg_lift_target": 0.18,
+                "clearance_target": 0.03,
+                "min_vel": 0.05,
+            },
+        )
+
+        # V24: rear-left / rear-right 사용 비대칭 페널티
+        self.rewards.rear_left_right_usage_diff_penalty = RewTerm(
+            func=custom_mdp.rear_left_right_usage_diff_penalty,
+            weight=-8.0,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "max_diff": 0.18,
+                "contact_target": 0.50,
+                "propulsion_target": 0.30,
+                "leg_lift_target": 0.18,
+                "clearance_target": 0.03,
                 "min_vel": 0.05,
             },
         )

@@ -29,6 +29,12 @@ def _contact_state(contact_sensor: ContactSensor, body_ids, threshold: float) ->
     return _contact_force_peak(contact_sensor, body_ids) > threshold
 
 
+def _contact_ratio(contact_sensor: ContactSensor, body_ids, threshold: float) -> torch.Tensor:
+    """Return per-body contact ratio over the available sensor history window."""
+    force_history = contact_sensor.data.net_forces_w_history[:, :, body_ids, :].norm(dim=-1)
+    return (force_history > threshold).float().mean(dim=1)
+
+
 V23_RAW_EXPORT_TERMS = [
     "stance_width_mean_raw",
     "stance_width_front_raw",
@@ -50,6 +56,30 @@ V23_RAW_EXPORT_TERMS = [
     "front_rear_propulsion_diff_raw",
     "front_rear_clearance_diff_raw",
     "front_rear_swing_diff_raw",
+    "contact_ratio_fl",
+    "contact_ratio_fr",
+    "contact_ratio_rl",
+    "contact_ratio_rr",
+    "stance_time_fl",
+    "stance_time_fr",
+    "stance_time_rl",
+    "stance_time_rr",
+    "swing_time_fl",
+    "swing_time_fr",
+    "swing_time_rl",
+    "swing_time_rr",
+    "propulsion_fl",
+    "propulsion_fr",
+    "propulsion_rl",
+    "propulsion_rr",
+    "leg_lift_fl",
+    "leg_lift_fr",
+    "leg_lift_rl",
+    "leg_lift_rr",
+    "clearance_fl",
+    "clearance_fr",
+    "clearance_rl",
+    "clearance_rr",
 ]
 
 _V23_SHOULDER_JOINT_NAMES = [
@@ -64,12 +94,13 @@ _V23_LEG_JOINT_NAMES = [
     "rear_left_leg",
     "rear_right_leg",
 ]
-_V23_FOOT_BODY_NAMES = [
-    "front_left_foot_link",
-    "front_right_foot_link",
-    "rear_left_foot_link",
-    "rear_right_foot_link",
+_V23_CONTACT_BODY_NAMES = [
+    "front_left_toe_link",
+    "front_right_toe_link",
+    "rear_left_toe_link",
+    "rear_right_toe_link",
 ]
+_V23_LEG_SUFFIXES = ("fl", "fr", "rl", "rr")
 
 
 def _compute_heading_xy(quat_w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -102,8 +133,8 @@ def _ensure_v23_raw_metric_state(env: ManagerBasedRLEnv) -> bool:
 
     shoulder_joint_ids, _ = robot.find_joints(_V23_SHOULDER_JOINT_NAMES, preserve_order=True)
     leg_joint_ids, _ = robot.find_joints(_V23_LEG_JOINT_NAMES, preserve_order=True)
-    foot_body_ids, _ = robot.find_bodies(_V23_FOOT_BODY_NAMES, preserve_order=True)
-    contact_body_ids, _ = contact_sensor.find_bodies(_V23_FOOT_BODY_NAMES, preserve_order=True)
+    foot_body_ids, _ = robot.find_bodies(_V23_CONTACT_BODY_NAMES, preserve_order=True)
+    contact_body_ids, _ = contact_sensor.find_bodies(_V23_CONTACT_BODY_NAMES, preserve_order=True)
 
     try:
         shoulder_cfg = env.reward_manager.get_term_cfg("shoulder_neutral")
@@ -127,6 +158,12 @@ def _ensure_v23_raw_metric_state(env: ManagerBasedRLEnv) -> bool:
         target_push_vel = 0.3
         contact_threshold = 1.0
 
+    try:
+        leg_lift_cfg = env.reward_manager.get_term_cfg("leg_lift")
+        target_leg_angle = float(leg_lift_cfg.params.get("target_angle", 0.6))
+    except Exception:
+        target_leg_angle = 0.6
+
     env._v23_raw_metric_cache = {
         "enabled": True,
         "shoulder_joint_ids": shoulder_joint_ids,
@@ -137,6 +174,7 @@ def _ensure_v23_raw_metric_state(env: ManagerBasedRLEnv) -> bool:
         "target_clearance": target_clearance,
         "target_push_vel": target_push_vel,
         "contact_threshold": contact_threshold,
+        "target_leg_angle": target_leg_angle,
     }
     return True
 
@@ -149,6 +187,7 @@ def compute_v23_raw_metrics(env: ManagerBasedRLEnv) -> dict[str, torch.Tensor]:
     robot: Articulation = env.scene["robot"]
     contact_sensor: ContactSensor = env.scene.sensors["contact_forces"]
 
+    contact_ratio = _contact_ratio(contact_sensor, cache["contact_body_ids"], cache["contact_threshold"])
     contacts = _contact_state(contact_sensor, cache["contact_body_ids"], cache["contact_threshold"]).float()
     swing_mask = 1.0 - contacts
     front_swing_count = swing_mask[:, :2].sum(dim=1).clamp(min=1.0)
@@ -169,10 +208,12 @@ def compute_v23_raw_metrics(env: ManagerBasedRLEnv) -> dict[str, torch.Tensor]:
     rear_width = torch.abs(body_y[:, 2] - body_y[:, 3])
 
     leg_angles = torch.abs(robot.data.joint_pos[:, cache["leg_joint_ids"]])
+    leg_lift_per_limb = leg_angles * swing_mask
     front_leg_lift = (leg_angles[:, :2] * swing_mask[:, :2]).sum(dim=1) / front_swing_count
     rear_leg_lift = (leg_angles[:, 2:] * swing_mask[:, 2:]).sum(dim=1) / rear_swing_count
 
     foot_height = robot.data.body_pos_w[:, cache["foot_body_ids"], 2] - env.scene.env_origins[:, 2].unsqueeze(1)
+    clearance_per_limb = torch.clamp(foot_height, min=0.0) * swing_mask
     front_clearance = (foot_height[:, :2] * swing_mask[:, :2]).sum(dim=1) / front_swing_count
     rear_clearance = (foot_height[:, 2:] * swing_mask[:, 2:]).sum(dim=1) / rear_swing_count
 
@@ -183,6 +224,7 @@ def compute_v23_raw_metrics(env: ManagerBasedRLEnv) -> dict[str, torch.Tensor]:
     relative_vel = foot_heading_vel - body_heading_vel.unsqueeze(1)
     push_magnitude = torch.clamp(-relative_vel, min=0.0)
     normalized_push = torch.clamp(push_magnitude / (cache["target_push_vel"] + 1e-6), 0.0, 1.0)
+    propulsion_per_limb = normalized_push * contacts
     front_propulsion = (normalized_push[:, :2] * contacts[:, :2]).sum(dim=1) / front_stance_count
     rear_propulsion = (normalized_push[:, 2:] * contacts[:, 2:]).sum(dim=1) / rear_stance_count
 
@@ -191,8 +233,9 @@ def compute_v23_raw_metrics(env: ManagerBasedRLEnv) -> dict[str, torch.Tensor]:
     shoulder_rl = shoulder_angles[:, 2]
     shoulder_rr = shoulder_angles[:, 3]
 
-    front_swing_ratio = swing_mask[:, :2].mean(dim=1)
-    rear_swing_ratio = swing_mask[:, 2:].mean(dim=1)
+    swing_ratio = 1.0 - contact_ratio
+    front_swing_ratio = swing_ratio[:, :2].mean(dim=1)
+    rear_swing_ratio = swing_ratio[:, 2:].mean(dim=1)
 
     return {
         "stance_width_mean_raw": (front_width + rear_width) / 2.0,
@@ -215,6 +258,30 @@ def compute_v23_raw_metrics(env: ManagerBasedRLEnv) -> dict[str, torch.Tensor]:
         "front_rear_propulsion_diff_raw": torch.abs(front_propulsion - rear_propulsion),
         "front_rear_clearance_diff_raw": torch.abs(front_clearance - rear_clearance),
         "front_rear_swing_diff_raw": torch.abs(front_swing_ratio - rear_swing_ratio),
+        "contact_ratio_fl": contact_ratio[:, 0],
+        "contact_ratio_fr": contact_ratio[:, 1],
+        "contact_ratio_rl": contact_ratio[:, 2],
+        "contact_ratio_rr": contact_ratio[:, 3],
+        "stance_time_fl": contact_ratio[:, 0],
+        "stance_time_fr": contact_ratio[:, 1],
+        "stance_time_rl": contact_ratio[:, 2],
+        "stance_time_rr": contact_ratio[:, 3],
+        "swing_time_fl": swing_ratio[:, 0],
+        "swing_time_fr": swing_ratio[:, 1],
+        "swing_time_rl": swing_ratio[:, 2],
+        "swing_time_rr": swing_ratio[:, 3],
+        "propulsion_fl": propulsion_per_limb[:, 0],
+        "propulsion_fr": propulsion_per_limb[:, 1],
+        "propulsion_rl": propulsion_per_limb[:, 2],
+        "propulsion_rr": propulsion_per_limb[:, 3],
+        "leg_lift_fl": leg_lift_per_limb[:, 0],
+        "leg_lift_fr": leg_lift_per_limb[:, 1],
+        "leg_lift_rl": leg_lift_per_limb[:, 2],
+        "leg_lift_rr": leg_lift_per_limb[:, 3],
+        "clearance_fl": clearance_per_limb[:, 0],
+        "clearance_fr": clearance_per_limb[:, 1],
+        "clearance_rl": clearance_per_limb[:, 2],
+        "clearance_rr": clearance_per_limb[:, 3],
     }
 
 
@@ -236,6 +303,76 @@ def reset_v23_raw_metric_extras(env: ManagerBasedRLEnv, env_ids) -> dict[str, to
         extras[f"Episode_Reward/{name}"] = torch.mean(buffer[env_ids]) / env.max_episode_length_s
         buffer[env_ids] = 0.0
     return extras
+
+
+def _heading_velocity_gate(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, min_vel: float) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    heading_x, heading_y = _compute_heading_xy(asset.data.root_quat_w)
+    body_vel_w = asset.data.root_lin_vel_w
+    forward_vel = body_vel_w[:, 0] * heading_x + body_vel_w[:, 1] * heading_y
+    return torch.clamp(forward_vel / max(float(min_vel), 1.0e-6), min=0.0, max=1.0)
+
+
+def _compute_limb_usage_proxy(metrics: dict[str, torch.Tensor], contact_target: float, propulsion_target: float, leg_lift_target: float, clearance_target: float) -> dict[str, torch.Tensor]:
+    usage_scores: dict[str, torch.Tensor] = {}
+    for suffix in _V23_LEG_SUFFIXES:
+        contact = metrics[f"contact_ratio_{suffix}"]
+        propulsion = metrics[f"propulsion_{suffix}"]
+        leg_lift = metrics[f"leg_lift_{suffix}"]
+        clearance = metrics[f"clearance_{suffix}"]
+        contact_score = torch.clamp(contact / max(contact_target, 1.0e-6), min=0.0, max=1.0)
+        propulsion_score = torch.clamp(propulsion / max(propulsion_target, 1.0e-6), min=0.0, max=1.0)
+        leg_lift_score = torch.clamp(leg_lift / max(leg_lift_target, 1.0e-6), min=0.0, max=1.0)
+        clearance_score = torch.clamp(clearance / max(clearance_target, 1.0e-6), min=0.0, max=1.0)
+        swing_activity_score = 0.5 * (leg_lift_score + clearance_score)
+        support_gate = torch.maximum(contact_score, propulsion_score)
+        usage_scores[suffix] = (
+            0.55 * contact_score
+            + 0.35 * propulsion_score
+            + 0.10 * swing_activity_score
+        )
+        usage_scores[suffix] = usage_scores[suffix] * support_gate
+    return usage_scores
+
+
+def limb_usage_min_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    min_usage: float = 0.30,
+    contact_target: float = 0.5,
+    propulsion_target: float = 0.30,
+    leg_lift_target: float = 0.18,
+    clearance_target: float = 0.03,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """Penalize runs where the least-used limb falls below a minimum usage proxy."""
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    usage_scores = _compute_limb_usage_proxy(metrics, contact_target, propulsion_target, leg_lift_target, clearance_target)
+    usage_tensor = torch.stack([usage_scores[suffix] for suffix in _V23_LEG_SUFFIXES], dim=1)
+    gap = torch.clamp(float(min_usage) - usage_tensor.min(dim=1).values, min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def rear_left_right_usage_diff_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_diff: float = 0.18,
+    contact_target: float = 0.5,
+    propulsion_target: float = 0.30,
+    leg_lift_target: float = 0.18,
+    clearance_target: float = 0.03,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """Penalize excessive rear-left/right limb usage asymmetry."""
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    usage_scores = _compute_limb_usage_proxy(metrics, contact_target, propulsion_target, leg_lift_target, clearance_target)
+    rear_diff = torch.abs(usage_scores["rl"] - usage_scores["rr"])
+    gap = torch.clamp(rear_diff - float(max_diff), min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
 
 
 def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -1538,7 +1675,16 @@ def _curriculum_target_alpha(iteration: int, ramp_start: int, ramp_end: int) -> 
     return (iteration - ramp_start) / (ramp_end - ramp_start)
 
 
-def _curriculum_apply_weights(env: ManagerBasedRLEnv, alpha12: float, alpha23: float) -> None:
+def _curriculum_apply_weights(
+    env: ManagerBasedRLEnv,
+    alpha12: float,
+    alpha23: float,
+    validity_alpha: float,
+    validity_limb_usage_initial: float,
+    validity_limb_usage_final: float,
+    validity_rear_diff_initial: float,
+    validity_rear_diff_final: float,
+) -> None:
     """alpha 기반으로 Phase 가중치를 보간하여 적용."""
     w = _CURRICULUM_PHASE_WEIGHTS
     for term_name in w[1]:
@@ -1557,15 +1703,35 @@ def _curriculum_apply_weights(env: ManagerBasedRLEnv, alpha12: float, alpha23: f
         except Exception:
             pass
 
+    validity_terms = {
+        "limb_usage_min_penalty": (float(validity_limb_usage_initial), float(validity_limb_usage_final)),
+        "rear_left_right_usage_diff_penalty": (float(validity_rear_diff_initial), float(validity_rear_diff_final)),
+    }
+    for term_name, (w_init, w_final) in validity_terms.items():
+        current = w_init + validity_alpha * (w_final - w_init)
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = current
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
 
 # ── 로깅 대상 핵심 term 정의 ──
-_LOG_WEIGHT_TERMS = ["forward_velocity", "trot_gait", "joint_vel_l2", "dof_acc_l2"]
+_LOG_WEIGHT_TERMS = [
+    "forward_velocity",
+    "trot_gait",
+    "joint_vel_l2",
+    "dof_acc_l2",
+    "limb_usage_min_penalty",
+    "rear_left_right_usage_diff_penalty",
+]
 _LOG_RAW_GAIT_TERMS = ["forward_velocity", "trot_gait", "diagonal_coupling", "leg_lift", "foot_clearance"]
 _LOG_RAW_QUALITY_TERMS = ["joint_vel_l2", "dof_acc_l2", "action_rate_l2"]
 
 
 def _curriculum_log_snapshot(env: ManagerBasedRLEnv, iteration: int,
-                             alpha12: float, alpha23: float, gate_paused: bool) -> None:
+                             alpha12: float, alpha23: float, validity_alpha: float, gate_paused: bool) -> None:
     """Ramp 상태 + key weight + raw metric snapshot 로깅.
 
     리뷰어 요청 A, B:
@@ -1578,7 +1744,7 @@ def _curriculum_log_snapshot(env: ManagerBasedRLEnv, iteration: int,
 
     print(f"\n{'─' * 60}")
     print(f"[Curriculum Snapshot] iter {iteration} | {phase_str}")
-    print(f"  alpha12={alpha12:.4f}  alpha23={alpha23:.4f}  gate={gate_str}  ep_len={mean_ep_len:.1f}")
+    print(f"  alpha12={alpha12:.4f}  alpha23={alpha23:.4f}  validity_alpha={validity_alpha:.4f}  gate={gate_str}  ep_len={mean_ep_len:.1f}")
 
     # A: 현재 적용된 주요 weight 값
     weight_parts = []
@@ -1639,6 +1805,12 @@ def reward_weight_curriculum(
     ramp1_end: int = 3000,      # Phase 1→2 ramp 완료
     ramp2_start: int = 5500,    # Phase 2→3 ramp 시작
     ramp2_end: int = 8000,      # Phase 2→3 ramp 완료
+    validity_ramp_start: int = 200,
+    validity_ramp_end: int = 600,
+    validity_limb_usage_initial: float = -3.0,
+    validity_limb_usage_final: float = -12.0,
+    validity_rear_diff_initial: float = -2.0,
+    validity_rear_diff_final: float = -8.0,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -1676,14 +1848,24 @@ def reward_weight_curriculum(
         # resume 시 iteration 기반으로 alpha를 복원 (과거 ramp는 완료된 것으로 간주)
         env._crr_alpha12 = _curriculum_target_alpha(iteration, ramp1_start, ramp1_end)
         env._crr_alpha23 = _curriculum_target_alpha(iteration, ramp2_start, ramp2_end)
+        env._crr_validity_alpha = _curriculum_target_alpha(iteration, validity_ramp_start, validity_ramp_end)
         env._crr_last_update = iteration
         env._crr_gate_paused = False
-        _curriculum_apply_weights(env, env._crr_alpha12, env._crr_alpha23)
+        _curriculum_apply_weights(
+            env,
+            env._crr_alpha12,
+            env._crr_alpha23,
+            env._crr_validity_alpha,
+            validity_limb_usage_initial,
+            validity_limb_usage_final,
+            validity_rear_diff_initial,
+            validity_rear_diff_final,
+        )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
         print(f"[Curriculum] INIT @ iter {iteration} | {phase_str}")
-        print(f"  alpha12={env._crr_alpha12:.3f}, alpha23={env._crr_alpha23:.3f}")
-        print(f"  ramp1=[{ramp1_start}~{ramp1_end}], ramp2=[{ramp2_start}~{ramp2_end}]")
+        print(f"  alpha12={env._crr_alpha12:.3f}, alpha23={env._crr_alpha23:.3f}, validity_alpha={env._crr_validity_alpha:.3f}")
+        print(f"  ramp1=[{ramp1_start}~{ramp1_end}], ramp2=[{ramp2_start}~{ramp2_end}], validity=[{validity_ramp_start}~{validity_ramp_end}]")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
         # INIT 시점 key weight 로깅
@@ -1706,22 +1888,27 @@ def reward_weight_curriculum(
     # ── Target alpha (iteration 기반 목표) ──
     target_12 = _curriculum_target_alpha(iteration, ramp1_start, ramp1_end)
     target_23 = _curriculum_target_alpha(iteration, ramp2_start, ramp2_end)
+    target_validity = _curriculum_target_alpha(iteration, validity_ramp_start, validity_ramp_end)
 
     # 이미 target에 도달 → 스킵
-    if (abs(env._crr_alpha12 - target_12) < 1e-6 and
-            abs(env._crr_alpha23 - target_23) < 1e-6):
+    if (
+        abs(env._crr_alpha12 - target_12) < 1e-6
+        and abs(env._crr_alpha23 - target_23) < 1e-6
+        and abs(env._crr_validity_alpha - target_validity) < 1e-6
+    ):
         return None
 
     # ── Metric gating: 보행 구조 보호 ──
+    gait_paused = False
     if gait_gate_enabled:
         mean_ep_len = env.episode_length_buf.float().mean().item()
         if mean_ep_len < gait_gate_min_ep_len:
+            gait_paused = True
             if not env._crr_gate_paused:
                 env._crr_gate_paused = True
                 print(f"[Curriculum] ⏸ Ramp PAUSED @ iter {iteration} "
                       f"(ep_len={mean_ep_len:.1f} < {gait_gate_min_ep_len})")
-            return None
-        if env._crr_gate_paused:
+        elif env._crr_gate_paused:
             env._crr_gate_paused = False
             print(f"[Curriculum] ▶ Ramp RESUMED @ iter {iteration} "
                   f"(ep_len={mean_ep_len:.1f})")
@@ -1729,38 +1916,61 @@ def reward_weight_curriculum(
     # ── Alpha 진행 (한 주기당 최대 증가량 제한) ──
     max_step_12 = update_interval / max(1, ramp1_end - ramp1_start)
     max_step_23 = update_interval / max(1, ramp2_end - ramp2_start)
-    new_12 = min(target_12, env._crr_alpha12 + max_step_12)
-    new_23 = min(target_23, env._crr_alpha23 + max_step_23)
+    max_step_validity = update_interval / max(1, validity_ramp_end - validity_ramp_start)
+    new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
+    new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
+    new_validity = min(target_validity, env._crr_validity_alpha + max_step_validity)
 
     # 실제 변화 없으면 스킵
-    if abs(new_12 - env._crr_alpha12) < 1e-6 and abs(new_23 - env._crr_alpha23) < 1e-6:
+    if (
+        abs(new_12 - env._crr_alpha12) < 1e-6
+        and abs(new_23 - env._crr_alpha23) < 1e-6
+        and abs(new_validity - env._crr_validity_alpha) < 1e-6
+    ):
         return None
 
     old_12 = env._crr_alpha12
     old_23 = env._crr_alpha23
+    old_validity = env._crr_validity_alpha
     env._crr_alpha12 = new_12
     env._crr_alpha23 = new_23
+    env._crr_validity_alpha = new_validity
 
     # ── 가중치 적용 ──
-    _curriculum_apply_weights(env, new_12, new_23)
+    _curriculum_apply_weights(
+        env,
+        new_12,
+        new_23,
+        new_validity,
+        validity_limb_usage_initial,
+        validity_limb_usage_final,
+        validity_rear_diff_initial,
+        validity_rear_diff_final,
+    )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──
     if iteration % log_interval == 0:
-        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
 
     # ── 마일스톤 로깅 (ramp 시작/완료 + snapshot) ──
     if abs(old_12) < 1e-6 and new_12 > 1e-6:
         print(f"\n[Curriculum] 🔄 Ramp 1→2 START @ iter {iteration} (STAND→WALK)")
-        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
     if abs(new_12 - 1.0) < 1e-6 and abs(old_12 - 1.0) >= 1e-6:
         print(f"\n[Curriculum] ✅ Ramp 1→2 COMPLETE @ iter {iteration} (STAND→WALK)")
-        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
     if abs(old_23) < 1e-6 and new_23 > 1e-6:
         print(f"\n[Curriculum] 🔄 Ramp 2→3 START @ iter {iteration} (WALK→TROT)")
-        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
     if abs(new_23 - 1.0) < 1e-6 and abs(old_23 - 1.0) >= 1e-6:
         print(f"\n[Curriculum] ✅ Ramp 2→3 COMPLETE @ iter {iteration} (WALK→TROT)")
-        _curriculum_log_snapshot(env, iteration, new_12, new_23, env._crr_gate_paused)
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
+    if abs(old_validity) < 1e-6 and new_validity > 1e-6:
+        print(f"\n[Curriculum] 🔄 Validity Ramp START @ iter {iteration}")
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
+    if abs(new_validity - 1.0) < 1e-6 and abs(old_validity - 1.0) >= 1e-6:
+        print(f"\n[Curriculum] ✅ Validity Ramp COMPLETE @ iter {iteration}")
+        _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
 
     return None
 

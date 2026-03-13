@@ -33,9 +33,9 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-V23_TRAIN_VERSION = "V23"
-V23_MASTER_LOG_FILENAME = "spotmicro_v23_training_master_log.xlsx"
-V23_CHECKPOINT_REVIEW_FILENAME = "spotmicro_v23_checkpoint_review.xlsx"
+V23_TRAIN_VERSION = "V24"
+V23_MASTER_LOG_FILENAME = "spotmicro_v24_training_master_log.xlsx"
+V23_CHECKPOINT_REVIEW_FILENAME = "spotmicro_v24_checkpoint_review.xlsx"
 
 
 def _load_env(path: str) -> dict:
@@ -135,6 +135,35 @@ PRIMARY_KPI_THRESHOLDS = {
     "rear_joint_velocity": (2.0, 8.0),
     "foot_clearance": (0.20, 0.80),
 }
+LIMB_SUFFIXES = ("fl", "fr", "rl", "rr")
+LIMB_VALIDITY_THRESHOLDS = {
+    "contact_target": 0.50,
+    "propulsion_target": 0.30,
+    "leg_lift_target": 0.18,
+    "clearance_target": 0.03,
+    "limb_usage_min": 0.30,
+    "rear_usage_diff_max": 0.18,
+    "front_usage_diff_max": 0.22,
+    "rear_propulsion_diff_max": 0.20,
+    "contact_ratio_min_any": 0.05,
+    "contact_ratio_min_rear": 0.08,
+    "collapse_swing_min": 0.95,
+    "collapse_propulsion_max": 0.02,
+}
+
+LIMB_LABELS = {
+    "fl": "front_left",
+    "fr": "front_right",
+    "rl": "rear_left",
+    "rr": "rear_right",
+}
+
+VALIDITY_STAGE_LABELS = {
+    "observe_0_199": "observe",
+    "early_warning_200_399": "early_warning",
+    "lock_warning_400_599": "lock_warning",
+    "enforce_600_plus": "enforce",
+}
 
 V23_RUNLOG_COLUMNS = [
     "run_id", "train_version", "iter", "global_step", "timestamp", "elapsed_hours", "report_kind", "cycle_num", "log_source", "fallback_source",
@@ -145,9 +174,11 @@ V23_RUNLOG_COLUMNS = [
     "stance_width_mean_raw", "stance_width_front_raw", "stance_width_rear_raw", "front_rear_stance_width_diff_raw", "shoulder_fl_raw", "shoulder_fr_raw", "shoulder_rl_raw", "shoulder_rr_raw", "shoulder_mean_abs_dev_from_target_raw", "shoulder_left_right_diff_raw", "shoulder_front_rear_diff_raw", "base_height_raw", "body_roll_abs_raw", "body_pitch_abs_raw",
     "action_rate_l2_raw", "joint_vel_l2_raw", "dof_acc_l2_raw", "joint_oscillation_raw", "foot_extension_raw", "foot_joint_action_rate_l2_raw", "foot_joint_vel_l2_raw", "stance_foot_jitter_score_raw", "foot_joint_acc_l2_raw", "contact_transition_oscillation_score_estimated",
     "front_leg_lift_mean_raw", "rear_leg_lift_mean_raw", "front_clearance_mean_raw", "rear_clearance_mean_raw", "front_propulsion_score_raw", "rear_propulsion_score_raw", "front_rear_propulsion_diff_raw", "front_rear_clearance_diff_raw", "front_rear_swing_diff_raw",
+    "contact_ratio_fl", "contact_ratio_fr", "contact_ratio_rl", "contact_ratio_rr", "stance_time_fl", "stance_time_fr", "stance_time_rl", "stance_time_rr", "swing_time_fl", "swing_time_fr", "swing_time_rl", "swing_time_rr", "propulsion_fl", "propulsion_fr", "propulsion_rl", "propulsion_rr", "leg_lift_fl", "leg_lift_fr", "leg_lift_rl", "leg_lift_rr", "clearance_fl", "clearance_fr", "clearance_rl", "clearance_rr",
+    "limb_usage_fl", "limb_usage_fr", "limb_usage_rl", "limb_usage_rr", "limb_usage_min", "limb_usage_variance", "rear_left_right_usage_diff", "front_left_right_usage_diff", "rear_left_right_propulsion_diff",
     "stride_length_raw", "gait_cycle_period_raw", "duty_factor_mean_raw", "duty_factor_front_raw", "duty_factor_rear_raw", "contact_sequence_stability_estimated", "stance_time_mean_estimated", "swing_time_mean_estimated",
     "gait_score_canonical", "stability_score_canonical", "posture_style_score", "foot_jitter_score", "front_rear_balance_score",
-    "hard_safety_gate_pass", "style_shortlist_candidate", "best_reward_candidate", "best_style_candidate", "manual_front_review_rank", "manual_notes",
+    "hard_safety_gate_pass", "limb_validity_gate_pass", "limb_validity_reason", "validity_stage", "collapse_detected", "collapse_persistent", "provisional_exclusion", "restart_recommended", "v24_operation_status", "style_shortlist_candidate", "best_reward_candidate", "best_style_candidate", "manual_front_review_rank", "manual_notes",
 ]
 
 _tg_offset: int | None = None
@@ -1134,6 +1165,10 @@ def launch_training(log_path: str) -> dict:
         mode="training",
         active_run=os.path.basename(active_run) if active_run else "",
         active_checkpoint=active_checkpoint or "",
+        last_report_zip="",
+        last_report_checkpoint="",
+        last_videos={},
+        last_video_checkpoint="",
         last_command="start",
         last_error="",
     )
@@ -1210,9 +1245,7 @@ def _find_duplicate_video_hashes(captured_videos: dict[str, str]) -> dict[str, l
 
 
 def find_latest_video(view_key: str, run_dir: str | None = None) -> str | None:
-    search_roots = [run_dir] if run_dir else []
-    if LOG_BASE not in search_roots:
-        search_roots.append(LOG_BASE)
+    search_roots = [run_dir] if run_dir else [LOG_BASE]
     for root in search_roots:
         if not root or not os.path.isdir(root):
             continue
@@ -1225,9 +1258,7 @@ def find_latest_video(view_key: str, run_dir: str | None = None) -> str | None:
 
 
 def find_latest_report_zip(run_dir: str | None = None) -> str | None:
-    search_roots = [run_dir] if run_dir else []
-    if LOG_BASE not in search_roots:
-        search_roots.append(LOG_BASE)
+    search_roots = [run_dir] if run_dir else [LOG_BASE]
     for root in search_roots:
         if not root or not os.path.isdir(root):
             continue
@@ -1240,9 +1271,7 @@ def find_latest_report_zip(run_dir: str | None = None) -> str | None:
 
 
 def find_latest_report_xlsx(run_dir: str | None = None) -> str | None:
-    search_roots = [run_dir] if run_dir else []
-    if LOG_BASE not in search_roots:
-        search_roots.append(LOG_BASE)
+    search_roots = [run_dir] if run_dir else [LOG_BASE]
     for root in search_roots:
         if not root or not os.path.isdir(root):
             continue
@@ -1524,6 +1553,152 @@ def jitter_quality_score(rewards):
     return round(score / count, 1)
 
 
+def _clip01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def compute_limb_validity_metrics(rewards: dict) -> dict:
+    usage_scores: dict[str, float] = {}
+    contact_ratios: dict[str, float] = {}
+    propulsion_scores: dict[str, float] = {}
+    swing_times: dict[str, float] = {}
+    for suffix in LIMB_SUFFIXES:
+        contact_ratio = _safe_float(rewards.get(f"contact_ratio_{suffix}")) or 0.0
+        propulsion = _safe_float(rewards.get(f"propulsion_{suffix}")) or 0.0
+        leg_lift = _safe_float(rewards.get(f"leg_lift_{suffix}")) or 0.0
+        clearance = _safe_float(rewards.get(f"clearance_{suffix}")) or 0.0
+        swing_time = _safe_float(rewards.get(f"swing_time_{suffix}")) or 0.0
+        contact_score = _clip01(contact_ratio / LIMB_VALIDITY_THRESHOLDS["contact_target"])
+        propulsion_score = _clip01(propulsion / LIMB_VALIDITY_THRESHOLDS["propulsion_target"])
+        leg_lift_score = _clip01(leg_lift / LIMB_VALIDITY_THRESHOLDS["leg_lift_target"])
+        clearance_score = _clip01(clearance / LIMB_VALIDITY_THRESHOLDS["clearance_target"])
+        swing_activity_score = 0.5 * (leg_lift_score + clearance_score)
+        support_gate = max(contact_score, propulsion_score)
+        usage_scores[suffix] = round(
+            (
+                0.55 * contact_score
+                + 0.35 * propulsion_score
+                + 0.10 * swing_activity_score
+            )
+            * support_gate,
+            6,
+        )
+        contact_ratios[suffix] = round(contact_ratio, 6)
+        propulsion_scores[suffix] = round(propulsion, 6)
+        swing_times[suffix] = round(swing_time, 6)
+
+    usage_values = list(usage_scores.values())
+    limb_usage_min = min(usage_values) if usage_values else None
+    limb_usage_variance = None
+    if usage_values:
+        usage_mean = sum(usage_values) / len(usage_values)
+        limb_usage_variance = round(sum((value - usage_mean) ** 2 for value in usage_values) / len(usage_values), 6)
+    rear_usage_diff = round(abs(usage_scores.get("rl", 0.0) - usage_scores.get("rr", 0.0)), 6)
+    front_usage_diff = round(abs(usage_scores.get("fl", 0.0) - usage_scores.get("fr", 0.0)), 6)
+    rear_propulsion_diff = round(abs(propulsion_scores.get("rl", 0.0) - propulsion_scores.get("rr", 0.0)), 6)
+
+    reasons: list[str] = []
+    collapse_reasons: list[str] = []
+    for suffix in LIMB_SUFFIXES:
+        contact_ratio = contact_ratios.get(suffix, 0.0)
+        swing_time = swing_times.get(suffix, 0.0)
+        propulsion = propulsion_scores.get(suffix, 0.0)
+        if (
+            contact_ratio < LIMB_VALIDITY_THRESHOLDS["contact_ratio_min_any"]
+            and swing_time > LIMB_VALIDITY_THRESHOLDS["collapse_swing_min"]
+            and propulsion < LIMB_VALIDITY_THRESHOLDS["collapse_propulsion_max"]
+        ):
+            collapse_reasons.append(
+                f"{LIMB_LABELS[suffix]}_contact_collapse(c={contact_ratio:.2f},s={swing_time:.2f},p={propulsion:.2f})"
+            )
+
+    if limb_usage_min is None or limb_usage_min < LIMB_VALIDITY_THRESHOLDS["limb_usage_min"]:
+        reasons.append(f"limb_usage_min<{LIMB_VALIDITY_THRESHOLDS['limb_usage_min']:.2f}")
+    if rear_usage_diff > LIMB_VALIDITY_THRESHOLDS["rear_usage_diff_max"]:
+        reasons.append(f"rear_usage_diff>{LIMB_VALIDITY_THRESHOLDS['rear_usage_diff_max']:.2f}")
+    if front_usage_diff > LIMB_VALIDITY_THRESHOLDS["front_usage_diff_max"]:
+        reasons.append(f"front_usage_diff>{LIMB_VALIDITY_THRESHOLDS['front_usage_diff_max']:.2f}")
+    if rear_propulsion_diff > LIMB_VALIDITY_THRESHOLDS["rear_propulsion_diff_max"]:
+        reasons.append(f"rear_propulsion_diff>{LIMB_VALIDITY_THRESHOLDS['rear_propulsion_diff_max']:.2f}")
+    if not collapse_reasons and min(contact_ratios.values(), default=0.0) < LIMB_VALIDITY_THRESHOLDS["contact_ratio_min_any"]:
+        reasons.append(f"contact_ratio_any<{LIMB_VALIDITY_THRESHOLDS['contact_ratio_min_any']:.2f}")
+    if not collapse_reasons and min(contact_ratios.get("rl", 0.0), contact_ratios.get("rr", 0.0)) < LIMB_VALIDITY_THRESHOLDS["contact_ratio_min_rear"]:
+        reasons.append(f"rear_contact_ratio<{LIMB_VALIDITY_THRESHOLDS['contact_ratio_min_rear']:.2f}")
+
+    all_reasons = collapse_reasons + reasons
+
+    return {
+        "limb_usage_scores": usage_scores,
+        "contact_ratios": contact_ratios,
+        "propulsion_scores": propulsion_scores,
+        "swing_times": swing_times,
+        "limb_usage_min": limb_usage_min,
+        "limb_usage_variance": limb_usage_variance,
+        "rear_left_right_usage_diff": rear_usage_diff,
+        "front_left_right_usage_diff": front_usage_diff,
+        "rear_left_right_propulsion_diff": rear_propulsion_diff,
+        "limb_validity_gate_pass": not all_reasons,
+        "limb_validity_reason": "pass" if not all_reasons else "; ".join(all_reasons[:4]),
+        "limb_validity_reasons": all_reasons,
+        "collapse_reasons": collapse_reasons,
+    }
+
+
+def _validity_stage_key(iteration: int | None) -> str:
+    current_iter = int(iteration or 0)
+    if current_iter < 200:
+        return "observe_0_199"
+    if current_iter < 400:
+        return "early_warning_200_399"
+    if current_iter < 600:
+        return "lock_warning_400_599"
+    return "enforce_600_plus"
+
+
+def _summarize_validity_operation(
+    iteration: int | None,
+    hard_gate_pass: bool,
+    limb_validity_pass: bool,
+    collapse_detected: bool,
+    collapse_persistent: bool = False,
+    collapse_persistent_pre600: bool = False,
+) -> dict:
+    stage_key = _validity_stage_key(iteration)
+    stage_label = VALIDITY_STAGE_LABELS[stage_key]
+    current_iter = int(iteration or 0)
+    provisional_exclusion = 200 <= current_iter < 600 and (collapse_detected or not limb_validity_pass)
+    restart_recommended = current_iter >= 600 and collapse_detected and collapse_persistent_pre600 and not limb_validity_pass
+
+    if current_iter < 200:
+        operation_status = "observe_only"
+    elif current_iter < 400:
+        operation_status = "provisional_exclusion" if provisional_exclusion else "early_warning_clear"
+    elif current_iter < 600:
+        if collapse_detected and collapse_persistent:
+            operation_status = "exploit_lock_warning"
+        elif provisional_exclusion:
+            operation_status = "warning_active"
+        else:
+            operation_status = "warning_clear"
+    else:
+        if restart_recommended:
+            operation_status = "restart_recommended"
+        elif hard_gate_pass and limb_validity_pass:
+            operation_status = "enforced_pass"
+        else:
+            operation_status = "enforced_fail"
+
+    return {
+        "validity_stage": stage_key,
+        "validity_stage_label": stage_label,
+        "collapse_detected": collapse_detected,
+        "collapse_persistent": collapse_persistent,
+        "provisional_exclusion": provisional_exclusion,
+        "restart_recommended": restart_recommended,
+        "v24_operation_status": operation_status,
+    }
+
+
 def _trend_icon_and_pct(values, window: int = 20) -> tuple[str, float]:
     if len(values) < 2:
         return "📊", 0.0
@@ -1614,6 +1789,16 @@ def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | N
         "posture": "N/A",
         "posture_score": 0,
         "foot_jitter_score": None,
+        "limb_validity_pass": False,
+        "limb_validity_reason": "limb KPI unavailable",
+        "limb_usage_min": None,
+        "rear_left_right_usage_diff": None,
+        "validity_stage": "observe_0_199",
+        "collapse_detected": False,
+        "collapse_persistent": False,
+        "provisional_exclusion": False,
+        "restart_recommended": False,
+        "v24_operation_status": "observe_only",
         "kpi_line": "기립 N/A | 전진 N/A | 대각 N/A",
         "caption_suffix": "⚪ KPI unavailable",
     }
@@ -1667,12 +1852,26 @@ def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | N
     stab_grade, stab_score, _details, stab_valid = motion_stability_score(rewards, gait_score)
     posture_grade, posture_score, _ = posture_style_score(rewards)
     foot_jitter_score = jitter_quality_score(rewards)
+    limb_metrics = compute_limb_validity_metrics(rewards)
     verdict, reasons, _greens, _yellows, _reds = evaluate_training_window(current_iter, survival_pct, bad_orient, rewards)
+    hard_gate_pass = bool(
+        survival_pct >= 70.0
+        and fall_pct <= 10.0
+        and (_safe_float(_scalar_value_at_or_before(data, "Loss/value_function", current_iter)) or 0.0) <= 5.0
+        and gait_score >= 5
+    )
+    validity_state = _summarize_validity_operation(
+        current_iter,
+        hard_gate_pass,
+        limb_metrics["limb_validity_gate_pass"],
+        bool(limb_metrics.get("collapse_reasons")),
+    )
     primary_items = []
     for metric_name, label in [("standing_height", "기립"), ("forward_velocity", "전진"), ("diagonal_coupling", "대각")]:
         icon, state = classify_primary_kpi(metric_name, rewards.get(metric_name, 0.0))
         primary_items.append(f"{icon}{label} {state}")
     stability_label = f"{stab_grade} {stab_score}/10" if stab_valid else stab_grade
+    limb_gate_label = "🟢유효 통과" if limb_metrics["limb_validity_gate_pass"] else "🔴유효 실패"
     result.update(
         {
             "iter": current_iter,
@@ -1693,8 +1892,18 @@ def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | N
             "posture": posture_grade,
             "posture_score": posture_score,
             "foot_jitter_score": foot_jitter_score,
-            "kpi_line": " | ".join(primary_items + [f"🧍포즈 {posture_grade} {posture_score}/10"]),
-            "caption_suffix": f"{verdict} | Gait {gait_grade} {gait_score}/13 | Stability {stability_label} | Posture {posture_grade} {posture_score}/10",
+            "limb_validity_pass": limb_metrics["limb_validity_gate_pass"],
+            "limb_validity_reason": limb_metrics["limb_validity_reason"],
+            "limb_usage_min": limb_metrics["limb_usage_min"],
+            "rear_left_right_usage_diff": limb_metrics["rear_left_right_usage_diff"],
+            "validity_stage": validity_state["validity_stage"],
+            "collapse_detected": validity_state["collapse_detected"],
+            "collapse_persistent": validity_state["collapse_persistent"],
+            "provisional_exclusion": validity_state["provisional_exclusion"],
+            "restart_recommended": validity_state["restart_recommended"],
+            "v24_operation_status": validity_state["v24_operation_status"],
+            "kpi_line": " | ".join(primary_items + [limb_gate_label, f"⏱{validity_state['validity_stage_label']}", f"🧍포즈 {posture_grade} {posture_score}/10"]),
+            "caption_suffix": f"{verdict} | Limb {limb_gate_label} | Stage {validity_state['validity_stage_label']}:{validity_state['v24_operation_status']} | Gait {gait_grade} {gait_score}/13 | Stability {stability_label} | Posture {posture_grade} {posture_score}/10",
         }
     )
     return result
@@ -1835,7 +2044,7 @@ def get_v23_checkpoint_review_path() -> str:
 
 def get_v23_run_log_path(run_dir: str) -> str:
     run_id = os.path.basename(run_dir.rstrip("\\/"))
-    return os.path.join(run_dir, f"spotmicro_v23_run_{run_id}_training_log.xlsx")
+    return os.path.join(run_dir, f"spotmicro_v24_run_{run_id}_training_log.xlsx")
 
 
 def _scalar_value_at_or_before(data: dict, tag: str, iteration: int):
@@ -1990,6 +2199,14 @@ def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[f
         and (kpi.get("gait_score") or 0) >= 5
     )
 
+    limb_metrics = compute_limb_validity_metrics(rewards)
+    validity_state = _summarize_validity_operation(
+        iteration,
+        gate_pass,
+        bool(limb_metrics.get("limb_validity_gate_pass")),
+        bool(limb_metrics.get("collapse_reasons")),
+    )
+
     has_posture_raw = any(
         rewards.get(name) is not None
         for name in (
@@ -2098,6 +2315,39 @@ def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[f
             "front_rear_propulsion_diff_raw": rewards.get("front_rear_propulsion_diff_raw"),
             "front_rear_clearance_diff_raw": rewards.get("front_rear_clearance_diff_raw"),
             "front_rear_swing_diff_raw": rewards.get("front_rear_swing_diff_raw"),
+            "contact_ratio_fl": rewards.get("contact_ratio_fl"),
+            "contact_ratio_fr": rewards.get("contact_ratio_fr"),
+            "contact_ratio_rl": rewards.get("contact_ratio_rl"),
+            "contact_ratio_rr": rewards.get("contact_ratio_rr"),
+            "stance_time_fl": rewards.get("stance_time_fl"),
+            "stance_time_fr": rewards.get("stance_time_fr"),
+            "stance_time_rl": rewards.get("stance_time_rl"),
+            "stance_time_rr": rewards.get("stance_time_rr"),
+            "swing_time_fl": rewards.get("swing_time_fl"),
+            "swing_time_fr": rewards.get("swing_time_fr"),
+            "swing_time_rl": rewards.get("swing_time_rl"),
+            "swing_time_rr": rewards.get("swing_time_rr"),
+            "propulsion_fl": rewards.get("propulsion_fl"),
+            "propulsion_fr": rewards.get("propulsion_fr"),
+            "propulsion_rl": rewards.get("propulsion_rl"),
+            "propulsion_rr": rewards.get("propulsion_rr"),
+            "leg_lift_fl": rewards.get("leg_lift_fl"),
+            "leg_lift_fr": rewards.get("leg_lift_fr"),
+            "leg_lift_rl": rewards.get("leg_lift_rl"),
+            "leg_lift_rr": rewards.get("leg_lift_rr"),
+            "clearance_fl": rewards.get("clearance_fl"),
+            "clearance_fr": rewards.get("clearance_fr"),
+            "clearance_rl": rewards.get("clearance_rl"),
+            "clearance_rr": rewards.get("clearance_rr"),
+            "limb_usage_fl": limb_metrics["limb_usage_scores"].get("fl"),
+            "limb_usage_fr": limb_metrics["limb_usage_scores"].get("fr"),
+            "limb_usage_rl": limb_metrics["limb_usage_scores"].get("rl"),
+            "limb_usage_rr": limb_metrics["limb_usage_scores"].get("rr"),
+            "limb_usage_min": limb_metrics.get("limb_usage_min"),
+            "limb_usage_variance": limb_metrics.get("limb_usage_variance"),
+            "rear_left_right_usage_diff": limb_metrics.get("rear_left_right_usage_diff"),
+            "front_left_right_usage_diff": limb_metrics.get("front_left_right_usage_diff"),
+            "rear_left_right_propulsion_diff": limb_metrics.get("rear_left_right_propulsion_diff"),
             "stride_length_raw": rewards.get("stride_length"),
             "gait_cycle_period_raw": rewards.get("gait_cycle_period"),
             "gait_score_canonical": kpi.get("gait_score"),
@@ -2106,6 +2356,14 @@ def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[f
             "foot_jitter_score": foot_jitter_score,
             "front_rear_balance_score": front_rear_balance_score,
             "hard_safety_gate_pass": gate_pass,
+            "limb_validity_gate_pass": limb_metrics.get("limb_validity_gate_pass"),
+            "limb_validity_reason": limb_metrics.get("limb_validity_reason"),
+            "validity_stage": validity_state["validity_stage"],
+            "collapse_detected": validity_state["collapse_detected"],
+            "collapse_persistent": validity_state["collapse_persistent"],
+            "provisional_exclusion": validity_state["provisional_exclusion"],
+            "restart_recommended": validity_state["restart_recommended"],
+            "v24_operation_status": validity_state["v24_operation_status"],
             "style_shortlist_candidate": False,
             "best_reward_candidate": False,
             "best_style_candidate": False,
@@ -2161,6 +2419,8 @@ def export_clip_metrics_row_workbook(out_path: str, row: dict, metrics_run_dir: 
         "foot_jitter_score": row.get("foot_jitter_score"),
         "front_rear_balance_score": row.get("front_rear_balance_score"),
         "hard_safety_gate_pass": row.get("hard_safety_gate_pass"),
+        "limb_validity_gate_pass": row.get("limb_validity_gate_pass"),
+        "limb_validity_reason": row.get("limb_validity_reason"),
         "style_shortlist_candidate": row.get("style_shortlist_candidate"),
         "best_reward_candidate": row.get("best_reward_candidate"),
         "best_style_candidate": row.get("best_style_candidate"),
@@ -2181,9 +2441,34 @@ def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], lis
     for record in sorted(records, key=lambda item: int(item.get("iteration") or 0)):
         rows.append(_build_v23_row(record, run_dir, data, reward_window))
     if rows:
-        best_reward_row = max(rows, key=lambda item: item.get("mean_reward") if item.get("mean_reward") is not None else float("-inf"))
-        best_reward_row["best_reward_candidate"] = True
-        style_rows = [row for row in rows if row.get("hard_safety_gate_pass")]
+        collapse_seen_since_200 = False
+        for row in rows:
+            iter_num = int(row.get("iter") or 0)
+            collapse_detected = bool(row.get("collapse_detected"))
+            collapse_persistent = False
+            if collapse_detected and 400 <= iter_num < 600 and collapse_seen_since_200:
+                collapse_persistent = True
+            if collapse_detected and iter_num >= 600 and collapse_seen_since_200:
+                collapse_persistent = True
+            validity_state = _summarize_validity_operation(
+                iter_num,
+                bool(row.get("hard_safety_gate_pass")),
+                bool(row.get("limb_validity_gate_pass")),
+                collapse_detected,
+                collapse_persistent=collapse_persistent,
+                collapse_persistent_pre600=collapse_seen_since_200,
+            )
+            row.update(validity_state)
+            if collapse_detected and 200 <= iter_num < 600:
+                collapse_seen_since_200 = True
+
+        style_rows = [
+            row for row in rows
+            if (row.get("iter") or 0) >= 600 and row.get("hard_safety_gate_pass") and row.get("limb_validity_gate_pass")
+        ]
+        if style_rows:
+            best_reward_row = max(style_rows, key=lambda item: item.get("mean_reward") if item.get("mean_reward") is not None else float("-inf"))
+            best_reward_row["best_reward_candidate"] = True
         for row in style_rows:
             row["style_shortlist_candidate"] = (row.get("posture_style_score") or 0.0) >= 65.0
         if style_rows:
@@ -2195,7 +2480,7 @@ def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], lis
         "git_commit": _get_repo_git_commit(),
         "task_name": env_cfg.get("task_name") or TASK,
         "checkpoint_source": f"{agent_cfg.get('load_run') or 'fresh'}:{agent_cfg.get('load_checkpoint') or ''}" if agent_cfg.get("resume") else "fresh",
-        "note": "V23 dedicated style/logging workbook",
+        "note": "V24 dedicated style/logging workbook",
         "resume": agent_cfg.get("resume"),
         "seed": agent_cfg.get("seed") or env_cfg.get("seed"),
         "num_envs": env_cfg.get("scene", {}).get("num_envs") if isinstance(env_cfg.get("scene"), dict) else None,
@@ -2220,6 +2505,8 @@ def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], lis
                 "foot_jitter_score": row["foot_jitter_score"],
                 "front_rear_balance_score": row["front_rear_balance_score"],
                 "hard_safety_gate_pass": row["hard_safety_gate_pass"],
+                "limb_validity_gate_pass": row["limb_validity_gate_pass"],
+                "limb_validity_reason": row["limb_validity_reason"],
                 "style_shortlist_candidate": row["style_shortlist_candidate"],
                 "best_reward_candidate": row["best_reward_candidate"],
                 "best_style_candidate": row["best_style_candidate"],
@@ -2378,7 +2665,7 @@ def _write_v23_review_sheet(ws, review_rows: list[dict], header_font) -> None:
     ws.title = "CheckpointReview"
     headers = [
         "run_id", "iter", "mean_reward", "survival_pct", "vf_loss", "gait_score_canonical", "stability_score_canonical",
-        "posture_style_score", "foot_jitter_score", "front_rear_balance_score", "hard_safety_gate_pass",
+        "posture_style_score", "foot_jitter_score", "front_rear_balance_score", "hard_safety_gate_pass", "limb_validity_gate_pass", "limb_validity_reason",
         "style_shortlist_candidate", "best_reward_candidate", "best_style_candidate", "manual_front_review_rank", "manual_notes",
     ]
     ws.append(headers)
@@ -2405,6 +2692,7 @@ def _add_v23_chart_sheet(wb, runlog_headers: list[str], runlog_rows: list[dict],
         ("PostureStyle", ["stance_width_mean_raw", "stance_width_front_raw", "stance_width_rear_raw", "shoulder_mean_abs_dev_from_target_raw", "body_roll_abs_raw", "body_pitch_abs_raw", "posture_style_score"]),
         ("MotionJitter", ["action_rate_l2_raw", "joint_vel_l2_raw", "dof_acc_l2_raw", "foot_joint_action_rate_l2_raw", "foot_joint_vel_l2_raw", "stance_foot_jitter_score_raw"]),
         ("FrontRearBalance", ["front_leg_lift_mean_raw", "rear_leg_lift_mean_raw", "front_clearance_mean_raw", "rear_clearance_mean_raw", "front_propulsion_score_raw", "rear_propulsion_score_raw", "front_rear_balance_score"]),
+        ("LimbValidity", ["contact_ratio_fl", "contact_ratio_fr", "contact_ratio_rl", "contact_ratio_rr", "limb_usage_fl", "limb_usage_fr", "limb_usage_rl", "limb_usage_rr", "limb_usage_min", "rear_left_right_usage_diff", "rear_left_right_propulsion_diff"]),
     ]
     if ws_chart.max_row < 2:
         return
@@ -3688,7 +3976,7 @@ def _report_zip_meets_requirements(zip_path: str) -> bool:
             names = set(archive.namelist())
         return (
             "metrics/heartbeat_history.xlsx" in names
-            and any(name.startswith("metrics/spotmicro_v23_run_") and name.endswith("_training_log.xlsx") for name in names)
+            and any(name.startswith("metrics/spotmicro_v24_run_") and name.endswith("_training_log.xlsx") for name in names)
         )
     except Exception:
         return False
