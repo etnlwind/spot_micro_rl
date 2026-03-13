@@ -111,6 +111,8 @@ LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", LOG_SUBDIR)
 STATE_FILE = os.path.join(PROJECT_ROOT, "logs", "state.json")
 SUPERVISOR_LOG = os.path.join(PROJECT_ROOT, "logs", "supervisor.log")
 HEARTBEAT_LOG = os.path.join(PROJECT_ROOT, "logs", "heartbeat.log")
+SUPERVISOR_STDOUT_LOG = os.path.join(PROJECT_ROOT, "logs", "supervisor_stdout.log")
+SUPERVISOR_STDERR_LOG = os.path.join(PROJECT_ROOT, "logs", "supervisor_stderr.log")
 SUPERVISOR_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "supervisor.pid")
 HEARTBEAT_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "heartbeat.pid")
 SUPERVISOR_SHUTDOWN_FLAG = os.path.join(PROJECT_ROOT, "logs", "supervisor.shutdown.flag")
@@ -296,6 +298,13 @@ def default_state() -> dict:
         "updated_at": _now(),
         "cache_schema_version": CACHE_SCHEMA_VERSION,
         "mode": "idle",
+        "supervisor_status": "stopped",
+        "supervisor_session_id": "",
+        "supervisor_pid": 0,
+        "supervisor_started_at": "",
+        "supervisor_exit_at": "",
+        "supervisor_exit_reason": "",
+        "supervisor_exit_detail": "",
         "active_run": "",
         "active_checkpoint": "",
         "last_command": "",
@@ -353,6 +362,43 @@ def consume_supervisor_shutdown_request() -> str:
         source = ""
     clear_supervisor_shutdown_request()
     return source or "external-request"
+
+
+def mark_supervisor_started(session_id: str, pid: int, log_path: str) -> dict:
+    state = load_state()
+    previous_status = str(state.get("supervisor_status") or "")
+    previous_session = str(state.get("supervisor_session_id") or "")
+    previous_pid = int(state.get("supervisor_pid") or 0)
+    if previous_status == "running" and previous_session and previous_session != session_id:
+        if previous_pid <= 0 or not psutil.pid_exists(previous_pid):
+            write_log(
+                "Detected stale supervisor session without recorded exit; previous supervisor likely terminated unexpectedly "
+                f"(session={previous_session}, pid={previous_pid or 'N/A'})",
+                log_path,
+            )
+    return update_state(
+        supervisor_status="running",
+        supervisor_session_id=session_id,
+        supervisor_pid=int(pid),
+        supervisor_started_at=_now(),
+        supervisor_exit_at="",
+        supervisor_exit_reason="",
+        supervisor_exit_detail="",
+    )
+
+
+def mark_supervisor_exited(session_id: str, reason: str, detail: str = "") -> dict:
+    state = load_state()
+    if session_id and str(state.get("supervisor_session_id") or "") not in {"", session_id}:
+        return state
+    return update_state(
+        supervisor_status="stopped",
+        supervisor_session_id=session_id,
+        supervisor_pid=0,
+        supervisor_exit_at=_now(),
+        supervisor_exit_reason=str(reason or "unknown"),
+        supervisor_exit_detail=str(detail or "")[:2000],
+    )
 
 
 def acquire_pid_lock(pid_file: str, owner_name: str, log_path: str) -> None:

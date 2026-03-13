@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 
 
 SCRIPT_PATH = os.path.abspath(__file__)
@@ -381,22 +382,35 @@ def _run_supervisor_background(args: argparse.Namespace) -> int:
     creationflags = 0
     for flag_name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"):
         creationflags |= int(getattr(subprocess, flag_name, 0) or 0)
-    subprocess.Popen(
-        _build_listen_command(args),
-        cwd=PROJECT_ROOT,
-        env=child_env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=creationflags,
-    )
+    command = _build_listen_command(args)
+    common.write_log(f"Launching supervisor background process: {' '.join(command)}", common.SUPERVISOR_LOG)
+    with open(common.SUPERVISOR_STDOUT_LOG, "ab") as stdout_file, open(common.SUPERVISOR_STDERR_LOG, "ab") as stderr_file:
+        proc = subprocess.Popen(
+            command,
+            cwd=PROJECT_ROOT,
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            close_fds=True,
+            creationflags=creationflags,
+        )
+    common.write_log(f"Supervisor background launcher PID: {proc.pid}", common.SUPERVISOR_LOG)
     time.sleep(3)
     live_pid = common._read_live_pid_lock(common.SUPERVISOR_PID_FILE)
     if live_pid:
+        common.write_log(f"Supervisor background active PID: {live_pid}", common.SUPERVISOR_LOG)
         _print_local(f"supervisor launched in background (pid {live_pid})")
         _print_local("use supervisor.cmd --status to inspect or supervisor.cmd --shutdown to stop")
         return 0
+    stdout_tail = common._read_text_tail(common.SUPERVISOR_STDOUT_LOG)
+    stderr_tail = common._read_text_tail(common.SUPERVISOR_STDERR_LOG)
+    if proc.poll() is not None:
+        common.write_log(f"Supervisor background process exited before lock acquisition (rc={proc.returncode})", common.SUPERVISOR_LOG)
+    if stdout_tail:
+        common.write_log(f"Supervisor stdout tail before startup failure:\n{stdout_tail}", common.SUPERVISOR_LOG)
+    if stderr_tail:
+        common.write_log(f"Supervisor stderr tail before startup failure:\n{stderr_tail}", common.SUPERVISOR_LOG)
     raise RuntimeError("supervisor background launch did not acquire the supervisor lock")
 
 
@@ -586,8 +600,13 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
 
 
 def _run_supervisor_loop(args: argparse.Namespace) -> int:
+    session_id = uuid.uuid4().hex[:12]
+    exit_reason = "loop-returned"
+    exit_detail = ""
     common.clear_supervisor_shutdown_request()
     common.acquire_pid_lock(common.SUPERVISOR_PID_FILE, "supervisor", common.SUPERVISOR_LOG)
+    common.mark_supervisor_started(session_id, os.getpid(), common.SUPERVISOR_LOG)
+    common.write_log(f"Supervisor session started: session={session_id} pid={os.getpid()}", common.SUPERVISOR_LOG)
     common.prime_update_offset(common.SUPERVISOR_LOG)
     common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
     common.update_state(mode="training" if common.is_training_running() else "idle", last_command="startup", last_error="")
@@ -631,6 +650,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                     handle_command(command, checkpoint_iter=checkpoint_iter)
                 shutdown_source = common.consume_supervisor_shutdown_request()
                 if shutdown_source:
+                    exit_reason = f"shutdown-request:{shutdown_source}"
                     common.write_log(f"Supervisor shutdown requested by {shutdown_source}", common.SUPERVISOR_LOG)
                     common.send_text(
                         "👮 <b>SUPERVISOR STOPPED</b>\n"
@@ -645,7 +665,23 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                 common.write_log("Command loop error:\n" + common.capture_exception(), common.SUPERVISOR_LOG)
                 common.send_text(common.format_supervisor_error_text(err), common.SUPERVISOR_LOG)
             time.sleep(max(1, args.poll))
+    except KeyboardInterrupt as err:
+        exit_reason = "keyboard-interrupt"
+        exit_detail = str(err)
+        common.write_log("Supervisor interrupted by keyboard signal.", common.SUPERVISOR_LOG)
+        raise
+    except BaseException as err:
+        exit_reason = f"fatal:{type(err).__name__}"
+        exit_detail = str(err)
+        common.update_state(last_error=str(err))
+        common.write_log("Supervisor fatal error:\n" + common.capture_exception(), common.SUPERVISOR_LOG)
+        raise
     finally:
+        common.write_log(
+            f"Supervisor session exiting: session={session_id} reason={exit_reason}" + (f" detail={exit_detail}" if exit_detail else ""),
+            common.SUPERVISOR_LOG,
+        )
+        common.mark_supervisor_exited(session_id, exit_reason, exit_detail)
         common.stop_heartbeat(common.SUPERVISOR_LOG)
         common.release_pid_lock(common.SUPERVISOR_PID_FILE)
     return 0
