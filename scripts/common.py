@@ -713,6 +713,28 @@ def _resolve_checkpoint_from_arg(run_dir: str | None, checkpoint_arg: str) -> st
     return get_latest_checkpoint(run_dir)
 
 
+def _resolve_active_run_from_state() -> str | None:
+    state = load_state()
+    active_run = state.get("active_run") or ""
+    if not active_run:
+        return None
+    active_path = os.path.join(LOG_BASE, str(active_run))
+    if os.path.isdir(active_path):
+        return os.path.abspath(active_path)
+    return None
+
+
+def _resolve_active_checkpoint_from_state(run_dir: str | None = None) -> str | None:
+    state = load_state()
+    checkpoint = state.get("active_checkpoint") or ""
+    if not checkpoint or not os.path.isfile(checkpoint):
+        return None
+    checkpoint = os.path.abspath(checkpoint)
+    if run_dir and os.path.dirname(checkpoint) != os.path.abspath(run_dir):
+        return None
+    return checkpoint
+
+
 def resolve_live_training_context() -> tuple[str | None, str | None]:
     processes = list_training_processes()
     if not processes:
@@ -721,7 +743,7 @@ def resolve_live_training_context() -> tuple[str | None, str | None]:
     for entry in sorted(processes, key=lambda item: item.get("pid", 0), reverse=True):
         cmdline = entry.get("cmdline") or ""
         resume_run_dir = _resolve_run_dir_from_arg(_extract_cmd_option(cmdline, "load_run"))
-        live_run_dir = _find_live_run_dir_for_process(entry) or latest_run or resume_run_dir
+        live_run_dir = _find_live_run_dir_for_process(entry) or resume_run_dir or latest_run
         checkpoint = get_latest_checkpoint(live_run_dir)
         if not checkpoint:
             checkpoint = _resolve_checkpoint_from_arg(resume_run_dir or live_run_dir, _extract_cmd_option(cmdline, "checkpoint"))
@@ -735,16 +757,10 @@ def resolve_active_run_dir() -> str | None:
     live_run_dir, _ = resolve_live_training_context()
     if live_run_dir:
         return live_run_dir
-    latest_run = get_latest_run_dir()
-    state = load_state()
-    active_run = state.get("active_run") or ""
-    if active_run:
-        active_path = os.path.join(LOG_BASE, active_run)
-        if os.path.isdir(active_path):
-            if latest_run and os.path.basename(latest_run) > os.path.basename(active_path):
-                return latest_run
-            return active_path
-    return latest_run
+    state_run_dir = _resolve_active_run_from_state()
+    if state_run_dir:
+        return state_run_dir
+    return get_latest_run_dir()
 
 
 def resolve_active_checkpoint(run_dir: str | None = None) -> str | None:
@@ -754,15 +770,54 @@ def resolve_active_checkpoint(run_dir: str | None = None) -> str | None:
             return live_checkpoint
     run_dir = run_dir or live_run_dir or resolve_active_run_dir()
     latest_checkpoint = get_latest_checkpoint(run_dir)
-    state = load_state()
-    checkpoint = state.get("active_checkpoint") or ""
-    if checkpoint and os.path.isfile(checkpoint):
-        checkpoint = os.path.abspath(checkpoint)
-        if run_dir and os.path.dirname(checkpoint) == os.path.abspath(run_dir):
-            if latest_checkpoint and get_checkpoint_iter(latest_checkpoint) > get_checkpoint_iter(checkpoint):
-                return latest_checkpoint
-            return checkpoint
+    state_checkpoint = _resolve_active_checkpoint_from_state(run_dir)
+    if state_checkpoint:
+        if latest_checkpoint and get_checkpoint_iter(latest_checkpoint) > get_checkpoint_iter(state_checkpoint):
+            return latest_checkpoint
+        return state_checkpoint
     return latest_checkpoint
+
+
+def build_context_resolution_snapshot() -> dict[str, str | bool]:
+    state = load_state()
+    latest_run = get_latest_run_dir()
+    state_run_dir = _resolve_active_run_from_state()
+    live_run_dir, live_checkpoint = resolve_live_training_context()
+    resolved_run_dir = resolve_active_run_dir()
+    latest_checkpoint = get_latest_checkpoint(resolved_run_dir)
+    state_checkpoint = _resolve_active_checkpoint_from_state(resolved_run_dir)
+    resolved_checkpoint = resolve_active_checkpoint(resolved_run_dir)
+    return {
+        "training_alive": is_training_running(),
+        "state_mode": str(state.get("mode", "idle")),
+        "state_run": os.path.basename(state_run_dir) if state_run_dir else "N/A",
+        "state_checkpoint": os.path.basename(state_checkpoint) if state_checkpoint else "N/A",
+        "live_run": os.path.basename(live_run_dir) if live_run_dir else "N/A",
+        "live_checkpoint": os.path.basename(live_checkpoint) if live_checkpoint else "N/A",
+        "latest_run": os.path.basename(latest_run) if latest_run else "N/A",
+        "latest_checkpoint": os.path.basename(latest_checkpoint) if latest_checkpoint else "N/A",
+        "resolved_run": os.path.basename(resolved_run_dir) if resolved_run_dir else "N/A",
+        "resolved_checkpoint": os.path.basename(resolved_checkpoint) if resolved_checkpoint else "N/A",
+    }
+
+
+def build_context_resolution_text() -> str:
+    snapshot = build_context_resolution_snapshot()
+    lines = [
+        "🔎 CONTEXT RESOLUTION",
+        f"• training_alive: {'yes' if snapshot['training_alive'] else 'no'}",
+        f"• state_mode: {snapshot['state_mode']}",
+        f"• state_run: {snapshot['state_run']}",
+        f"• state_checkpoint: {snapshot['state_checkpoint']}",
+        f"• live_run: {snapshot['live_run']}",
+        f"• live_checkpoint: {snapshot['live_checkpoint']}",
+        f"• latest_run: {snapshot['latest_run']}",
+        f"• latest_checkpoint: {snapshot['latest_checkpoint']}",
+        f"• resolved_run: {snapshot['resolved_run']}",
+        f"• resolved_checkpoint: {snapshot['resolved_checkpoint']}",
+        "• priority: live process > cached active state > latest filesystem",
+    ]
+    return "\n".join(lines)
 
 
 def get_display_iteration(run_dir: str | None, checkpoint_path: str | None = None) -> int:
@@ -1981,6 +2036,7 @@ def _build_status_snapshot() -> dict:
     state = load_state()
     run_dir = resolve_active_run_dir()
     checkpoint = resolve_active_checkpoint(run_dir)
+    training_alive = is_training_running()
     kpi_snapshot = build_supervisor_kpi_snapshot(run_dir) if run_dir and os.path.isdir(run_dir) else {}
     iter_num = int(kpi_snapshot.get("iter") or 0) or get_checkpoint_iter(checkpoint)
     progress_pct = (iter_num / MAX_ITERATIONS * 100.0) if MAX_ITERATIONS > 0 else 0.0
@@ -1996,6 +2052,7 @@ def _build_status_snapshot() -> dict:
     if not _path_matches_run(last_report_zip, run_dir):
         last_report_zip = find_latest_report_zip(run_dir) or ""
     heartbeat_alive = is_heartbeat_running()
+    supervisor_alive = bool(list_supervisor_processes())
     last_heartbeat_report_text = _get_last_heartbeat_age(run_dir)
     if heartbeat_alive:
         last_heartbeat_text = f"alive | report {last_heartbeat_report_text}"
@@ -2013,14 +2070,23 @@ def _build_status_snapshot() -> dict:
         [HEARTBEAT_SCRIPT, __file__],
         pid_file=HEARTBEAT_PID_FILE,
     )
+    cached_mode = str(state.get("mode", "idle"))
+    if cached_mode in {"reporting", "rendering"}:
+        mode = cached_mode
+    elif training_alive:
+        mode = "training"
+    elif supervisor_alive or heartbeat_alive:
+        mode = "idle"
+    else:
+        mode = cached_mode
     return {
         "state": state,
         "run_dir": run_dir,
         "checkpoint": checkpoint,
         "iter_num": iter_num,
-        "training_alive": is_training_running(),
+        "training_alive": training_alive,
         "heartbeat_alive": heartbeat_alive,
-        "mode": str(state.get("mode", "idle")),
+        "mode": mode,
         "progress_text": f"{iter_num:,}/{MAX_ITERATIONS:,} ({progress_pct:.1f}%)",
         "reward_text": f"{float(kpi_snapshot.get('reward') or 0.0):.3f}" if kpi_snapshot else "N/A",
         "ep_len_text": f"{float(kpi_snapshot.get('ep_len') or 0.0):.1f}" if kpi_snapshot else "N/A",
@@ -4090,7 +4156,7 @@ def build_status_text() -> str:
 
     lines = [
         "👮 SUPERVISOR STATUS",
-        f"• mode: {_status_light(mode, {'idle': '⚪', 'training': '🟡', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}",
+        f"• mode: {_status_light(mode, {'idle': '🔴', 'training': '🟢', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}",
         f"• training: {_status_light('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
         f"• heartbeat: {_status_light('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
         f"• supervisor_version: {snapshot['supervisor_version_text']}",
@@ -4128,7 +4194,7 @@ def format_status_html() -> str:
 
     lines = [
         "👮 <b>SUPERVISOR STATUS</b>",
-        f"• mode: <code>{_status_light_html(mode, {'idle': '⚪', 'training': '🟡', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}</code>",
+        f"• mode: <code>{_status_light_html(mode, {'idle': '🔴', 'training': '🟢', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}</code>",
         f"• training: <code>{_status_light_html('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
         f"• heartbeat: <code>{_status_light_html('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
         f"• supervisor_version: <code>{html.escape(snapshot['supervisor_version_text'])}</code>",
@@ -4210,7 +4276,7 @@ def resolve_context() -> tuple[str | None, str | None]:
 
 
 def command_variants() -> set[str]:
-    return {"start", "stop", "status", "report", "front", "rear", "top", "side", "help", "shutdown"}
+    return {"start", "stop", "status", "selfcheck", "report", "front", "rear", "top", "side", "help", "shutdown"}
 
 
 def help_text() -> str:
@@ -4219,6 +4285,7 @@ def help_text() -> str:
         "/start : 훈련 시작 또는 latest checkpoint 재개\n"
         "/stop : 현재 훈련만 중단\n"
         "/status : 현재 상태 조회\n"
+        "/selfcheck : run/checkpoint/context 해석 우선순위 점검\n"
         "/report [iter] : training 중이면 최신 zip, stopped면 지정 iter 또는 최신 checkpoint 기준 새 zip 생성\n"
         "/front [iter], /rear [iter], /top [iter], /side [iter] : training 중이면 최신 영상, stopped면 지정 iter 또는 최신 checkpoint 기준 새 영상 생성\n"
         "/shutdown : supervisor 종료\n"

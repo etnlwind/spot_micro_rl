@@ -315,6 +315,9 @@ def handle_command(command: str, checkpoint_iter: int | None = None) -> None:
     if command == "status":
         common.send_text(common.format_status_html(), common.SUPERVISOR_LOG, parse_mode="HTML")
         return
+    if command == "selfcheck":
+        common.send_text(f"<pre>{common.build_context_resolution_text()}</pre>", common.SUPERVISOR_LOG, parse_mode="HTML")
+        return
     if command == "start":
         result = common.launch_training(common.SUPERVISOR_LOG)
         run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
@@ -486,6 +489,11 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
         common.send_text(common.format_status_html(), common.SUPERVISOR_LOG, parse_mode="HTML")
         _print_local(common.build_status_text())
         return 0
+    if action == "selfcheck":
+        text = common.build_context_resolution_text()
+        common.send_text(f"<pre>{text}</pre>", common.SUPERVISOR_LOG, parse_mode="HTML")
+        _print_local(text)
+        return 0
     if action == "start":
         common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
         result = common.launch_training(common.SUPERVISOR_LOG)
@@ -582,7 +590,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
     common.acquire_pid_lock(common.SUPERVISOR_PID_FILE, "supervisor", common.SUPERVISOR_LOG)
     common.prime_update_offset(common.SUPERVISOR_LOG)
     common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
-    common.update_state(last_command="startup", last_error="")
+    common.update_state(mode="training" if common.is_training_running() else "idle", last_command="startup", last_error="")
     common.send_text(
         "👮 <b>SUPERVISOR ACTIVE</b>\n"
         "<i>Supervisor is ready for commands.</i>\n\n"
@@ -663,6 +671,7 @@ def _build_parser() -> argparse.ArgumentParser:
     action_group.add_argument("--start", dest="action", action="store_const", const="start", help="훈련 시작 또는 latest checkpoint 재개")
     action_group.add_argument("--stop", dest="action", action="store_const", const="stop", help="현재 훈련 중단")
     action_group.add_argument("--status", dest="action", action="store_const", const="status", help="현재 상태 출력")
+    action_group.add_argument("--selfcheck", dest="action", action="store_const", const="selfcheck", help="run/checkpoint/context 해석 우선순위 점검")
     action_group.add_argument("--report", dest="action", action="store_const", const="report", help="리포트 ZIP 생성 또는 최신 ZIP 경로 출력")
     action_group.add_argument("--front", dest="action", action="store_const", const="front", help="front 영상 생성 또는 최신 경로 출력")
     action_group.add_argument("--rear", dest="action", action="store_const", const="rear", help="rear 영상 생성 또는 최신 경로 출력")
