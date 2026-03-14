@@ -3266,6 +3266,38 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
     foot_jitter_score = kpi.get("foot_jitter_score")
     if foot_jitter_score is not None:
         lines.append(f"  - foot_jitter: {float(foot_jitter_score):.1f}/100")
+
+    # V26: 다리 상태 (RL/RR)
+    cr_rl = rewards.get("contact_ratio_rl")
+    cr_rr = rewards.get("contact_ratio_rr")
+    prop_rl = rewards.get("propulsion_rl")
+    prop_rr = rewards.get("propulsion_rr")
+    sw_rl = rewards.get("swing_time_rl")
+    sw_rr = rewards.get("swing_time_rr")
+    us_rl = rewards.get("limb_usage_rl")
+    us_rr = rewards.get("limb_usage_rr")
+    lv_reason = kpi.get("limb_validity_reason") or "N/A"
+
+    def _limb_icon(contact, propulsion):
+        if contact is None:
+            return "❓"
+        if contact < 0.05 or (propulsion is not None and propulsion < 0.02):
+            return "🔴"
+        if contact < 0.10 or (propulsion is not None and propulsion < 0.05):
+            return "🟡"
+        return "🟢"
+
+    def _fv(v):
+        return f"{v:.3f}" if v is not None else "N/A"
+
+    lines.extend([
+        "",
+        "- 다리 상태 (RL/RR)",
+        f"  - {_limb_icon(cr_rl, prop_rl)} RL: contact={_fv(cr_rl)} | prop={_fv(prop_rl)} | swing={_fv(sw_rl)} | usage={_fv(us_rl)}",
+        f"  - {_limb_icon(cr_rr, prop_rr)} RR: contact={_fv(cr_rr)} | prop={_fv(prop_rr)} | swing={_fv(sw_rr)} | usage={_fv(us_rr)}",
+        f"  - validity: {html.escape(str(lv_reason))}",
+    ])
+
     lines.extend(
         [
             "",
@@ -4330,6 +4362,38 @@ def format_report_summary_html(run_dir: str, checkpoint_path: str, analysis_text
         f"• reward: <code>{html.escape(str(grade['Reward']))}</code>",
         f"• trend: <code>{html.escape(str(grade['Trend']))}</code>",
     ]
+
+    # V26: 다리 상태 (RL/RR)
+    def _fv2(v):
+        return f"{v:.3f}" if v is not None else "N/A"
+
+    def _limb_icon2(contact, propulsion):
+        if contact is None:
+            return "❓"
+        if contact < 0.05 or (propulsion is not None and propulsion < 0.02):
+            return "🔴"
+        if contact < 0.10 or (propulsion is not None and propulsion < 0.05):
+            return "🟡"
+        return "🟢"
+
+    cr_rl2 = kpi_snapshot.get("contact_ratio_rl")
+    cr_rr2 = kpi_snapshot.get("contact_ratio_rr")
+    prop_rl2 = kpi_snapshot.get("propulsion_rl")
+    prop_rr2 = kpi_snapshot.get("propulsion_rr")
+    sw_rl2 = kpi_snapshot.get("swing_time_rl")
+    sw_rr2 = kpi_snapshot.get("swing_time_rr")
+    us_rl2 = kpi_snapshot.get("limb_usage_rl")
+    us_rr2 = kpi_snapshot.get("limb_usage_rr")
+    lv_reason2 = kpi_snapshot.get("limb_validity_reason") or "N/A"
+    if any(v is not None for v in [cr_rl2, cr_rr2, prop_rl2, prop_rr2]):
+        lines += [
+            "",
+            f"• <b>다리 상태 (RL/RR)</b>",
+            f"  {_limb_icon2(cr_rl2, prop_rl2)} RL: contact={_fv2(cr_rl2)} | prop={_fv2(prop_rl2)} | swing={_fv2(sw_rl2)} | usage={_fv2(us_rl2)}",
+            f"  {_limb_icon2(cr_rr2, prop_rr2)} RR: contact={_fv2(cr_rr2)} | prop={_fv2(prop_rr2)} | swing={_fv2(sw_rr2)} | usage={_fv2(us_rr2)}",
+            f"  validity: {html.escape(str(lv_reason2))}",
+        ]
+
     return "\n".join(lines)
 
 

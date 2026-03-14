@@ -647,13 +647,13 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                         )
                         continue
 
-                    # pending confirmation 처리 — y/Y 만 확인, 나머지는 모두 취소
+                    # pending confirmation 처리 — y/Y 로 시작하면 확인, 나머지는 모두 취소
                     if pending_confirm:
                         if time.time() > pending_confirm.get("expires_at", 0):
                             pending_confirm = None
                             _send_notice("START CANCELLED", "확인 시간이 초과되었습니다 (60초).", icon="⛔")
                             # fall through to normal command processing
-                        elif text.strip() in {"y", "Y"}:
+                        elif text.strip().lower().startswith("y"):
                             action = pending_confirm["action"]
                             pending_confirm = None
                             common.write_log(f"[Confirm] action={action} confirmed by user", common.SUPERVISOR_LOG)
@@ -672,7 +672,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                                     )
                             continue
                         else:
-                            # y/Y 외 모든 입력 → 취소
+                            # y/Y로 시작하지 않는 모든 입력 → 취소
                             pending_confirm = None
                             _send_notice("START CANCELLED", "취소되었습니다.", icon="⛔")
                             continue

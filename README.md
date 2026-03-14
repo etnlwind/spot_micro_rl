@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V24 Limb Validity Gating 구현 완료, 첫 run 진행 중
+**현재 상태**: V26.1 (Symmetric Existence Floor + Load Sharing) 훈련 진행 중
 
 ### 기술 스택
 
@@ -211,11 +211,11 @@ python scripts/supervisor.py
 
 ### 현재 운영 기준
 
-- 학습 버전: `V24` (Limb Validity Gating)
+- 학습 버전: `V26.1` (Symmetric Existence Floor + Load Sharing)
 - active 운영 스크립트: `scripts/supervisor.py`, `scripts/heartbeat.py`, `scripts/common.py`
 - 접촉 해석 기본값: `toe_link`
-- 참고 문서: `plan/V24_PLAN.md`
-- 이전 버전 문서: `plan/V23_PLAN.md`, `plan/V22_ANALYSIS.md`, `plan/V21_ANALYSIS.md`
+- 참고 문서: `plan/V26.1_PLAN.md` (구현), `plan/V26_ANALYSIS.md` (설계 철학)
+- 이전 버전 문서: `plan/V25_ANALYSIS.md` (FAILED), `plan/V24_PLAN.md`, `plan/V23_PLAN.md`
 
 ---
 
@@ -235,16 +235,32 @@ python scripts/supervisor.py
 
 **안전장치**: ep_len < 200이면 ramp 일시 정지 (metric gating)
 
-### V24 Limb Validity Gating (현재)
+### V26.1 Symmetric Existence Floor + Load Sharing (현재)
 
-rear-left collapse와 좌우 비대칭을 명시적으로 차단하는 두 penalty term:
+모든 다리에 동일 기준을 적용하는 8개 symmetric reward term. V25의 비대칭 패널티가 collapse 위치만 이동시킨 근본 원인을 해결.
 
-| reward | weight | 조건 |
+**Existence Floor (iter 0~200 ramp, initial→final)**
+
+| reward | final weight | 역할 |
 |--------|--------|------|
-| `limb_usage_min_penalty` | -12.0 | 4개 사지 중 최소 usage < 0.30 시 페널티 |
-| `rear_left_right_usage_diff_penalty` | -8.0 | rear 좌우 usage 차이 > 0.18 시 페널티 |
+| `per_leg_contact_floor_penalty` | -20.0 | 4개 다리 각각 contact_ratio < 0.10 시 페널티 |
+| `per_leg_propulsion_floor_penalty` | -15.0 | 4개 다리 각각 propulsion < 0.05 시 페널티 (fake contact 차단) |
+| `limb_usage_min_penalty` | -15.0 | 4개 다리 중 최소 usage < 0.10 시 페널티 |
 
-두 term 모두 iter 200~600에 걸쳐 선형 ramp(-3.0 → -12.0, -2.0 → -8.0), 정지 시 비활성(min_vel=0.05).
+**Load Sharing (iter 200~350 ramp, 0→final)**
+
+| reward | final weight | 역할 |
+|--------|--------|------|
+| `rear_left_right_usage_diff_penalty` | -10.0 | rear 좌우 usage 편중 억제 (max_diff=0.40) |
+| `front_left_right_usage_diff_penalty` | -8.0 | front 좌우 usage 편중 억제 (max_diff=0.40) |
+| `rear_left_right_propulsion_diff_penalty` | -8.0 | rear 좌우 추진력 편중 억제 (max_diff=0.40) |
+| `front_rear_support_balance_penalty` | -5.0 | 앞/뒤 전체 지지 편중 억제 (max_diff=0.50) |
+
+**Gait Exploit 차단**
+
+| reward | weight | 역할 |
+|--------|--------|------|
+| `diagonal_coupling_soft_gate_reward` | +25.0 | collapse 다리 포함 diagonal 보상 soft attenuation (min_contact=0.15) |
 
 ### 리워드 함수 패턴
 
@@ -295,7 +311,9 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V21** | **03-10~** | **gait-quality-first 모니터링, iter cadence supervisor, toe contact 진단** | ✅ 완료 |
 | **V22** | **03-11~** | **멀티뷰 비디오 패키지, heartbeat workbook, ZIP artifact, top/front view 정리** | ✅ 완료 |
 | **V23** | **03-12~** | **posture-first refinement, rear joint velocity 강화** | ✅ 완료 |
-| **V24** | **03-13~** | **Limb Validity Gating: rear-left collapse 차단, 좌우 비대칭 페널티, 자동 영상 리포트** | 🔄 운영 중 |
+| **V24** | **03-13~** | **Limb Validity Gating: rear-left collapse 차단, 좌우 비대칭 페널티, 자동 영상 리포트** | ✅ 완료 |
+| **V25** | **03-14~03-15** | **rear_left_contact_floor_penalty -60 직접 처방 (RL 회복, RR collapse 이동)** | ❌ 실패 (iter 400) |
+| **V26.1** | **03-15~** | **Symmetric Existence Floor + Load Sharing: 모든 다리 동일 기준, collapse 이동 차단** | 🔄 운영 중 |
 
 ### 핵심 교훈
 
@@ -325,6 +343,9 @@ python scripts/analyze_v20.py
 - `plan/V22_ANALYSIS.md`
 - `plan/V23_PLAN.md`
 - `plan/V24_PLAN.md`
+- `plan/V25_ANALYSIS.md` (FAILED — iter 400, RR collapse)
+- `plan/V26_ANALYSIS.md` (설계 철학 문서)
+- `plan/V26.1_PLAN.md` (현재 구현 — active)
 
 ---
 

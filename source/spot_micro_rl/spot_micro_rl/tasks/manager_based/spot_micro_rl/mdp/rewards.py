@@ -395,6 +395,201 @@ def rear_left_contact_floor_penalty(
     return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
 
 
+# ============================================================
+# V26: Symmetric Per-Leg Existence Floor Penalties
+# 네 다리 모두 동일 기준으로 존재를 보장한다.
+# V25의 rear_left 특화 패널티 → collapse 위치 이동 실패 교훈.
+# ============================================================
+
+
+def per_leg_contact_floor_penalty(
+    env: ManagerBasedRLEnv,
+    floor: float = 0.10,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V26: 네 다리 각각의 contact_ratio가 floor 미달 시 패널티 (symmetric).
+
+    V25의 rear_left_contact_floor_penalty와 달리 모든 다리에 동일 기준 적용.
+    각 다리의 gap을 합산 → 어느 다리가 무너져도 패널티 발생.
+    floor=0.10: 완전 소멸 방지용 최소 floor (contact_quantity가 아닌 existence 보장).
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    contact_tensor = torch.stack(
+        [metrics[f"contact_ratio_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    gaps = torch.clamp(float(floor) - contact_tensor, min=0.0)
+    return gaps.sum(dim=1) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def per_leg_propulsion_floor_penalty(
+    env: ManagerBasedRLEnv,
+    floor: float = 0.05,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V26: 네 다리 각각의 propulsion이 floor 미달 시 패널티 (symmetric).
+
+    fake contact(접지하지만 추진 없음) 차단 목적.
+    contact_ratio가 살아도 propulsion이 0이면 "접지 흉내"로 처리.
+    floor=0.05: 바닥을 살짝이라도 실제로 밀어야 한다는 최소 기준.
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    prop_tensor = torch.stack(
+        [metrics[f"propulsion_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    gaps = torch.clamp(float(floor) - prop_tensor, min=0.0)
+    return gaps.sum(dim=1) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+# ============================================================
+# V26: Load Sharing Penalties (symmetric left/right, front/rear)
+# ============================================================
+
+
+def front_left_right_usage_diff_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_diff: float = 0.40,
+    contact_target: float = 0.5,
+    propulsion_target: float = 0.30,
+    leg_lift_target: float = 0.18,
+    clearance_target: float = 0.03,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """V26: 앞다리 좌우(FL vs FR) usage 편중 억제.
+
+    rear_left_right_usage_diff_penalty의 앞다리 대칭 버전.
+    max_diff=0.40: 40% 이상 편중 시 penalty (부드러운 연속 함수).
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    usage_scores = _compute_limb_usage_proxy(
+        metrics, contact_target, propulsion_target, leg_lift_target, clearance_target
+    )
+    front_diff = torch.abs(usage_scores["fl"] - usage_scores["fr"])
+    gap = torch.clamp(front_diff - float(max_diff), min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def rear_left_right_propulsion_diff_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_diff: float = 0.40,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """V26: 뒷다리 좌우(RL vs RR) 추진 편중 억제.
+
+    usage 편중과 달리 직접 propulsion 값을 비교.
+    한쪽 뒷다리가 추진을 독점하는 패턴 억제.
+    max_diff=0.40: 40% 이상 편중 시 penalty.
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    prop_diff = torch.abs(metrics["propulsion_rl"] - metrics["propulsion_rr"])
+    gap = torch.clamp(prop_diff - float(max_diff), min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def front_rear_support_balance_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_diff: float = 0.50,
+    contact_target: float = 0.5,
+    propulsion_target: float = 0.30,
+    leg_lift_target: float = 0.18,
+    clearance_target: float = 0.03,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """V26: 앞/뒤 전체 지지 편중 억제.
+
+    앞다리 usage 평균 vs 뒷다리 usage 평균의 차이를 측정.
+    앞뒤는 구조적으로 다소 비대칭 허용 → max_diff=0.50으로 여유 부여.
+    병적인 front-only 또는 rear-only 보행만 억제.
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    usage_scores = _compute_limb_usage_proxy(
+        metrics, contact_target, propulsion_target, leg_lift_target, clearance_target
+    )
+    front_mean = (usage_scores["fl"] + usage_scores["fr"]) / 2.0
+    rear_mean = (usage_scores["rl"] + usage_scores["rr"]) / 2.0
+    support_diff = torch.abs(front_mean - rear_mean)
+    gap = torch.clamp(support_diff - float(max_diff), min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+# ============================================================
+# V26: Diagonal Coupling with General Per-Limb Collapse Gate
+# V25는 RL만 게이팅 → V26은 모든 다리에 대칭 soft gate 적용.
+# ============================================================
+
+
+def diagonal_coupling_soft_gate_reward(
+    env: ManagerBasedRLEnv,
+    pair_a_front_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    pair_a_rear_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    pair_b_front_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    pair_b_rear_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    vel_deadzone: float = 0.1,
+    min_vel: float = 0.05,
+    min_contact: float = 0.15,
+) -> torch.Tensor:
+    """V26: diagonal coupling with general per-limb collapse soft gate.
+
+    Pair A (FL↔RR): 두 다리 중 하나라도 collapse면 보상 attenuation.
+    Pair B (FR↔RL): 두 다리 중 하나라도 collapse면 보상 attenuation.
+
+    V25는 RL만 gate → 3-leg exploit 차단 불완전.
+    V26은 FL/FR/RL/RR 모두 동일 기준으로 게이팅 → 어느 다리라도
+    collapse 상태면 그 다리가 포함된 diagonal pair 보상이 감소.
+
+    min_contact=0.15: contact_ratio 15% 이상이면 gate=1 (정상 참여).
+    """
+    asset: Articulation = env.scene[pair_a_front_cfg.name]
+
+    fl_vel = asset.data.joint_vel[:, pair_a_front_cfg.joint_ids]  # (N, 2)
+    rr_vel = asset.data.joint_vel[:, pair_a_rear_cfg.joint_ids]   # (N, 2)
+    fr_vel = asset.data.joint_vel[:, pair_b_front_cfg.joint_ids]  # (N, 2)
+    rl_vel = asset.data.joint_vel[:, pair_b_rear_cfg.joint_ids]   # (N, 2)
+
+    dz_sq = vel_deadzone ** 2
+    pair_a_corr = torch.tanh(fl_vel * rr_vel / dz_sq)
+    pair_b_corr = torch.tanh(fr_vel * rl_vel / dz_sq)
+
+    pair_a_reward = torch.clamp(pair_a_corr, 0.0, 1.0).mean(dim=1)
+    pair_b_reward = torch.clamp(pair_b_corr, 0.0, 1.0).mean(dim=1)
+
+    # General collapse gate: attenuation이 필요한 다리가 포함된 pair의 보상을 감소
+    metrics = compute_v23_raw_metrics(env)
+    if metrics:
+        mc = max(float(min_contact), 1.0e-6)
+        fl_gate = torch.clamp(metrics["contact_ratio_fl"] / mc, 0.0, 1.0)
+        rr_gate = torch.clamp(metrics["contact_ratio_rr"] / mc, 0.0, 1.0)
+        fr_gate = torch.clamp(metrics["contact_ratio_fr"] / mc, 0.0, 1.0)
+        rl_gate = torch.clamp(metrics["contact_ratio_rl"] / mc, 0.0, 1.0)
+        # pair A: FL과 RR이 모두 정상이어야 보상 (둘 다 살아야 진짜 trot)
+        pair_a_reward = pair_a_reward * fl_gate * rr_gate
+        # pair B: FR과 RL이 모두 정상이어야 보상
+        pair_b_reward = pair_b_reward * fr_gate * rl_gate
+
+    reward = (pair_a_reward + pair_b_reward) / 2.0
+
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return reward * vel_gate
+
+
 def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Penalize joint position deviation from a target value."""
     # extract the used quantities (to enable type-hinting)
@@ -1716,6 +1911,18 @@ def _curriculum_apply_weights(
     validity_limb_usage_final: float,
     validity_rear_diff_initial: float,
     validity_rear_diff_final: float,
+    floor_alpha: float = 0.0,
+    load_alpha: float = 0.0,
+    floor_limb_usage_initial: float = 0.0,
+    floor_limb_usage_final: float = 0.0,
+    floor_per_leg_contact_initial: float = 0.0,
+    floor_per_leg_contact_final: float = 0.0,
+    floor_per_leg_propulsion_initial: float = 0.0,
+    floor_per_leg_propulsion_final: float = 0.0,
+    load_rear_usage_diff_final: float = 0.0,
+    load_front_usage_diff_final: float = 0.0,
+    load_rear_prop_diff_final: float = 0.0,
+    load_front_rear_balance_final: float = 0.0,
 ) -> None:
     """alpha 기반으로 Phase 가중치를 보간하여 적용."""
     w = _CURRICULUM_PHASE_WEIGHTS
@@ -1735,12 +1942,50 @@ def _curriculum_apply_weights(
         except Exception:
             pass
 
+    # Legacy validity terms (V24 path, no-op if weights are 0)
     validity_terms = {
         "limb_usage_min_penalty": (float(validity_limb_usage_initial), float(validity_limb_usage_final)),
         "rear_left_right_usage_diff_penalty": (float(validity_rear_diff_initial), float(validity_rear_diff_final)),
     }
     for term_name, (w_init, w_final) in validity_terms.items():
+        if abs(w_init) < 1e-9 and abs(w_final) < 1e-9:
+            continue
         current = w_init + validity_alpha * (w_final - w_init)
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = current
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+    # V26: Existence floor ramp (iter 0 ~ floor_ramp_end)
+    floor_terms: dict[str, tuple[float, float]] = {
+        "limb_usage_min_penalty": (float(floor_limb_usage_initial), float(floor_limb_usage_final)),
+        "per_leg_contact_floor": (float(floor_per_leg_contact_initial), float(floor_per_leg_contact_final)),
+        "per_leg_propulsion_floor": (float(floor_per_leg_propulsion_initial), float(floor_per_leg_propulsion_final)),
+    }
+    for term_name, (w_init, w_final) in floor_terms.items():
+        if abs(w_init) < 1e-9 and abs(w_final) < 1e-9:
+            continue
+        current = w_init + floor_alpha * (w_final - w_init)
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = current
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+    # V26: Load sharing ramp (load_ramp_start ~ load_ramp_end), starts from 0
+    load_terms: dict[str, float] = {
+        "rear_left_right_usage_diff_penalty": float(load_rear_usage_diff_final),
+        "front_left_right_usage_diff_penalty": float(load_front_usage_diff_final),
+        "rear_left_right_propulsion_diff_penalty": float(load_rear_prop_diff_final),
+        "front_rear_support_balance_penalty": float(load_front_rear_balance_final),
+    }
+    for term_name, w_final in load_terms.items():
+        if abs(w_final) < 1e-9:
+            continue
+        current = 0.0 + load_alpha * w_final
         try:
             cfg = env.reward_manager.get_term_cfg(term_name)
             cfg.weight = current
@@ -1755,9 +2000,15 @@ _LOG_WEIGHT_TERMS = [
     "trot_gait",
     "joint_vel_l2",
     "dof_acc_l2",
-    "rear_left_contact_floor",   # V25
-    "limb_usage_min_penalty",    # V24 (없으면 skip)
-    "rear_left_right_usage_diff_penalty",  # V24 (없으면 skip)
+    # V26 existence floor (없으면 skip)
+    "limb_usage_min_penalty",
+    "per_leg_contact_floor",
+    "per_leg_propulsion_floor",
+    # V26 load sharing (없으면 skip)
+    "rear_left_right_usage_diff_penalty",
+    "front_left_right_usage_diff_penalty",
+    "rear_left_right_propulsion_diff_penalty",
+    "front_rear_support_balance_penalty",
 ]
 _LOG_RAW_GAIT_TERMS = ["forward_velocity", "trot_gait", "diagonal_coupling", "leg_lift", "foot_clearance"]
 _LOG_RAW_QUALITY_TERMS = ["joint_vel_l2", "dof_acc_l2", "action_rate_l2"]
@@ -1844,6 +2095,22 @@ def reward_weight_curriculum(
     validity_limb_usage_final: float = -12.0,
     validity_rear_diff_initial: float = -2.0,
     validity_rear_diff_final: float = -8.0,
+    # V26: Existence floor ramp (iter 0 ~ floor_ramp_end)
+    floor_ramp_start: int = 0,
+    floor_ramp_end: int = 1,
+    floor_limb_usage_initial: float = 0.0,
+    floor_limb_usage_final: float = 0.0,
+    floor_per_leg_contact_initial: float = 0.0,
+    floor_per_leg_contact_final: float = 0.0,
+    floor_per_leg_propulsion_initial: float = 0.0,
+    floor_per_leg_propulsion_final: float = 0.0,
+    # V26: Load sharing ramp (load_ramp_start ~ load_ramp_end)
+    load_ramp_start: int = 0,
+    load_ramp_end: int = 1,
+    load_rear_usage_diff_final: float = 0.0,
+    load_front_usage_diff_final: float = 0.0,
+    load_rear_prop_diff_final: float = 0.0,
+    load_front_rear_balance_final: float = 0.0,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -1852,22 +2119,18 @@ def reward_weight_curriculum(
     # 로깅
     log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
-    """Soft-ramp 리워드 가중치 커리큘럼 (V20).
+    """Soft-ramp 리워드 가중치 커리큘럼 (V20, V26 확장).
 
     기존 hard phase switch를 선형 보간 ramp로 대체.
     Phase 1 (STAND) → Phase 2 (WALK) → Phase 3 (TROT) 가중치를
     ramp 구간에서 점진적으로 보간하여 critic shock를 방지한다.
 
+    V26 확장: existence floor ramp + load sharing ramp.
+      - floor_ramp: iter 0~200 동안 존재 floor 패널티 ramp-up
+      - load_ramp: iter 200~350 동안 하중 분산 패널티 ramp-up
+
     Metric gating: 평균 episode length가 gait_gate_min_ep_len 미만이면
     ramp를 일시정지하여 보행 구조 붕괴를 방지한다.
-    ("시간이 됐으니 벌점 추가"가 아니라 "정책이 준비됐으니 벌점 추가")
-
-    타임라인 예시 (기본값):
-      iter    0~1500: Phase 1 고정 (STAND)
-      iter 1500~3000: Phase 1→2 선형 보간 (STAND→WALK)
-      iter 3000~5500: Phase 2 고정 (WALK)
-      iter 5500~8000: Phase 2→3 선형 보간 (WALK→TROT)
-      iter 8000~    : Phase 3 고정 (TROT)
 
     주의: common_step_counter는 체크포인트에 저장되지 않으므로
           resume 시 train.py에서 runner.current_learning_iteration 기반으로
@@ -1882,6 +2145,8 @@ def reward_weight_curriculum(
         env._crr_alpha12 = _curriculum_target_alpha(iteration, ramp1_start, ramp1_end)
         env._crr_alpha23 = _curriculum_target_alpha(iteration, ramp2_start, ramp2_end)
         env._crr_validity_alpha = _curriculum_target_alpha(iteration, validity_ramp_start, validity_ramp_end)
+        env._crr_floor_alpha = _curriculum_target_alpha(iteration, floor_ramp_start, floor_ramp_end)
+        env._crr_load_alpha = _curriculum_target_alpha(iteration, load_ramp_start, load_ramp_end)
         env._crr_last_update = iteration
         env._crr_gate_paused = False
         _curriculum_apply_weights(
@@ -1893,12 +2158,26 @@ def reward_weight_curriculum(
             validity_limb_usage_final,
             validity_rear_diff_initial,
             validity_rear_diff_final,
+            floor_alpha=env._crr_floor_alpha,
+            load_alpha=env._crr_load_alpha,
+            floor_limb_usage_initial=floor_limb_usage_initial,
+            floor_limb_usage_final=floor_limb_usage_final,
+            floor_per_leg_contact_initial=floor_per_leg_contact_initial,
+            floor_per_leg_contact_final=floor_per_leg_contact_final,
+            floor_per_leg_propulsion_initial=floor_per_leg_propulsion_initial,
+            floor_per_leg_propulsion_final=floor_per_leg_propulsion_final,
+            load_rear_usage_diff_final=load_rear_usage_diff_final,
+            load_front_usage_diff_final=load_front_usage_diff_final,
+            load_rear_prop_diff_final=load_rear_prop_diff_final,
+            load_front_rear_balance_final=load_front_rear_balance_final,
         )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
         print(f"[Curriculum] INIT @ iter {iteration} | {phase_str}")
         print(f"  alpha12={env._crr_alpha12:.3f}, alpha23={env._crr_alpha23:.3f}, validity_alpha={env._crr_validity_alpha:.3f}")
-        print(f"  ramp1=[{ramp1_start}~{ramp1_end}], ramp2=[{ramp2_start}~{ramp2_end}], validity=[{validity_ramp_start}~{validity_ramp_end}]")
+        print(f"  floor_alpha={env._crr_floor_alpha:.3f}, load_alpha={env._crr_load_alpha:.3f}")
+        print(f"  ramp1=[{ramp1_start}~{ramp1_end}], ramp2=[{ramp2_start}~{ramp2_end}]")
+        print(f"  floor_ramp=[{floor_ramp_start}~{floor_ramp_end}], load_ramp=[{load_ramp_start}~{load_ramp_end}]")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
         # INIT 시점 key weight 로깅
@@ -1922,12 +2201,16 @@ def reward_weight_curriculum(
     target_12 = _curriculum_target_alpha(iteration, ramp1_start, ramp1_end)
     target_23 = _curriculum_target_alpha(iteration, ramp2_start, ramp2_end)
     target_validity = _curriculum_target_alpha(iteration, validity_ramp_start, validity_ramp_end)
+    target_floor = _curriculum_target_alpha(iteration, floor_ramp_start, floor_ramp_end)
+    target_load = _curriculum_target_alpha(iteration, load_ramp_start, load_ramp_end)
 
     # 이미 target에 도달 → 스킵
     if (
         abs(env._crr_alpha12 - target_12) < 1e-6
         and abs(env._crr_alpha23 - target_23) < 1e-6
         and abs(env._crr_validity_alpha - target_validity) < 1e-6
+        and abs(env._crr_floor_alpha - target_floor) < 1e-6
+        and abs(env._crr_load_alpha - target_load) < 1e-6
     ):
         return None
 
@@ -1950,15 +2233,22 @@ def reward_weight_curriculum(
     max_step_12 = update_interval / max(1, ramp1_end - ramp1_start)
     max_step_23 = update_interval / max(1, ramp2_end - ramp2_start)
     max_step_validity = update_interval / max(1, validity_ramp_end - validity_ramp_start)
+    max_step_floor = update_interval / max(1, floor_ramp_end - floor_ramp_start)
+    max_step_load = update_interval / max(1, load_ramp_end - load_ramp_start)
     new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
     new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
     new_validity = min(target_validity, env._crr_validity_alpha + max_step_validity)
+    # floor/load ramps are NOT paused by gait gate (existence floor must always progress)
+    new_floor = min(target_floor, env._crr_floor_alpha + max_step_floor)
+    new_load = min(target_load, env._crr_load_alpha + max_step_load)
 
     # 실제 변화 없으면 스킵
     if (
         abs(new_12 - env._crr_alpha12) < 1e-6
         and abs(new_23 - env._crr_alpha23) < 1e-6
         and abs(new_validity - env._crr_validity_alpha) < 1e-6
+        and abs(new_floor - env._crr_floor_alpha) < 1e-6
+        and abs(new_load - env._crr_load_alpha) < 1e-6
     ):
         return None
 
@@ -1968,6 +2258,8 @@ def reward_weight_curriculum(
     env._crr_alpha12 = new_12
     env._crr_alpha23 = new_23
     env._crr_validity_alpha = new_validity
+    env._crr_floor_alpha = new_floor
+    env._crr_load_alpha = new_load
 
     # ── 가중치 적용 ──
     _curriculum_apply_weights(
@@ -1979,6 +2271,18 @@ def reward_weight_curriculum(
         validity_limb_usage_final,
         validity_rear_diff_initial,
         validity_rear_diff_final,
+        floor_alpha=new_floor,
+        load_alpha=new_load,
+        floor_limb_usage_initial=floor_limb_usage_initial,
+        floor_limb_usage_final=floor_limb_usage_final,
+        floor_per_leg_contact_initial=floor_per_leg_contact_initial,
+        floor_per_leg_contact_final=floor_per_leg_contact_final,
+        floor_per_leg_propulsion_initial=floor_per_leg_propulsion_initial,
+        floor_per_leg_propulsion_final=floor_per_leg_propulsion_final,
+        load_rear_usage_diff_final=load_rear_usage_diff_final,
+        load_front_usage_diff_final=load_front_usage_diff_final,
+        load_rear_prop_diff_final=load_rear_prop_diff_final,
+        load_front_rear_balance_final=load_front_rear_balance_final,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──

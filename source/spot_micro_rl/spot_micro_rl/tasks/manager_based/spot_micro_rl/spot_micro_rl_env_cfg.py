@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V25"
+TRAIN_VERSION = "V26"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -139,11 +139,15 @@ SPOT_MICRO_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
 # ============================================================
 @configclass
 class SpotMicroRewardCurriculumCfg:
-    """Soft-ramp 리워드 가중치 커리큘럼 (V20).
+    """Soft-ramp 리워드 가중치 커리큘럼 (V20, V26 확장).
 
     Phase 1→2 (STAND→WALK): iter 1500~3000 선형 보간
     Phase 2→3 (WALK→TROT):  iter 5500~8000 선형 보간
     Metric gating: ep_len < 200이면 ramp 일시정지
+
+    V26 추가:
+      floor_ramp: iter 0~200 — 존재 floor 패널티 10%→100%
+      load_ramp:  iter 200~350 — 하중 분산 패널티 0→100%
     """
     reward_weights = CurrTerm(
         func=custom_mdp.reward_weight_curriculum,
@@ -153,12 +157,28 @@ class SpotMicroRewardCurriculumCfg:
             "ramp1_end": 3000,
             "ramp2_start": 5500,
             "ramp2_end": 8000,
-            "validity_ramp_start": 0,   # V25: 해당 term 없음 — no-op
+            "validity_ramp_start": 0,   # Legacy — no-op for V26
             "validity_ramp_end": 1,
             "validity_limb_usage_initial": 0.0,
             "validity_limb_usage_final": 0.0,
             "validity_rear_diff_initial": 0.0,
             "validity_rear_diff_final": 0.0,
+            # V26: existence floor ramp (iter 0~200, 10%→100% weight)
+            "floor_ramp_start": 0,
+            "floor_ramp_end": 200,
+            "floor_limb_usage_initial": -1.5,
+            "floor_limb_usage_final": -15.0,
+            "floor_per_leg_contact_initial": -2.0,
+            "floor_per_leg_contact_final": -20.0,
+            "floor_per_leg_propulsion_initial": -1.5,
+            "floor_per_leg_propulsion_final": -15.0,
+            # V26: load sharing ramp (iter 200~350)
+            "load_ramp_start": 200,
+            "load_ramp_end": 350,
+            "load_rear_usage_diff_final": -10.0,
+            "load_front_usage_diff_final": -8.0,
+            "load_rear_prop_diff_final": -8.0,
+            "load_front_rear_balance_final": -5.0,
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -548,15 +568,85 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V25: rear-left contact_ratio 직접 floor 패널티 (ramp 없음 — iter 0부터 full weight)
-        # V24의 limb_usage_min_penalty(-12, proxy 방식) 실패 교훈: 직접 타겟, 강한 weight
-        self.rewards.rear_left_contact_floor = RewTerm(
-            func=custom_mdp.rear_left_contact_floor_penalty,
-            weight=-60.0,
+        # V26: Symmetric existence floor penalties (replaces V25 rear_left_contact_floor)
+        # 4발 모두 동일 기준 적용. iter 0부터 low weight로 시작, curriculum이 ramp-up.
+        self.rewards.limb_usage_min_penalty = RewTerm(
+            func=custom_mdp.limb_usage_min_penalty,
+            weight=-1.5,  # V26 floor ramp initial — curriculum이 -15.0까지 ramp
             params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names="rear_left_toe_link"),
-                "contact_threshold": 1.0,
-                "floor": 0.30,
+                "min_usage": 0.10,
+                "contact_target": 0.5,
+                "propulsion_target": 0.30,
+                "leg_lift_target": 0.18,
+                "clearance_target": 0.03,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.per_leg_contact_floor = RewTerm(
+            func=custom_mdp.per_leg_contact_floor_penalty,
+            weight=-2.0,  # V26 floor ramp initial — curriculum이 -20.0까지 ramp
+            params={
+                "floor": 0.10,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.per_leg_propulsion_floor = RewTerm(
+            func=custom_mdp.per_leg_propulsion_floor_penalty,
+            weight=-1.5,  # V26 floor ramp initial — curriculum이 -15.0까지 ramp
+            params={
+                "floor": 0.05,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        # V26: Load sharing penalties (iter 200부터 curriculum이 ramp-up, 초기 0)
+        self.rewards.rear_left_right_usage_diff_penalty = RewTerm(
+            func=custom_mdp.rear_left_right_usage_diff_penalty,
+            weight=0.0,  # load ramp initial — curriculum이 -10.0까지 ramp
+            params={
+                "max_diff": 0.40,
+                "contact_target": 0.5,
+                "propulsion_target": 0.30,
+                "leg_lift_target": 0.18,
+                "clearance_target": 0.03,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.front_left_right_usage_diff_penalty = RewTerm(
+            func=custom_mdp.front_left_right_usage_diff_penalty,
+            weight=0.0,  # load ramp initial — curriculum이 -8.0까지 ramp
+            params={
+                "max_diff": 0.40,
+                "contact_target": 0.5,
+                "propulsion_target": 0.30,
+                "leg_lift_target": 0.18,
+                "clearance_target": 0.03,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.rear_left_right_propulsion_diff_penalty = RewTerm(
+            func=custom_mdp.rear_left_right_propulsion_diff_penalty,
+            weight=0.0,  # load ramp initial — curriculum이 -8.0까지 ramp
+            params={
+                "max_diff": 0.40,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.front_rear_support_balance_penalty = RewTerm(
+            func=custom_mdp.front_rear_support_balance_penalty,
+            weight=0.0,  # load ramp initial — curriculum이 -5.0까지 ramp
+            params={
+                "max_diff": 0.50,
+                "contact_target": 0.5,
+                "propulsion_target": 0.30,
+                "leg_lift_target": 0.18,
+                "clearance_target": 0.03,
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
@@ -573,11 +663,11 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
 
         # ============================================================
-        # V16: 대각선 관절 커플링 보상 (trot 핵심 — FL↔RR, FR↔RL)
-        # 접촉 센서 대신 관절 속도 상관으로 직접 trot 구조 강제
+        # V26: 대각선 관절 커플링 보상 — general per-limb collapse soft gate
+        # V25: RL-only gate → collapse 위치 이동 문제 → V26: 모든 다리 대칭 gate
         # ============================================================
         self.rewards.diagonal_coupling = RewTerm(
-            func=custom_mdp.diagonal_joint_coupling_reward,
+            func=custom_mdp.diagonal_coupling_soft_gate_reward,
             weight=25.0,
             params={
                 "pair_a_front_cfg": SceneEntityCfg("robot", joint_names=["front_left_leg", "front_left_foot"]),
@@ -587,10 +677,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "asset_cfg": SceneEntityCfg("robot"),
                 "vel_deadzone": 0.1,
                 "min_vel": 0.05,
-                # V25: RL 참여 soft gate — RL 미접지 시 pair_b 보상 차단
-                "rl_participation_sensor_cfg": SceneEntityCfg("contact_forces", body_names="rear_left_toe_link"),
-                "rl_contact_threshold": 1.0,
-                "rl_min_contact": 0.15,
+                "min_contact": 0.15,  # contact_ratio 15% 미만이면 gate 감소
             },
         )
 
