@@ -221,11 +221,11 @@ python scripts/supervisor.py
 
 ## Reward Design
 
-### V20: Soft-Ramp Curriculum (학습 버전)
+### Soft-Ramp Curriculum (V20~)
 
 하드 phase switch 대신 **선형 보간**으로 가중치를 점진적으로 전환:
 
-| 전환 | Iteration 범위 | 내용 |
+| 구간 | Iteration 범위 | 내용 |
 |------|----------------|------|
 | Phase 1 (STAND) | 0 ~ 1,500 | 서기 안정화, 약한 페널티 |
 | Ramp 1→2 | 1,500 ~ 3,000 | STAND→WALK 선형 보간 |
@@ -234,6 +234,17 @@ python scripts/supervisor.py
 | Phase 3 (TROT) | 8,000 ~ 15,000 | trot gait 완성 |
 
 **안전장치**: ep_len < 200이면 ramp 일시 정지 (metric gating)
+
+### V24 Limb Validity Gating (현재)
+
+rear-left collapse와 좌우 비대칭을 명시적으로 차단하는 두 penalty term:
+
+| reward | weight | 조건 |
+|--------|--------|------|
+| `limb_usage_min_penalty` | -12.0 | 4개 사지 중 최소 usage < 0.30 시 페널티 |
+| `rear_left_right_usage_diff_penalty` | -8.0 | rear 좌우 usage 차이 > 0.18 시 페널티 |
+
+두 term 모두 iter 200~600에 걸쳐 선형 ramp(-3.0 → -12.0, -2.0 → -8.0), 정지 시 비활성(min_vel=0.05).
 
 ### 리워드 함수 패턴
 
@@ -245,15 +256,14 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
     return tensor  # shape: (num_envs,)
 ```
 
-주요 리워드 (25+ 개):
-- **양수**: `standing_height`, `forward_velocity`, `trot_gait`, `diagonal_coupling`, `leg_lift`, `foot_clearance`, `stance_propulsion`
-- **음수**: `undesired_contacts`, `feet_below_knees`, `joint_vel_l2`, `dof_acc_l2`, `action_rate_l2`, `flat_orientation_l2`
-- **고정**: `leg_lift`, `rear_forward_stride` (phase 불변)
+주요 리워드 카테고리:
+- **양수**: `standing_height`, `forward_velocity`, `trot_gait`, `diagonal_joint_coupling`, `leg_lift`, `foot_clearance`, `stance_propulsion`, `rear_joint_velocity`, `rear_alternation`, `rear_forward_stride`
+- **음수**: `undesired_contacts`, `feet_below_knees`, `dof_acc_l2`, `action_rate_l2`, `flat_orientation_l2`, `rear_joint_frozen`, `same_side_penalty`, `limb_usage_min_penalty`, `rear_left_right_usage_diff_penalty`
 
-V21 이후 운영 해석 원칙:
-- 운동학 KPI를 우선 확인
-- `stride_length`, `gait_cycle_period` 같은 접촉 이벤트 메트릭은 참고 계층으로 사용
-- flat 환경 contact 기준은 `foot_link`보다 `toe_link`를 우선 사용
+운영 해석 원칙:
+- 운동학 KPI 우선 확인 (joint velocity 기반)
+- flat 환경 contact 기준: `toe_link` 우선
+- limb validity 4단계: observe → early_warning → lock_warning → enforce (iter 600+)
 
 ### PPO 하이퍼파라미터
 
