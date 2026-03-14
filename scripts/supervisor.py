@@ -626,9 +626,10 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
         common.SUPERVISOR_LOG,
         parse_mode="HTML",
     )
-    pending_confirm: dict | None = None  # {"action": "fresh_start", "checkpoint_name": str}
+    pending_confirm: dict | None = None  # {"action": "fresh_start", "checkpoint_name": str, "expires_at": float}
     _CONFIRM_YES = {"y", "yes", "ok", "confirm", "확인", "예"}
     _CONFIRM_NO = {"n", "no", "cancel", "취소", "아니오"}
+    _CONFIRM_TIMEOUT_SEC = 60.0
     try:
         while True:
             try:
@@ -650,29 +651,33 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
 
                     # pending confirmation 처리
                     if pending_confirm:
-                        normalized = text.strip().lower().lstrip("/")
-                        if normalized in _CONFIRM_YES:
-                            action = pending_confirm["action"]
-                            ckpt_name = pending_confirm.get("checkpoint_name", "")
+                        if time.time() > pending_confirm.get("expires_at", 0):
                             pending_confirm = None
-                            common.write_log(f"[Confirm] action={action} confirmed by user", common.SUPERVISOR_LOG)
-                            if action == "fresh_start":
-                                result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
-                                run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
-                                if result["mode"] == "already-running":
-                                    _send_notice("TRAINING ACTIVE", f"run: {run_name}", icon="🚀")
-                                else:
-                                    _send_notice("TRAINING START (FRESH)", f"run: {run_name}\ncheckpoint: fresh (iter 0)", icon="🚀")
-                            continue
-                        elif normalized in _CONFIRM_NO:
-                            pending_confirm = None
-                            _send_notice("START CANCELLED", "취소되었습니다.", icon="⛔")
-                            continue
-                        else:
-                            # 다른 명령 수신 → 확인 취소 후 해당 명령 처리
-                            pending_confirm = None
-                            _send_notice("START CANCELLED", "다른 명령이 수신되어 취소되었습니다.", icon="⛔")
+                            _send_notice("START CANCELLED", "확인 시간이 초과되었습니다 (60초).", icon="⛔")
                             # fall through to normal command processing
+                        else:
+                            normalized = text.strip().lower().lstrip("/")
+                            if normalized in _CONFIRM_YES:
+                                action = pending_confirm["action"]
+                                pending_confirm = None
+                                common.write_log(f"[Confirm] action={action} confirmed by user", common.SUPERVISOR_LOG)
+                                if action == "fresh_start":
+                                    result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
+                                    run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
+                                    if result["mode"] == "already-running":
+                                        _send_notice("TRAINING ACTIVE", f"run: {run_name}", icon="🚀")
+                                    else:
+                                        _send_notice("TRAINING START (FRESH)", f"run: {run_name}\ncheckpoint: fresh (iter 0)", icon="🚀")
+                                continue
+                            elif normalized in _CONFIRM_NO:
+                                pending_confirm = None
+                                _send_notice("START CANCELLED", "취소되었습니다.", icon="⛔")
+                                continue
+                            else:
+                                # 다른 명령 수신 → 확인 취소 후 해당 명령 처리
+                                pending_confirm = None
+                                _send_notice("START CANCELLED", "다른 명령이 수신되어 취소되었습니다.", icon="⛔")
+                                # fall through to normal command processing
 
                     command, arg_text = _parse_command_request(text)
                     if command not in common.command_variants():
@@ -691,7 +696,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                         existing_checkpoint = common.resolve_active_checkpoint(common.resolve_active_run_dir())
                         if existing_checkpoint:
                             ckpt_name = os.path.basename(existing_checkpoint)
-                            pending_confirm = {"action": "fresh_start", "checkpoint_name": ckpt_name}
+                            pending_confirm = {"action": "fresh_start", "checkpoint_name": ckpt_name, "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC}
                             common.send_text(
                                 f"⚠️ <b>확인 필요 — FRESH START</b>\n"
                                 f"<i>마지막 checkpoint: {ckpt_name}</i>\n\n"

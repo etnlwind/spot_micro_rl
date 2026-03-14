@@ -216,7 +216,7 @@ def main() -> None:
                                 common.HEARTBEAT_LOG,
                                 parse_mode="HTML",
                             )
-                            common.launch_training(common.HEARTBEAT_LOG)
+                            common.launch_training(common.HEARTBEAT_LOG, fresh=True)
                             time.sleep(args.poll)
                             continue
                     else:
