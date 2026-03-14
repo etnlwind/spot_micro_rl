@@ -245,6 +245,21 @@ def _build_command_ack(command: str, checkpoint_iter: int | None = None) -> str:
     return f"🎛️ <b>{command.upper()} — 요청 수신</b>"
 
 
+def _handle_hb_command(run_dir: str, iteration: int | None = None) -> None:
+    data = common.read_tfevents(run_dir)
+    if not data or not data.get("Train/mean_reward"):
+        common.send_text("⚠️ <b>HB</b>\n<i>tfevents 데이터를 읽지 못했습니다.</i>", common.SUPERVISOR_LOG, parse_mode="HTML")
+        return
+    run_name = os.path.basename(run_dir)
+    # iteration 미지정 시 최신 iter 사용
+    if iteration is None:
+        cycle_num = 0  # 조회용이므로 cycle 기록 불필요
+    else:
+        cycle_num = iteration // common.HEARTBEAT_ITER_STEP
+    report_text = common.format_report(data, run_name, cycle_num, iteration=iteration)
+    common.send_text(report_text, common.SUPERVISOR_LOG, parse_mode="HTML")
+
+
 def _handle_report_command(run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
     if common.is_training_running():
         if checkpoint_iter is not None:
@@ -337,6 +352,9 @@ def handle_command(command: str, checkpoint_iter: int | None = None) -> None:
         return
     if not run_dir or not checkpoint:
         _send_notice("CONTEXT NOT FOUND", "active run/checkpoint를 찾지 못했습니다.", icon="⚠️")
+        return
+    if command == "hb":
+        _handle_hb_command(run_dir, iteration=checkpoint_iter)
         return
     if command == "report":
         _handle_report_command(run_dir, checkpoint, checkpoint_iter=checkpoint_iter)

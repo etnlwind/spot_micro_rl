@@ -2928,7 +2928,10 @@ def refresh_v23_training_logs(run_dir: str, log_path: str) -> dict:
     }
 
 
-def format_report(data: dict, run_name: str, cycle_num: int) -> str:
+def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | None = None) -> str:
+    # iteration 지정 시 해당 iter 이하 데이터만 사용
+    if iteration is not None:
+        data = {tag: [(s, v) for s, v in vals if int(s) <= iteration] for tag, vals in data.items()}
     reward_vals = data.get("Train/mean_reward", [])
     ep_len_vals = data.get("Train/mean_episode_length", [])
     run_label = html.escape(str(run_name))
@@ -2939,7 +2942,10 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
         return f"⚠️ <b>HEARTBEAT</b> ({run_label})\n- metrics unavailable"
     current_iter = int(reward_vals[-1][0])
     run_dir = os.path.join(LOG_BASE, run_name)
-    kpi = build_supervisor_kpi_snapshot(run_dir) if os.path.isdir(run_dir) else build_supervisor_kpi_snapshot(resolve_active_run_dir() or "")
+    if iteration is not None:
+        kpi = build_supervisor_kpi_snapshot_for_iteration(run_dir, current_iter) if os.path.isdir(run_dir) else build_supervisor_kpi_snapshot_for_iteration(resolve_active_run_dir() or "", current_iter)
+    else:
+        kpi = build_supervisor_kpi_snapshot(run_dir) if os.path.isdir(run_dir) else build_supervisor_kpi_snapshot(resolve_active_run_dir() or "")
     rewards = {}
     for tag, values in data.items():
         if tag.startswith("Episode_Reward/") and values:
@@ -4412,7 +4418,7 @@ def resolve_context() -> tuple[str | None, str | None]:
 
 
 def command_variants() -> set[str]:
-    return {"start", "resume", "stop", "status", "selfcheck", "report", "front", "rear", "top", "side", "help", "shutdown"}
+    return {"start", "resume", "stop", "status", "selfcheck", "report", "front", "rear", "top", "side", "help", "shutdown", "hb"}
 
 
 def help_text() -> str:
@@ -4423,6 +4429,7 @@ def help_text() -> str:
         "/stop : 현재 훈련만 중단\n"
         "/status : 현재 상태 조회\n"
         "/selfcheck : run/checkpoint/context 해석 우선순위 점검\n"
+        "/hb [iter] : 지정 iter (생략 시 최신) 기준 텍스트 heartbeat 전송\n"
         "/report [iter] : training 중이면 최신 zip, stopped면 지정 iter 또는 최신 checkpoint 기준 새 zip 생성\n"
         "/front [iter], /rear [iter], /top [iter], /side [iter] : training 중이면 최신 영상, stopped면 지정 iter 또는 최신 checkpoint 기준 새 영상 생성\n"
         "/shutdown : supervisor 종료\n"
