@@ -133,5 +133,5 @@ VIDEO_REPORT_ITER_STEP=1000  (기본값)
 ## 8. 참고 문서
 
 - `plan/MEMORY.md` — active handoff
-- `plan/V24_PLAN.md` — V24 설계 및 분석
-- `plan/V23_PLAN.md` — V23 배경
+- `plan/V24_ANALYSIS.md` — V24 설계 및 분석
+- `plan/V23_ANALYSIS.md` — V23 배경

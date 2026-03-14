@@ -208,6 +208,6 @@
 
 - `plan/MEMORY.md`
 - `plan/PROJECT_HISTORY.md`
-- `plan/V23_PLAN.md`
+- `plan/V23_ANALYSIS.md`
 - `plan/V22_ANALYSIS.md`
 - `plan/V21_ANALYSIS.md`

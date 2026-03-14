@@ -4,6 +4,8 @@
 
 2026-03-14 야간 세션 기준 실제 코드 상태, 운영 상태, 버그 수정 내역, 다음 할 일을 정리한 handoff 문서.
 
+**[2026-03-14 추가]** V24 훈련 종료. iter 2002까지 진행. 목표 미달성 — V25 설계 필요.
+
 ---
 
 ## 2. Executive Summary
@@ -99,30 +101,58 @@ supervisor.cmd --listen
 
 ---
 
-## 7. 현재 훈련 진행 상황
+## 7. V24 최종 훈련 결과
 
-| iter | reward | survival | gait | posture | limb_validity |
-|------|--------|----------|------|---------|---------------|
-| 600 | 323 | 100% | A | C | enforced_fail |
-| 1000 | ~430 | 100% | A | B | enforced_fail |
-| 1800 | 489 | 100% | A | B | enforced_fail |
+### 7.1 run별 summary
 
-- rear-left collapse 지속: `contact=0.00, swing=0.99, propulsion=0.00`
-- rear 좌우 비대칭: diff 0.93 (기준 0.18)
-- limb_validity_gate 미통과 전체 구간
+| run | iter 범위 | 최종 reward | survival | gait | limb_validity |
+|-----|----------|------------|----------|------|---------------|
+| `2026-03-13_18-53-26` | 0 → 1803 | 489 | 100% | A | 전 구간 fail |
+| `2026-03-14_18-29-12` | 1800 → 2002 | ~544 | 100% | A | 전 구간 fail |
+
+### 7.2 per-iter 지표 (최종 run, training_launch.log)
+
+| 지표 | 전 구간 관측 범위 | 판정 |
+|------|----------------|------|
+| contact_ratio_rl | 0.0002 ~ 0.0004 | 완전 평탄, 개선 없음 |
+| propulsion_rl | 0.0001 ~ 0.0002 | 완전 평탄, 개선 없음 |
+| stance_time_rl | 0.0002 ~ 0.0004 | contact와 동일 |
+| swing_time_rl | 0.97 ~ 0.99 | 거의 항상 공중 |
+| contact_ratio_rr | 0.81 ~ 0.89 | 정상 |
+| propulsion_rr | 0.61 ~ 0.65 | 정상 |
+
+### 7.3 limb_usage_min 추이 (전 실험 구간)
+
+| iter | limb_usage_min | 비고 |
+|------|---------------|------|
+| 381 | 0.1040 | 패널티 ramp 초기, 수치 존재 |
+| 500 | 0.0451 | 하락 시작 |
+| 600 | 0.00379 | collapse 고착, enforce 진입 |
+| 800 | 0.000362 | 계속 하락 |
+| 1803 | 0.000079 | |
+| 1900 | 0.000065 | 최솟값 근접 |
+
+단조 감소 — 패널티가 교정이 아닌 회피를 유도함.
+
+### 7.4 결론
+
+- **V24 목표(limb_validity_gate 통과) 달성 실패**
+- self-correction 없음, 200 iter 연속 c_rl < 0.001
+- 패널티 방식만으로 고착된 collapse를 되돌리는 것은 불가능
 
 ---
 
-## 8. 다음 우선순위
+## 8. 다음 우선순위 (V25 설계)
 
-1. **iter 2000 자동 영상 리포트 수신** → 정상 작동 확인
-2. **iter 2000~3000 구간 관찰**: rear-left collapse self-correction 여부
-3. limb_usage_min이 0.30에 접근 못 하면 threshold 조정 또는 rear reward 구조 재검토
+1. **per-limb 직접 패널티**: rear-left contact_ratio에 lower-bound penalty 직접 부여
+2. **collapse 사전 차단**: validity 패널티를 iter 0부터 적용 (ramp 제거 또는 시작점 앞당김)
+3. **restart-on-collapse 전략**: iter 300 이전 collapse 감지 시 run 즉시 종료 후 재시작
+4. **reward 경로 차단**: 3다리 보행으로 diagonal_coupling 보상을 얻지 못하도록 수정
 
 ---
 
 ## 9. 참고 문서
 
 - `plan/MEMORY.md` — active handoff (가장 짧은 요약)
-- `plan/V24_PLAN.md` — V24 설계 및 분석
+- `plan/V24_ANALYSIS.md` — V24 설계 및 분석
 - `plan/CURRENT_STATE_2026-03-14.md` — 이전 세션 상태

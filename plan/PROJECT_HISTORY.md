@@ -53,7 +53,7 @@ V22는 V20 결과를 더 잘 읽기 위한 운영/아티팩트 정비 단계였�
 - `plan/V20_ANALYSIS.md`: soft-ramp curriculum 자체 분석
 - `plan/V21_ANALYSIS.md`: heartbeat / supervisor / toe contact / diagnostics 정리
 - `plan/V22_ANALYSIS.md`: 멀티뷰 영상 패키지 / workbook / ZIP artifact 정리
-- `plan/V23_PLAN.md`: 다음 학습 버전 준비 문서
+- `plan/V23_ANALYSIS.md`: 다음 학습 버전 준비 문서
 
 ### V22 핵심 변경
 
@@ -105,7 +105,7 @@ V22는 V20 결과를 더 잘 읽기 위한 운영/아티팩트 정비 단계였�
 - 실운영 검증 런: `2026-03-11_02-39-01`
 - 최종 체크포인트: `model_15000.pt`
 - 최신 검증 ZIP: `clip_1005_iter15000_20260311_132732.zip`
-- V23 준비 문서: `plan/V23_PLAN.md`
+- V23 준비 문서: `plan/V23_ANALYSIS.md`
 
 ---
 
