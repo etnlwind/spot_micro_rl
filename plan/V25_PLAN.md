@@ -277,3 +277,113 @@ V25-A와 V25-B를 나눠서 제시해주십시오.
 - reward보다 **4발 사용 validity**를 우선할 것
 - rear-left collapse를 막지 못하는 안은 채택하지 말 것
 - RL 특화 penalty는 **본선 구조가 아니라 보조/direct-fix 실험용**으로 위치시킬 것
+
+---
+
+## 개발담당 피드백
+
+> 작성: Claude Sonnet 4.6 / 2026-03-14
+> 목적: 구현 착수 전 설계상 불명확하거나 문제가 될 부분을 명시. 앞부분 설계 원칙은 그대로 유지.
+
+---
+
+### F1. `usage proxy 재정의`는 V24에 이미 구현되어 있음
+
+문서에 “contact/propulsion이 붕괴하면 usage도 함께 붕괴”라고 명시되어 있으나, 이는 V24 `_compute_limb_usage_proxy`에 이미 반영된 내용이다.
+
+```python
+support_gate = torch.maximum(contact_score, propulsion_score)
+usage_scores[suffix] = usage_scores[suffix] * support_gate
+```
+
+contact와 propulsion이 둘 다 0이면 support_gate=0 → usage=0 → penalty gap 최대. V24 실패 원인은 proxy 정의가 잘못된 것이 아니라 **weight 크기**(총 reward 544 대비 gap 최대 시 ~0.7%)였다.
+
+“usage proxy 재정의”를 신규 작업으로 진행할 경우 불필요한 공수가 발생한다. **기존 구현 재사용 여부를 결정해야 한다.**
+
+---
+
+### F2. V25-A weight 합산이 collapse를 막기에 충분한지 불명확
+
+V24 실패 구조:
+- `limb_usage_min_penalty` -12.0 × gap 0.30 = **-3.6/step** ≈ 총 reward의 0.7%
+
+V25-G 제안 합산(gap 최대 가정):
+- `limb_usage_min_penalty` -16.0 × 0.30 = -4.8
+- `support_phase_min_participation_penalty` -14.0 × ~0.30 = -4.2
+- `per_leg_propulsion_floor_penalty` -6.0 × ~0.25 = -1.5
+- **합계 약 -10.5/step** ≈ 총 reward의 ~2%
+
+V24보다 3배 강해졌으나, collapse가 iter 200 이전에 고착되면 동일한 결말이 반복될 가능성이 있다. V25-A에 `restart-on-collapse`가 포함되지 않으면 이 위험은 그대로 남는다.
+
+**`restart-on-collapse`가 V25-A 본선에 포함되는지 명확히 해야 한다.**
+
+---
+
+### F3. `support_phase_min_participation_penalty`와 `per_leg_contact_floor_penalty` 역할 중복 위험
+
+두 term 모두 contact/stance 참여를 요구하는 구조다. 정의가 다르지 않으면 동일한 신호에 중복 패널티가 부과되어 weight 설계가 복잡해지고 실패 원인 분석(attribution)이 어렵다.
+
+추정되는 의도 차이:
+- `support_phase_min_participation_penalty`: 특정 시점에 접지 중인 다리 수에 대한 제약 (multi-leg 관점)
+- `per_leg_contact_floor_penalty`: 각 다리의 전체 구간 contact_ratio ≥ floor (per-leg 관점)
+
+역할이 다르면 수식 수준에서 명확히 분리해야 한다. 역할이 같으면 하나만 구현하고 나머지는 제거하는 것이 낫다.
+
+**구현 전에 두 term의 수식 의도를 확정해야 한다.**
+
+---
+
+### F4. `diagonal_coupling` gate — binary 차단은 gradient 불연속
+
+CS 구현안:
+```python
+rl_gate = (metrics[“contact_ratio_rl”] > 0.15).float()  # binary 0 or 1
+corr_b = corr_b * rl_gate
+```
+
+`contact_ratio_rl`이 0.14↔0.16 경계를 오갈 때 reward가 계단식으로 뛴다. PPO 학습에서 이 불연속은 gradient 추정을 불안정하게 만들 수 있다.
+
+soft gate 대안:
+```python
+rl_gate = torch.clamp(metrics[“contact_ratio_rl”] / 0.20, 0.0, 1.0)
+corr_b = corr_b * rl_gate
+```
+
+0~0.20 구간에서 선형으로 기여가 증가하므로 gradient가 연속적이다.
+
+**binary vs soft gate 방식을 결정해야 한다. soft gate를 권장한다.**
+
+---
+
+### F5. V25-A 실패 시 V25-B로 전환하는 트리거 기준이 없음
+
+문서 구조상 V25-A 먼저, 실패하면 V25-B로 진행하는 순서로 읽힌다. 그러나 V25-A를 언제 포기할지 기준이 없다. 이 기준이 없으면 V24에서 반복된 “조금 더 지켜보자” 운영이 재발한다.
+
+제안 기준:
+> iter 200 시점에서 `contact_ratio_rl < 0.05` AND `swing_time_rl > 0.95` 이면 V25-A 즉시 중단 → V25-B로 재시작
+
+**V25-A → V25-B 전환 트리거를 명시해야 한다.**
+
+---
+
+### F6. abort 자동화 여부 불명확
+
+문서에 “iter 600 collapse 지속 시 즉시 중단”이라고 명시되어 있으나, 이것이 heartbeat 자동 kill인지 사람이 판단하는 것인지 구분이 없다. 구현 범위가 달라진다.
+
+- **자동화**: heartbeat.py에 collapse 감지 → `common.stop_training()` 호출 → Telegram 알림 추가 필요
+- **수동**: Telegram 알림만 보내고 사람이 `/stop` 실행
+
+**구현 방식을 결정해야 한다.**
+
+---
+
+### 피드백 요약
+
+| # | 항목 | 결정 필요 사항 |
+|---|------|--------------|
+| F1 | usage proxy | V24 기존 구현 재사용 vs 신규 작성 |
+| F2 | V25-A weight + restart | restart-on-collapse의 V25-A 포함 여부 |
+| F3 | term 중복 | `support_phase_min_participation` vs `per_leg_contact_floor` 역할 분리 또는 폐기 |
+| F4 | diagonal gate | binary vs soft gate |
+| F5 | A→B 전환 트리거 | iter 200 기준 명시 또는 다른 기준 |
+| F6 | abort 방식 | heartbeat 자동화 vs 수동 판단 |
