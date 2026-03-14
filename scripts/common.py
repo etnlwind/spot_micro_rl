@@ -33,9 +33,9 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-V23_TRAIN_VERSION = "V26.1"
-V23_MASTER_LOG_FILENAME = "spotmicro_v26_training_master_log.xlsx"
-V23_CHECKPOINT_REVIEW_FILENAME = "spotmicro_v26_checkpoint_review.xlsx"
+TRAIN_VERSION = "V26.1"
+MASTER_LOG_FILENAME = "spotmicro_v26_training_master_log.xlsx"
+CHECKPOINT_REVIEW_FILENAME = "spotmicro_v26_checkpoint_review.xlsx"
 
 
 def _load_env(path: str) -> dict:
@@ -168,7 +168,7 @@ VALIDITY_STAGE_LABELS = {
     "enforce_600_plus": "enforce",
 }
 
-V23_RUNLOG_COLUMNS = [
+RUNLOG_COLUMNS = [
     "run_id", "train_version", "iter", "global_step", "timestamp", "elapsed_hours", "report_kind", "cycle_num", "log_source", "fallback_source",
     "mean_reward", "mean_reward_avg10", "mean_episode_length", "survival_pct", "timeout_pct", "fall_pct", "vf_loss", "surrogate_loss", "noise_std", "vel_err_xy", "vel_err_yaw",
     "survival_pct_derived", "gait_score_estimated", "stability_score_estimated",
@@ -2076,9 +2076,9 @@ def append_report_record(run_dir: str, record: dict | None) -> None:
     except Exception:
         pass
     try:
-        refresh_v23_training_logs(run_dir, SUPERVISOR_LOG)
+        refresh_training_logs(run_dir, SUPERVISOR_LOG)
     except Exception as err:
-        write_log(f"V23 workbook refresh failed: {err}", SUPERVISOR_LOG)
+        write_log(f"Runlog workbook refresh failed: {err}", SUPERVISOR_LOG)
 
 
 def _format_relative_age(timestamp_text: str | None) -> str:
@@ -2182,15 +2182,15 @@ def _build_status_snapshot() -> dict:
     }
 
 
-def get_v23_master_log_path() -> str:
-    return os.path.join(LOG_BASE, V23_MASTER_LOG_FILENAME)
+def get_master_log_path() -> str:
+    return os.path.join(LOG_BASE, MASTER_LOG_FILENAME)
 
 
-def get_v23_checkpoint_review_path() -> str:
-    return os.path.join(LOG_BASE, V23_CHECKPOINT_REVIEW_FILENAME)
+def get_checkpoint_review_path() -> str:
+    return os.path.join(LOG_BASE, CHECKPOINT_REVIEW_FILENAME)
 
 
-def get_v23_run_log_path(run_dir: str) -> str:
+def get_run_log_path(run_dir: str) -> str:
     run_id = os.path.basename(run_dir.rstrip("\\/"))
     return os.path.join(run_dir, f"spotmicro_v24_run_{run_id}_training_log.xlsx")
 
@@ -2292,7 +2292,7 @@ def _coerce_reward_window_values(reward_window: list) -> list[float]:
     return values
 
 
-def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[float], kpi_snapshot: dict | None = None) -> dict:
+def _build_runlog_row(record: dict, run_dir: str, data: dict, reward_window: list[float], kpi_snapshot: dict | None = None) -> dict:
     run_id = os.path.basename(run_dir)
     iteration = int(record.get("iteration") or 0)
     timestamp_text = str(record.get("timestamp") or _now())
@@ -2394,11 +2394,11 @@ def _build_v23_row(record: dict, run_dir: str, data: dict, reward_window: list[f
         f"front_rear_raw={'env_export' if has_front_rear_raw else 'not_exported'}",
     ]
 
-    row = {column: None for column in V23_RUNLOG_COLUMNS}
+    row = {column: None for column in RUNLOG_COLUMNS}
     row.update(
         {
             "run_id": run_id,
-            "train_version": V23_TRAIN_VERSION,
+            "train_version": TRAIN_VERSION,
             "iter": iteration,
             "global_step": iteration,
             "timestamp": timestamp_text,
@@ -2537,7 +2537,7 @@ def build_clip_metrics_row(run_dir: str, checkpoint_path: str) -> tuple[dict | N
     reward_vals = data.get("Train/mean_reward", [])
     reward_window = [value for step, value in reward_vals if int(step) <= iteration]
     kpi_snapshot = build_supervisor_kpi_snapshot_for_iteration(metrics_run_dir, iteration)
-    row = _build_v23_row(record, metrics_run_dir, data, reward_window, kpi_snapshot=kpi_snapshot)
+    row = _build_runlog_row(record, metrics_run_dir, data, reward_window, kpi_snapshot=kpi_snapshot)
     if row is not None:
         row["artifact_run_id"] = os.path.basename(run_dir)
         row["metrics_source_run"] = os.path.basename(metrics_run_dir)
@@ -2547,7 +2547,7 @@ def build_clip_metrics_row(run_dir: str, checkpoint_path: str) -> tuple[dict | N
 def export_clip_metrics_row_workbook(out_path: str, row: dict, metrics_run_dir: str, checkpoint_path: str, log_path: str) -> str | None:
     meta = {
         "run_id": os.path.basename(metrics_run_dir),
-        "train_version": V23_TRAIN_VERSION,
+        "train_version": TRAIN_VERSION,
         "generated_at": _now(),
         "report_kind": "clip_report",
         "checkpoint": os.path.basename(checkpoint_path),
@@ -2575,10 +2575,10 @@ def export_clip_metrics_row_workbook(out_path: str, row: dict, metrics_run_dir: 
         "manual_front_review_rank": row.get("manual_front_review_rank"),
         "manual_notes": row.get("manual_notes"),
     }]
-    return export_v23_training_workbook(out_path, [row], meta, events, review_rows, log_path)
+    return export_training_workbook(out_path, [row], meta, events, review_rows, log_path)
 
 
-def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], list[dict]]:
+def _build_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], list[dict]]:
     records = load_report_history(run_dir)
     data = read_tfevents(run_dir) or {}
     env_cfg = _load_yaml_config(os.path.join(run_dir, "params", "env.yaml"))
@@ -2587,7 +2587,7 @@ def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], lis
     rows: list[dict] = []
     reward_window: list[float] = []
     for record in sorted(records, key=lambda item: int(item.get("iteration") or 0)):
-        rows.append(_build_v23_row(record, run_dir, data, reward_window))
+        rows.append(_build_runlog_row(record, run_dir, data, reward_window))
     if rows:
         collapse_seen_since_200 = False
         for row in rows:
@@ -2624,7 +2624,7 @@ def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], lis
             best_style_row["best_style_candidate"] = True
     meta = {
         "run_id": run_id,
-        "train_version": V23_TRAIN_VERSION,
+        "train_version": TRAIN_VERSION,
         "git_commit": _get_repo_git_commit(),
         "task_name": env_cfg.get("task_name") or TASK,
         "checkpoint_source": f"{agent_cfg.get('load_run') or 'fresh'}:{agent_cfg.get('load_checkpoint') or ''}" if agent_cfg.get("resume") else "fresh",
@@ -2637,7 +2637,7 @@ def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], lis
     events = []
     if agent_cfg.get("resume"):
         events.append({"timestamp": rows[0]["timestamp"] if rows else _now(), "event_type": "resume", "detail": meta["checkpoint_source"]})
-    events.append({"timestamp": _now(), "event_type": "workbook_refresh", "detail": "V23 workbook refreshed"})
+    events.append({"timestamp": _now(), "event_type": "workbook_refresh", "detail": "Runlog workbook refreshed"})
     review_rows = []
     for row in rows:
         if row.get("best_reward_candidate") or row.get("best_style_candidate") or row == rows[-1]:
@@ -2664,7 +2664,7 @@ def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], lis
     return rows, meta, events, review_rows
 
 
-def _load_v23_rows_from_workbook(workbook_path: str) -> tuple[list[dict], list[dict]]:
+def _load_rows_from_workbook(workbook_path: str) -> tuple[list[dict], list[dict]]:
     try:
         from openpyxl import load_workbook
     except Exception:
@@ -2698,7 +2698,7 @@ def _load_v23_rows_from_workbook(workbook_path: str) -> tuple[list[dict], list[d
         wb.close()
 
 
-def _format_v23_run_list(run_names: list[str], limit: int = 5) -> str:
+def _format_run_list(run_names: list[str], limit: int = 5) -> str:
     if not run_names:
         return ""
     visible = run_names[:limit]
@@ -2708,15 +2708,15 @@ def _format_v23_run_list(run_names: list[str], limit: int = 5) -> str:
     return ", ".join(visible) + suffix
 
 
-def _export_v23_run_workbook(run_dir: str, log_path: str) -> tuple[str | None, list[dict], list[dict]]:
-    rows, meta, events, review_rows = _build_v23_run_rows(run_dir)
+def _export_run_workbook(run_dir: str, log_path: str) -> tuple[str | None, list[dict], list[dict]]:
+    rows, meta, events, review_rows = _build_run_rows(run_dir)
     if not rows:
         return None, [], []
-    workbook_path = export_v23_training_workbook(get_v23_run_log_path(run_dir), rows, meta, events, review_rows, log_path)
+    workbook_path = export_training_workbook(get_run_log_path(run_dir), rows, meta, events, review_rows, log_path)
     return workbook_path, rows, review_rows
 
 
-def backfill_v23_run_workbooks(log_path: str, max_runs: int | None = None, overwrite: bool = False) -> dict:
+def backfill_run_workbooks(log_path: str, max_runs: int | None = None, overwrite: bool = False) -> dict:
     created_runs: list[str] = []
     skipped_runs: list[str] = []
     failed_runs: list[str] = []
@@ -2736,25 +2736,25 @@ def backfill_v23_run_workbooks(log_path: str, max_runs: int | None = None, overw
             break
         processed += 1
         candidate_run_dir = os.path.join(LOG_BASE, run_name)
-        workbook_path = get_v23_run_log_path(candidate_run_dir)
+        workbook_path = get_run_log_path(candidate_run_dir)
         if os.path.isfile(workbook_path) and not overwrite:
             skipped_runs.append(run_name)
             continue
         try:
-            exported_path, rows, _review_rows = _export_v23_run_workbook(candidate_run_dir, log_path)
+            exported_path, rows, _review_rows = _export_run_workbook(candidate_run_dir, log_path)
             if exported_path and rows:
                 created_runs.append(run_name)
             else:
                 skipped_runs.append(run_name)
         except Exception as err:
             failed_runs.append(run_name)
-            write_log(f"V23 backfill failed for {run_name}: {err}", log_path)
+            write_log(f"Runlog backfill failed for {run_name}: {err}", log_path)
     if created_runs:
-        write_log(f"V23 backfill created {len(created_runs)} run workbooks: {_format_v23_run_list(created_runs)}", log_path)
+        write_log(f"Runlog backfill created {len(created_runs)} run workbooks: {_format_run_list(created_runs)}", log_path)
     if failed_runs:
-        write_log(f"V23 backfill failed for {len(failed_runs)} runs: {_format_v23_run_list(failed_runs)}", log_path)
+        write_log(f"Runlog backfill failed for {len(failed_runs)} runs: {_format_run_list(failed_runs)}", log_path)
     if skipped_runs:
-        write_log(f"V23 backfill skipped {len(skipped_runs)} runs: {_format_v23_run_list(skipped_runs)}", log_path)
+        write_log(f"Runlog backfill skipped {len(skipped_runs)} runs: {_format_run_list(skipped_runs)}", log_path)
     return {
         "created_runs": created_runs,
         "skipped_runs": skipped_runs,
@@ -2763,7 +2763,7 @@ def backfill_v23_run_workbooks(log_path: str, max_runs: int | None = None, overw
     }
 
 
-def _collect_v23_master_rows(current_run_dir: str, current_rows: list[dict], current_review_rows: list[dict], log_path: str) -> tuple[list[dict], list[dict], int, list[str]]:
+def _collect_master_rows(current_run_dir: str, current_rows: list[dict], current_review_rows: list[dict]) -> tuple[list[dict], list[dict], int, list[str]]:
     master_rows = list(current_rows)
     master_review_rows = list(current_review_rows)
     run_count = 1 if current_rows else 0
@@ -2777,8 +2777,8 @@ def _collect_v23_master_rows(current_run_dir: str, current_rows: list[dict], cur
             continue
         if not os.path.isfile(get_heartbeat_history_path(candidate_run_dir)):
             continue
-        workbook_path = get_v23_run_log_path(candidate_run_dir)
-        run_rows, run_review_rows = _load_v23_rows_from_workbook(workbook_path)
+        workbook_path = get_run_log_path(candidate_run_dir)
+        run_rows, run_review_rows = _load_rows_from_workbook(workbook_path)
         if not run_rows:
             skipped_runs.append(run_name)
             continue
@@ -2788,7 +2788,7 @@ def _collect_v23_master_rows(current_run_dir: str, current_rows: list[dict], cur
     return master_rows, master_review_rows, run_count, skipped_runs
 
 
-def _write_v23_meta_sheet(ws, meta: dict, header_font) -> None:
+def _write_meta_sheet(ws, meta: dict, header_font) -> None:
     ws.title = "Meta"
     ws.append(["key", "value"])
     for cell in ws[1]:
@@ -2798,7 +2798,7 @@ def _write_v23_meta_sheet(ws, meta: dict, header_font) -> None:
     ws.freeze_panes = "A2"
 
 
-def _write_v23_events_sheet(ws, events: list[dict], header_font) -> None:
+def _write_events_sheet(ws, events: list[dict], header_font) -> None:
     ws.title = "Events"
     headers = ["timestamp", "event_type", "detail"]
     ws.append(headers)
@@ -2809,7 +2809,7 @@ def _write_v23_events_sheet(ws, events: list[dict], header_font) -> None:
     ws.freeze_panes = "A2"
 
 
-def _write_v23_review_sheet(ws, review_rows: list[dict], header_font) -> None:
+def _write_review_sheet(ws, review_rows: list[dict], header_font) -> None:
     ws.title = "CheckpointReview"
     headers = [
         "run_id", "iter", "mean_reward", "survival_pct", "vf_loss", "gait_score_canonical", "stability_score_canonical",
@@ -2824,7 +2824,7 @@ def _write_v23_review_sheet(ws, review_rows: list[dict], header_font) -> None:
     ws.freeze_panes = "A2"
 
 
-def _add_v23_chart_sheet(wb, runlog_headers: list[str], runlog_rows: list[dict], header_font) -> None:
+def _add_chart_sheet(wb, runlog_headers: list[str], runlog_rows: list[dict], header_font) -> None:
     from openpyxl.chart import LineChart, Reference
 
     ws_chart = wb.create_sheet("Charts")
@@ -2867,58 +2867,58 @@ def _add_v23_chart_sheet(wb, runlog_headers: list[str], runlog_rows: list[dict],
         ws_chart.add_chart(chart, f"A{1 + (chart_index - 1) * 18}")
 
 
-def export_v23_training_workbook(out_path: str, rows: list[dict], meta: dict, events: list[dict], review_rows: list[dict], log_path: str) -> str | None:
+def export_training_workbook(out_path: str, rows: list[dict], meta: dict, events: list[dict], review_rows: list[dict], log_path: str) -> str | None:
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font
     except Exception as err:
-        write_log(f"V23 workbook skipped (openpyxl unavailable): {err}", log_path)
+        write_log(f"Runlog workbook skipped (openpyxl unavailable): {err}", log_path)
         return None
     wb = Workbook()
     ws_run = wb.active
     ws_run.title = "RunLog_100iter"
     header_font = Font(bold=True)
-    ws_run.append(V23_RUNLOG_COLUMNS)
+    ws_run.append(RUNLOG_COLUMNS)
     for cell in ws_run[1]:
         cell.font = header_font
     for row in rows:
-        ws_run.append([row.get(column) for column in V23_RUNLOG_COLUMNS])
+        ws_run.append([row.get(column) for column in RUNLOG_COLUMNS])
     ws_run.freeze_panes = "A2"
-    _write_v23_meta_sheet(wb.create_sheet("Meta"), meta, header_font)
-    _write_v23_events_sheet(wb.create_sheet("Events"), events, header_font)
-    _write_v23_review_sheet(wb.create_sheet("CheckpointReview"), review_rows, header_font)
-    _add_v23_chart_sheet(wb, V23_RUNLOG_COLUMNS, rows, header_font)
+    _write_meta_sheet(wb.create_sheet("Meta"), meta, header_font)
+    _write_events_sheet(wb.create_sheet("Events"), events, header_font)
+    _write_review_sheet(wb.create_sheet("CheckpointReview"), review_rows, header_font)
+    _add_chart_sheet(wb, RUNLOG_COLUMNS, rows, header_font)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     wb.save(out_path)
-    write_log(f"V23 workbook exported: {out_path}", log_path)
+    write_log(f"Runlog workbook exported: {out_path}", log_path)
     return out_path
 
 
-def export_v23_checkpoint_review_workbook(out_path: str, review_rows: list[dict], log_path: str) -> str | None:
+def export_checkpoint_review_workbook(out_path: str, review_rows: list[dict], log_path: str) -> str | None:
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font
     except Exception as err:
-        write_log(f"V23 checkpoint review skipped (openpyxl unavailable): {err}", log_path)
+        write_log(f"Runlog checkpoint review skipped (openpyxl unavailable): {err}", log_path)
         return None
     wb = Workbook()
     header_font = Font(bold=True)
-    _write_v23_review_sheet(wb.active, review_rows, header_font)
+    _write_review_sheet(wb.active, review_rows, header_font)
     wb.active.title = "CheckpointReview"
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     wb.save(out_path)
-    write_log(f"V23 checkpoint review exported: {out_path}", log_path)
+    write_log(f"Runlog checkpoint review exported: {out_path}", log_path)
     return out_path
 
 
-def refresh_v23_training_logs(run_dir: str, log_path: str) -> dict:
-    run_log_path, rows, review_rows = _export_v23_run_workbook(run_dir, log_path)
+def refresh_training_logs(run_dir: str, log_path: str) -> dict:
+    run_log_path, rows, review_rows = _export_run_workbook(run_dir, log_path)
     if not run_log_path or not rows:
         return {}
-    master_rows, master_review_rows, run_count, skipped_runs = _collect_v23_master_rows(run_dir, rows, review_rows, log_path)
+    master_rows, master_review_rows, run_count, skipped_runs = _collect_master_rows(run_dir, rows, review_rows)
     master_rows.sort(key=lambda item: (str(item.get("run_id") or ""), int(item.get("iter") or 0)))
     master_meta = {
-        "train_version": V23_TRAIN_VERSION,
+        "train_version": TRAIN_VERSION,
         "generated_at": _now(),
         "run_count": run_count,
         "log_root": LOG_BASE,
@@ -2926,10 +2926,10 @@ def refresh_v23_training_logs(run_dir: str, log_path: str) -> dict:
         "skipped_run_count": len(skipped_runs),
     }
     master_events = [{"timestamp": _now(), "event_type": "workbook_refresh", "detail": f"runs={run_count}; skipped={len(skipped_runs)}"}]
-    master_log_path = export_v23_training_workbook(get_v23_master_log_path(), master_rows, master_meta, master_events, master_review_rows, log_path)
-    checkpoint_review_path = export_v23_checkpoint_review_workbook(get_v23_checkpoint_review_path(), master_review_rows, log_path)
+    master_log_path = export_training_workbook(get_master_log_path(), master_rows, master_meta, master_events, master_review_rows, log_path)
+    checkpoint_review_path = export_checkpoint_review_workbook(get_checkpoint_review_path(), master_review_rows, log_path)
     if skipped_runs:
-        write_log(f"V23 master refresh skipped {len(skipped_runs)} historical runs without cached workbook: {_format_v23_run_list(skipped_runs)}", log_path)
+        write_log(f"Runlog master refresh skipped {len(skipped_runs)} historical runs without cached workbook: {_format_run_list(skipped_runs)}", log_path)
     return {
         "run_log_path": run_log_path,
         "master_log_path": master_log_path,
@@ -4063,10 +4063,10 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
         os.path.join(metrics_root, "heartbeat_history.xlsx"),
         SUPERVISOR_LOG,
     )
-    v23_paths = refresh_v23_training_logs(run_dir, SUPERVISOR_LOG)
-    v23_run_log_path = v23_paths.get("run_log_path") if v23_paths else None
-    v23_master_log_path = v23_paths.get("master_log_path") if v23_paths else None
-    v23_checkpoint_review_path = v23_paths.get("checkpoint_review_path") if v23_paths else None
+    log_paths = refresh_training_logs(run_dir, SUPERVISOR_LOG)
+    run_log_path = log_paths.get("run_log_path") if log_paths else None
+    master_log_path = log_paths.get("master_log_path") if log_paths else None
+    checkpoint_review_path = log_paths.get("checkpoint_review_path") if log_paths else None
     clip_metrics_workbook_path = None
     if metrics_row and metrics_run_dir:
         clip_metrics_workbook_path = export_clip_metrics_row_workbook(
@@ -4100,9 +4100,9 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
         "videos": {key: os.path.basename(path) for key, path in captured_videos.items()},
         "frames": frame_counts,
         "heartbeat_history_xlsx": "heartbeat_history.xlsx" if heartbeat_xlsx_path and os.path.isfile(heartbeat_xlsx_path) else None,
-        "v23_run_log_xlsx": os.path.basename(v23_run_log_path) if v23_run_log_path and os.path.isfile(v23_run_log_path) else None,
-        "v23_master_log_xlsx": os.path.basename(v23_master_log_path) if v23_master_log_path and os.path.isfile(v23_master_log_path) else None,
-        "v23_checkpoint_review_xlsx": os.path.basename(v23_checkpoint_review_path) if v23_checkpoint_review_path and os.path.isfile(v23_checkpoint_review_path) else None,
+        "run_log_xlsx": os.path.basename(run_log_path) if run_log_path and os.path.isfile(run_log_path) else None,
+        "master_log_xlsx": os.path.basename(master_log_path) if master_log_path and os.path.isfile(master_log_path) else None,
+        "checkpoint_review_xlsx": os.path.basename(checkpoint_review_path) if checkpoint_review_path and os.path.isfile(checkpoint_review_path) else None,
         "clip_metrics_row_xlsx": os.path.basename(clip_metrics_workbook_path) if clip_metrics_workbook_path and os.path.isfile(clip_metrics_workbook_path) else None,
         "metrics_source_run": os.path.basename(metrics_run_dir) if metrics_run_dir else os.path.basename(run_dir),
         "kpi_snapshot": kpi_snapshot,
@@ -4138,12 +4138,12 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
             for name in files:
                 file_path = os.path.join(root, name)
                 archive.write(file_path, os.path.relpath(file_path, artifact_root))
-        if v23_run_log_path and os.path.isfile(v23_run_log_path):
-            archive.write(v23_run_log_path, f"metrics/{os.path.basename(v23_run_log_path)}")
-        if v23_master_log_path and os.path.isfile(v23_master_log_path):
-            archive.write(v23_master_log_path, f"metrics/{os.path.basename(v23_master_log_path)}")
-        if v23_checkpoint_review_path and os.path.isfile(v23_checkpoint_review_path):
-            archive.write(v23_checkpoint_review_path, f"metrics/{os.path.basename(v23_checkpoint_review_path)}")
+        if run_log_path and os.path.isfile(run_log_path):
+            archive.write(run_log_path, f"metrics/{os.path.basename(run_log_path)}")
+        if master_log_path and os.path.isfile(master_log_path):
+            archive.write(master_log_path, f"metrics/{os.path.basename(master_log_path)}")
+        if checkpoint_review_path and os.path.isfile(checkpoint_review_path):
+            archive.write(checkpoint_review_path, f"metrics/{os.path.basename(checkpoint_review_path)}")
         for key, path in captured_videos.items():
             if path and os.path.isfile(path):
                 archive.write(path, f"videos/{key}_{os.path.basename(path)}")
