@@ -201,50 +201,43 @@ def _build_command_ack(command: str, checkpoint_iter: int | None = None) -> str:
     checkpoint_hint = f"\n<i>requested checkpoint: model_{checkpoint_iter}.pt</i>" if checkpoint_iter is not None else ""
     if command == "start":
         return (
-            "🚀 <b>START 요청 수신</b>\n"
-            f"<i>run: {run_name}</i>\n"
+            f"🚀 <b>TRAINING START — {run_name}</b>\n"
             f"<i>checkpoint: {checkpoint_name}</i>\n"
-            "<i>현재 supervisor context 기준으로 훈련 시작 또는 재개를 준비합니다.</i>"
+            "<i>supervisor context 기준으로 훈련 시작 또는 재개를 준비합니다.</i>"
         )
     if command == "stop":
-        return "⏹️ <b>STOP 요청 수신</b>\n<i>현재 훈련 프로세스를 중단합니다.</i>"
+        return "⏹️ <b>TRAINING STOP — 진행 중인 훈련을 중단합니다</b>"
     if command == "status":
-        return "👮 <b>SUPERVISOR STATUS 요청 수신</b>\n<i>현재 상태를 조회합니다.</i>"
+        return "👮 <b>SUPERVISOR STATUS — 현재 상태를 조회합니다</b>"
     if command == "help":
-        return "❔ <b>HELP 요청 수신</b>\n<i>명령 목록을 전송합니다.</i>"
+        return "❔ <b>HELP — 명령 목록을 전송합니다</b>"
     if command == "shutdown":
-        return "🛑 <b>SHUTDOWN 요청 수신</b>\n<i>supervisor 종료를 준비합니다.</i>"
+        return "🛑 <b>SUPERVISOR SHUTDOWN — 종료를 준비합니다</b>"
     if command == "report":
         if training_running:
             return (
-                "📦 <b>REPORT 요청 수신</b>\n"
-                f"<i>run: {run_name}</i>\n"
-                "<i>훈련 중이므로 최신 ZIP 리포트를 찾아 전송합니다.</i>"
+                f"📦 <b>REPORT REQUEST — {run_name} (훈련 중)</b>\n"
+                "<i>최신 ZIP 리포트를 찾아 전송합니다.</i>"
                 f"{checkpoint_hint}"
             )
         return (
-            "📦 <b>REPORT 요청 수신</b>\n"
-            f"<i>run: {run_name}</i>\n"
-            f"<i>checkpoint: {checkpoint_name}</i>\n"
-            "<i>현재 checkpoint 기준으로 영상, 분석, ZIP 리포트를 생성합니다.</i>"
+            f"📦 <b>REPORT REQUEST — {run_name} | {checkpoint_name}</b>\n"
+            "<i>영상, 분석, ZIP 리포트를 생성합니다.</i>"
             f"{checkpoint_hint}"
         )
     if command in {"front", "rear", "top", "side"}:
         if training_running:
             return (
-                f"🎥 <b>{command.upper()} 요청 수신</b>\n"
-                f"<i>run: {run_name}</i>\n"
-                f"<i>훈련 중이므로 최신 {command} 영상을 찾아 전송합니다.</i>"
+                f"🎥 <b>VIDEO REQUEST — {command} | {run_name} (훈련 중)</b>\n"
+                f"<i>최신 {command} 영상을 찾아 전송합니다.</i>"
                 f"{checkpoint_hint}"
             )
         return (
-            f"🎥 <b>{command.upper()} 요청 수신</b>\n"
-            f"<i>run: {run_name}</i>\n"
-            f"<i>checkpoint: {checkpoint_name}</i>\n"
-            f"<i>현재 checkpoint 기준으로 {command} 영상을 생성합니다.</i>"
+            f"🎥 <b>VIDEO REQUEST — {command} | {checkpoint_name}</b>\n"
+            f"<i>{command} 영상을 생성합니다.</i>"
             f"{checkpoint_hint}"
         )
-    return f"🎛️ <b>{command.upper()} 요청 수신</b>"
+    return f"🎛️ <b>{command.upper()} — 요청 수신</b>"
 
 
 def _handle_report_command(run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
@@ -611,8 +604,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
     common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
     common.update_state(mode="training" if common.is_training_running() else "idle", last_command="startup", last_error="")
     common.send_text(
-        "👮 <b>SUPERVISOR ACTIVE</b>\n"
-        "<i>Supervisor is ready for commands.</i>\n\n"
+        "👮 <b>SUPERVISOR ACTIVE — ready for commands</b>\n\n"
         + common.help_text(),
         common.SUPERVISOR_LOG,
         parse_mode="HTML",
@@ -653,9 +645,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                     exit_reason = f"shutdown-request:{shutdown_source}"
                     common.write_log(f"Supervisor shutdown requested by {shutdown_source}", common.SUPERVISOR_LOG)
                     common.send_text(
-                        "👮 <b>SUPERVISOR STOPPED</b>\n"
-                        f"<i>Supervisor is going offline.</i>\n"
-                        f"source: {shutdown_source}",
+                        f"👮 <b>SUPERVISOR STOPPED — {shutdown_source}</b>",
                         common.SUPERVISOR_LOG,
                         parse_mode="HTML",
                     )

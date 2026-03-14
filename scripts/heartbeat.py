@@ -73,7 +73,7 @@ def _run_video_report(run_dir: str, milestone: int, current_iter: int, total_mis
     if not checkpoint:
         common.write_log(f"[VideoReport] model_{milestone}.pt not found, skipping iter {milestone}", common.HEARTBEAT_LOG)
         common.send_text(
-            f"⚠️ <b>VideoReport iter {milestone:,}{catchup_label}</b>\n"
+            f"⚠️ <b>VIDEO REPORT — iter {milestone:,}{catchup_label} (파일 없음)</b>\n"
             f"<i>model_{milestone}.pt 파일이 없어 건너뜁니다.</i>",
             common.HEARTBEAT_LOG,
             parse_mode="HTML",
@@ -113,7 +113,7 @@ def _run_video_report(run_dir: str, milestone: int, current_iter: int, total_mis
     except Exception as err:
         common.write_log(f"[VideoReport] iter {milestone}: report failed: {err}\n{common.capture_exception()}", common.HEARTBEAT_LOG)
         common.send_text(
-            f"⚠️ <b>VideoReport iter {milestone:,} 실패</b>\n<i>{err}</i>",
+            f"⚠️ <b>VIDEO REPORT — iter {milestone:,} (실패)</b>\n<i>{err}</i>",
             common.HEARTBEAT_LOG,
             parse_mode="HTML",
         )
@@ -170,8 +170,7 @@ def main() -> None:
                     common.launch_training(common.HEARTBEAT_LOG)
                     common.write_log(f"[VideoReport] all done ({catchup_summary}), training restarted", common.HEARTBEAT_LOG)
                     common.send_text(
-                        f"🚀 <b>훈련 재개</b>\n"
-                        f"<i>{'누락 보완 완료' if current_iter > missed[0] else '영상 리포트 완료'}: {catchup_summary}</i>\n"
+                        f"🚀 <b>TRAINING RESUME — {'누락 보완 완료' if current_iter > missed[0] else '영상 리포트 완료'}: {catchup_summary}</b>\n"
                         f"<i>다음 리포트: iter {next_milestone:,}</i>",
                         common.HEARTBEAT_LOG,
                         parse_mode="HTML",

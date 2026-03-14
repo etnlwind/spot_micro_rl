@@ -3240,7 +3240,7 @@ def format_report(data: dict, run_name: str, cycle_num: int) -> str:
     )
 
     lines = [
-        f"💓 <b>HEARTBEAT</b> ({run_label})",
+        f"💓 <b>HEARTBEAT — {run_label}</b>",
         "",
         f"- iter: {current_iter:,} / {MAX_ITERATIONS:,} ({progress_pct:.1f}%)",
         f"- reward: {current_reward:.3f} (avg10: {reward_avg10:.3f})",
