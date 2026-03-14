@@ -42,8 +42,9 @@ C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\play.py --task=Isaac-Velocity-Flat-Sp
 | `source/.../__init__.py` | Gymnasium env registration (4 envs: Flat, Rough, Rough-Play, SteepSlope-Play) |
 | `scripts/rsl_rl/train.py` | Training entry point (uses Hydra + RSL-RL `OnPolicyRunner`) |
 | `scripts/rsl_rl/play.py` | Evaluation/video recording entry point |
-| `scripts/training_supervisor.py` | 3-hour cycle: stop→record video→analyze→Telegram report→resume |
-| `scripts/training_heartbeat.py` | Non-invasive TensorBoard monitor, 100-iter Telegram reports |
+| `scripts/supervisor.py` | Telegram bot: /start /stop /status /report /front /rear /top /side /shutdown |
+| `scripts/heartbeat.py` | TensorBoard monitor — text heartbeat every N iters, video report every M iters |
+| `scripts/common.py` | Shared utilities: tfevents reader, KPI scoring, report formatting, Telegram send |
 | `.env` | Telegram creds, paths, training params (TASK, TRAIN_ENVS, MAX_ITERATIONS, etc.) |
 | `plan/MEMORY.md` | AI session handoff — project context, version history, current state |
 
@@ -90,7 +91,7 @@ Flat→Rough transfer uses `scripts/transfer_flat_to_rough.py` (48→102 obs dim
 ### Logs & Checkpoints
 - Training logs: `logs/rsl_rl/spot_micro_flat/<timestamp>/` (TensorBoard events + model_*.pt)
 - Outputs: `outputs/<date>/<time>/` (Hydra)
-- PID files: `logs/training_heartbeat.pid`, `logs/training_supervisor.pid`
+- PID files: `logs/heartbeat.pid`, `logs/supervisor.pid`
 - Maintenance flag: `logs/maintenance.flag` (mutual watchdog between supervisor & heartbeat)
 
 ## Lessons Learned (Critical for Reward Design)
@@ -103,9 +104,16 @@ Flat→Rough transfer uses `scripts/transfer_flat_to_rough.py` (48→102 obs dim
 
 ## Version History Context
 
-Versions V1–V17.1 tracked in `plan/MEMORY.md`. Key milestones:
+Versions V1–V17.1 tracked in `plan/V01-V08_HISTORY.md` etc. Key milestones:
 - V8: Flat baseline → V9–V12: Rough terrain (rear leg dragging problem)
 - V13–V14: Critic reset attempts (all diverged)
 - V15d: From-scratch stable PPO params (gamma=0.97, clip=0.1)
 - V16: `diagonal_joint_coupling_reward` — kinematic trot enforcement
 - V17/V17.1: Gait cycle period, stride length, action rate penalties
+- V18–V22: Posture/style refinement, supervisor/heartbeat infra build-out
+- V23: **FAILED** — rear-left 3-leg exploit, contact sensor mis-mapping (`foot_link` → `toe_link`)
+- V24: **FAILED** — collapse固착 after iter 600, penalty drove avoidance not correction
+- V25: **FAILED** — asymmetric per-leg penalty shifted collapse RL→RR (iter 400)
+- **V26.1 (ACTIVE)**: Symmetric existence floor + load sharing, 8 reward terms, `TRAIN_VERSION="V26"`
+
+Active docs: `plan/MEMORY.md` (handoff), `plan/V26.1_PLAN.md` (implementation), `plan/V26_ANALYSIS.md` (design philosophy)

@@ -1,59 +1,54 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-03-12  
-**Project Status**: V23 코드/운영 레이어 활성화, live-context 운영 안정화, 상세 heartbeat 포맷 복원 완료  
-**Current Active Run Snapshot**: `logs/rsl_rl/spot_micro_flat/2026-03-11_22-38-08` / `model_600.pt` / iter 613 snapshot
+**Last Updated**: 2026-03-15
+**Project Status**: V26.1 훈련 진행 중 — Symmetric Existence Floor + Load Sharing
+**Current Active Run Snapshot**: V26.1 fresh run (2026-03-15 시작) / TRAIN_VERSION=”V26”
 
 ---
 
-## 📌 Current Status Snapshot (V23 active codebase)
+## 📌 Current Status Snapshot (V26.1 active)
 
-### 2026-03-12 운영 안정화 완료
-
-이번 세션에서 운영 레이어에 다음 변경이 실제 반영됐다.
-
-1. active run / checkpoint 해석이 stale `state.json`보다 live process cmdline을 우선 사용하도록 정리
-2. training stopped 상태에서 같은 run 안의 최신 checkpoint를 우선 선택하도록 수정
-3. `status`에 `supervisor_version`, `heartbeat_version`, `latest/stale`, `pid` 표시 추가
-4. heartbeat를 legacy 수준의 상세 분석 구조로 복원
-5. heartbeat Telegram 포맷을 실제 수동 전송으로 검증하며 최종 조정
-
-최근 핵심 커밋:
-
-- `b78f89f` Prefer latest checkpoint after training stops
-- `6485446` Add supervisor and heartbeat version status
-- `44d7169` Restore detailed heartbeat report sections
-- `de58e68` Refine heartbeat section formatting
-
-현재 active 운영 상태 스냅샷:
+### 2026-03-15 V26.1 훈련 시작
 
 | 항목 | 값 |
 |------|-----|
-| active run | `2026-03-11_22-38-08` |
-| checkpoint | `model_600.pt` |
-| mode | `training` |
-| supervisor | `de58e68 | latest` |
-| heartbeat | `de58e68 | latest` |
+| TRAIN_VERSION | `”V26”` |
+| 상태 | 훈련 진행 중 (fresh run) |
+| 진입점 | `logs\_launch_supervisor.cmd` |
+| supervisor PID | 18064 |
+| 핵심 변경 | 8개 symmetric reward term (Existence Floor + Load Sharing) |
+| 이전 버전 | V25 실패 (iter 400, RR collapse) |
+
+최근 핵심 커밋:
+
+- `346f674` Fix: add per-leg metrics to kpi_snapshot for video report
+- `1c242fe` Add V26.1 reward implementation, docs, and RL/RR limb metrics
+- `dc577ba` Fix /start fresh-start UX: confirmation flow
 
 중요:
 
 - 아래 역사 섹션은 프로젝트 전체 의사결정 배경을 보존하기 위한 연대기다.
-- 가장 최신 active handoff는 `plan/MEMORY.md`, `plan/CURRENT_STATE_2026-03-12.md`를 먼저 본다.
+- 가장 최신 active handoff는 `plan/MEMORY.md`, `plan/CURRENT_STATE_2026-03-15.md`를 먼저 본다.
 
-### 학습 버전과 운영 버전 분리
+### 학습 버전 요약 (V23~V26)
 
-- **현재 코드 기준 학습 버전 태그**: `TRAIN_VERSION = "V23"`
-- **운영/아티팩트 레이어**: V23 workbook + live-context + rich heartbeat
-- **현재 focus**: V23 posture/style refinement 실험을 운영 안정화 위에서 이어가기
+| 버전 | 판정 | 핵심 교훈 |
+|------|------|-----------|
+| V23 | 실패 | rear-left 3족 보행 exploit, contact sensor 오매핑 |
+| V24 | 실패 | collapse 고착 후 패널티가 회피를 유도 |
+| V25 | 실패 | 비대칭 패널티 → collapse 위치만 RL→RR 이동 |
+| V26.1 | 훈련 중 | symmetric per-leg existence floor + load sharing |
 
-V22는 V20 결과를 더 잘 읽기 위한 운영/아티팩트 정비 단계였다. 2026-03-12 기준으로는 V23 코드와 운영 레이어가 active 경로에 실제 반영되어 있으며, 남은 것은 “운영 정리”가 아니라 “V23 실험 자체의 다음 의사결정”이다.
+- **현재 코드 기준 학습 버전 태그**: `TRAIN_VERSION = “V26”`
+- **설계 철학 문서**: `plan/V26_ANALYSIS.md`
+- **구현 계획 문서**: `plan/V26.1_PLAN.md` (active)
 
 핵심 문서:
 
-- `plan/V20_ANALYSIS.md`: soft-ramp curriculum 자체 분석
-- `plan/V21_ANALYSIS.md`: heartbeat / supervisor / toe contact / diagnostics 정리
-- `plan/V22_ANALYSIS.md`: 멀티뷰 영상 패키지 / workbook / ZIP artifact 정리
-- `plan/V23_ANALYSIS.md`: 다음 학습 버전 준비 문서
+- `plan/V26_ANALYSIS.md`: V26 설계 철학 (부하 분산 + 파손 위험 최소화)
+- `plan/V26.1_PLAN.md`: V26.1 구현 계획 + 판정 기준
+- `plan/V25_ANALYSIS.md`: V25 실패 분석 (RR collapse)
+- `plan/V24_ANALYSIS.md`: V24 실패 분석
 
 ### V22 핵심 변경
 

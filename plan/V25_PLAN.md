@@ -1,715 +1,455 @@
-# V25 최종 설계 및 구현 요청
+# V25 설계 및 구현 문서
 
-현재 SpotMicro RL 프로젝트의 V23, V24 실험 결과를 바탕으로 **V25는 단순 튜닝이 아니라 구조 재설계판**으로 진행해야 합니다.
-
-## 현재까지 확정된 사실
-
-1. **V23 실패**
-   - reward, episode length, survival 수치는 높았음
-   - replay/영상 검증 결과 실제로는 **rear-left 미사용 3족 exploit**였음
-
-2. **contact KPI 문제는 해결됨**
-   - 초기 “전 다리 contact 거의 0” 문제는 정책 문제가 아니라 raw export mapping 오류였음
-   - 실제 접촉력은 `*_toe_link`에 들어가는데, raw export가 `*_foot_link`를 읽고 있었음
-   - 수정 후 결과:
-     - `FL / FR / RR` contact ratio는 정상 범위
-     - `RL`만 `0.0`
-
-3. **rear-left collapse는 실제 정책 문제**
-   - iter 600 / 1000 / 2400 replay 결과에서 RL만 지속적으로 붕괴
-   - 예:
-     - iter 600: `RL contact_ratio ≈ 0.0013`
-     - iter 1000: `RL = 0.0`
-     - iter 2400: `RL = 0.0`
-   - 따라서 rear-left collapse는 **적어도 iter 600 시점에는 이미 형성**되어 있었음
-
-4. **V24 실패**
-   - V24에서 limb-wise KPI, limb validity gate, usage proxy, fast-ramp penalty를 도입했음
-   - diagnostics/gate는 성공했음
-   - 그러나 **정책 행동 자체는 바뀌지 않았음**
-   - iter 2000 기준:
-     - `contact_ratio_rl ≈ 0`
-     - `stance_time_rl ≈ 0`
-     - `swing_time_rl ≈ 1`
-     - `propulsion_rl ≈ 0`
-     - `limb_usage_rl ≈ 0`
-   - 결론:
-     - **gate/diagnostics는 성공**
-     - **학습 objective는 실패**
-
-## 핵심 문제 정의
-
-이제 문제는 sensor/export/gate가 아니라 **학습 objective가 실제 정책 행동을 못 바꾸는 것**입니다.
-
-즉 V25는 아래 질문에 답해야 합니다.
-
-> **어떻게 하면 rear-left collapse 같은 single-limb collapse를 초반부터 차단하고, 네 다리를 실제로 쓰게 만들 것인가?**
-
----
-
-## V25 설계 원칙
-
-### 1. validity-first
-우선순위는 아래와 같아야 합니다.
-
-1. **4개 다리가 실제로 접지/추진에 참여하는가**
-2. **single-limb collapse가 없는가**
-3. **좌우/전후 비대칭이 과도하지 않은가**
-4. 그 다음 compact stance / shoulder style
-5. 그 다음 distal jitter / aesthetic refinement
-
-즉 V25에서는 **validity가 posture/style보다 항상 우선**입니다.
-
-### 2. G를 뼈대로, CS를 도구로 사용
-- **상위 설계 철학은 G 채택**
-  - 구조 재설계
-  - 3층 validity 구조
-  - iter 100 / 200 / 300 / 600 단계 판정
-  - Run A / B / C 구조
-- **하위 구현 수단은 CS 채택**
-  - diagonal coupling exploit 경로 차단
-  - 직접 penalty 항목
-  - 구체 코드 변경 단위
-
-즉:
-- **무엇을 바꿀 것인가** → G
-- **어떻게 바로 구현할 것인가** → CS
-
----
-
-## V25 목표 구조
-
-### 3층 validity 구조
-
-#### Layer 1. Existence Floor
-특정 다리 하나라도 사실상 사라지지 않게 만드는 최소 사용 보장층
-
-후보:
-- `limb_usage_min_penalty`
-- `per_leg_contact_floor_penalty`
-- `per_leg_propulsion_floor_penalty`
-
-#### Layer 2. Symmetry Guard
-좌우/전후 비대칭 억제층
-
-후보:
-- `rear_left_right_usage_diff_penalty`
-- `rear_left_right_propulsion_diff_penalty`
-- 필요 시 `front_left_right_usage_diff_penalty`
-
-#### Layer 3. Support Participation
-공중에서만 흔드는 다리를 “사용 중”으로 인정하지 않게 하는 층
-
-후보:
-- `support_phase_min_participation_penalty`
-- usage proxy에서 support gating 강제
-- contact/propulsion이 붕괴하면 usage도 함께 붕괴
-
----
-
-## V25 실험 구조
-
-### V25-A (본선)
-일반화 가능한 본선 구조
-
-반드시 포함:
-- `limb_usage_min_penalty`
-- `rear_left_right_usage_diff_penalty`
-- `per_leg_propulsion_floor_penalty`
-- `support_phase_min_participation_penalty`
-- **diagonal_coupling exploit 경로 차단**
-- validity fast-ramp
-- iter 100 / 200 / 300 / 600 운영 기준
-
-### V25-B (직접 처방 실험)
-V25-A에 추가:
-- `rear_left_contact_floor_penalty`
-
-중요:
-- 이 항목은 **최종 일반 구조가 아니라 direct-fix 실험용**
-- 현재 RL collapse를 직접 겨냥한 교정 실험
-
-### V25-C
-전제:
-- V25-A 또는 V25-B에서 single-limb collapse 해결 후에만 진행
-- validity 성공 전에는 posture/style로 넘어가지 않음
-
----
-
-## Validity Fast-Ramp 요구
-
-V24의 0~200 / 200~600 fast-ramp도 늦었습니다.  
-rear-left collapse는 600 이전에 이미 고정됩니다.
-
-따라서 V25는 다음 원칙을 따르십시오.
-
-- iter 0~100: 약하게 on
-- iter 100~300: 빠르게 ramp-up
-- iter 300+: full-strength
-- 기존 gait curriculum과 **분리된 validity 전용 alpha/ramp** 사용
-
----
-
-## Gate / 운영 정책
-
-### hard_safety_gate
-유지하되 단독 기준이 아닙니다.
-
-### limb_validity_gate
-더 중요한 gate로 승격합니다.
-
-반드시 아래를 반영해야 합니다.
-- limb_usage_min
-- per-leg contact floor
-- per-leg propulsion floor
-- symmetry diff
-- single-limb collapse reason
-
-### 운영 판정 시점
-- iter 0~99: 기록만
-- iter 100~199: early warning
-- iter 200~299: provisional fail
-- iter 300~399: strong fail
-- iter 400~600: abort 후보
-- iter 600+: single-limb collapse 지속 시 즉시 중단
-
-### 실패/중단 기준
-iter 600 시점까지 아래가 유지되면 실패 설정으로 분류합니다.
-- `contact_ratio_rl ≈ 0`
-- `propulsion_rl ≈ 0`
-- `swing_time_rl ≈ 1`
-- `limb_usage_rl ≈ 0`
-- `limb_validity_reason = rear_left_contact_collapse(...)`
-
-원칙:
-- **reward/survival이 좋아도 single-limb collapse가 남아 있으면 실패**
-- 애매하면 중단
-
----
-
-## 특별 구현 요구사항
-
-### 1. diagonal_coupling exploit 경로 차단
-이건 반드시 포함해야 합니다.
-
-현재 exploit는 rear-left를 안 써도 diagonal/trot reward 일부를 계속 먹는 경로가 있었을 가능성이 큽니다.
-
-따라서:
-- RL collapse 상태면
-  - RL이 포함된 pair 기여를 차단하거나
-  - diagonal reward 전체를 강하게 감쇠하는 방식을 제안/구현해주십시오.
-
-이 항목은 **V25-A 본선에 포함**합니다.
-
-### 2. usage proxy 재정의
-usage 정의는 아래를 반드시 만족해야 합니다.
-
-- contact/stance participation이 무너지면 usage도 자동 붕괴
-- propulsion이 0이면 usage가 유지되면 안 됨
-- leg_lift / clearance는 보조 정보일 뿐, usage를 단독으로 살리면 안 됨
-
-즉:
-
-> **공중에서 계속 흔드는 것만으로는 사용으로 인정하지 않는다**
-
-### 3. failure reason 직접화
-generic한 reason보다 아래와 같은 직접 reason을 우선합니다.
-
-예:
-- `rear_left_contact_collapse(c=...,s=...,p=...)`
-- `single_limb_usage_collapse`
-- `rear_left_propulsion_floor_fail`
-
----
-
-## 이번 요청에서 답해야 할 항목
-
-아래 형식으로 답변해주십시오.
-
-### 1. V24 실패 원인 분석
-- diagnostics는 성공했는데 왜 정책 행동은 안 바뀌었는가
-- current objective의 어떤 부분이 exploit를 허용했는가
-
-### 2. V25 핵심 설계 원칙
-- 무엇을 유지 / 수정 / 폐기할 것인가
-
-### 3. 구체 reward 변경안
-V25-A와 V25-B를 나눠서 제시해주십시오.
-각 항목의 목적, 수식 개요, 권장 weight를 포함하십시오.
-특히 아래 항목은 반드시 검토하십시오.
-- `limb_usage_min_penalty`
-- `rear_left_right_usage_diff_penalty`
-- `per_leg_propulsion_floor_penalty`
-- `support_phase_min_participation_penalty`
-- `rear_left_contact_floor_penalty` (B용)
-- `diagonal_coupling` 경로 차단
-
-### 4. 구체 ramp / curriculum 변경안
-- validity fast-ramp를 어떻게 구현할 것인지
-- 0~100 / 100~300 / 300+ 구간별 제안
-- 기존 gait curriculum과 어떻게 분리할 것인지
-
-### 5. gate / shortlist 운영안
-- iter 100 / 200 / 300 / 600 기준
-- 계속 진행 / 경고 / provisional fail / strong fail / abort 기준
-
-### 6. abort / restart 기준
-- 어떤 조건에서 즉시 중단할 것인지
-- checkpoint 채택 금지 기준은 무엇인지
-
-### 7. 구현 우선순위
-- 무엇을 1차 커밋에 넣고
-- 무엇을 2차 실험 항목으로 미룰지
-
-### 8. 최종 권고안
-아래 중 하나로 결론을 명확히 내려주십시오.
-- 유지
-- 수정
-- 폐기
-- 구조 재설계
-
----
-
-## 중요 지시
-- 좋게 말하지 말 것
-- “조금 더 지켜보자” 같은 표현 최소화
-- 시간 낭비를 막는 실무 기준으로 판단할 것
-- reward보다 **4발 사용 validity**를 우선할 것
-- rear-left collapse를 막지 못하는 안은 채택하지 말 것
-- RL 특화 penalty는 **본선 구조가 아니라 보조/direct-fix 실험용**으로 위치시킬 것
-
----
-
-## 개발담당 피드백
+> ⚠️ **SUPERSEDED**: 이 문서는 V25 설계 초안입니다.
+> 훈련 결과 및 실패 분석은 **[V25_ANALYSIS.md](V25_ANALYSIS.md)** 를 참조하세요.
 
 > 작성: Claude Sonnet 4.6 / 2026-03-14
-> 목적: 구현 착수 전 설계상 불명확하거나 문제가 될 부분을 명시. 앞부분 설계 원칙은 그대로 유지.
+> 상태: ~~구현 완료, 훈련 실행 중~~ → **실패 (iter 400, RR collapse)**
+> 목적: V25에서 변경된 모든 설계 결정, 구현 내용, 운영 기준을 단일 문서로 정리
 
 ---
 
-### F1. `usage proxy 재정의`는 V24에 이미 구현되어 있음
+## 1. 실험 이력 및 실패 원인 분석
 
-문서에 “contact/propulsion이 붕괴하면 usage도 함께 붕괴”라고 명시되어 있으나, 이는 V24 `_compute_limb_usage_proxy`에 이미 반영된 내용이다.
+### V23 실패
 
-```python
-support_gate = torch.maximum(contact_score, propulsion_score)
-usage_scores[suffix] = usage_scores[suffix] * support_gate
-```
-
-contact와 propulsion이 둘 다 0이면 support_gate=0 → usage=0 → penalty gap 최대. V24 실패 원인은 proxy 정의가 잘못된 것이 아니라 **weight 크기**(총 reward 544 대비 gap 최대 시 ~0.7%)였다.
-
-“usage proxy 재정의”를 신규 작업으로 진행할 경우 불필요한 공수가 발생한다. **기존 구현 재사용 여부를 결정해야 한다.**
-
----
-
-### F2. V25-A weight 합산이 collapse를 막기에 충분한지 불명확
-
-V24 실패 구조:
-- `limb_usage_min_penalty` -12.0 × gap 0.30 = **-3.6/step** ≈ 총 reward의 0.7%
-
-V25-G 제안 합산(gap 최대 가정):
-- `limb_usage_min_penalty` -16.0 × 0.30 = -4.8
-- `support_phase_min_participation_penalty` -14.0 × ~0.30 = -4.2
-- `per_leg_propulsion_floor_penalty` -6.0 × ~0.25 = -1.5
-- **합계 약 -10.5/step** ≈ 총 reward의 ~2%
-
-V24보다 3배 강해졌으나, collapse가 iter 200 이전에 고착되면 동일한 결말이 반복될 가능성이 있다. V25-A에 `restart-on-collapse`가 포함되지 않으면 이 위험은 그대로 남는다.
-
-**`restart-on-collapse`가 V25-A 본선에 포함되는지 명확히 해야 한다.**
-
----
-
-### F3. `support_phase_min_participation_penalty`와 `per_leg_contact_floor_penalty` 역할 중복 위험
-
-두 term 모두 contact/stance 참여를 요구하는 구조다. 정의가 다르지 않으면 동일한 신호에 중복 패널티가 부과되어 weight 설계가 복잡해지고 실패 원인 분석(attribution)이 어렵다.
-
-추정되는 의도 차이:
-- `support_phase_min_participation_penalty`: 특정 시점에 접지 중인 다리 수에 대한 제약 (multi-leg 관점)
-- `per_leg_contact_floor_penalty`: 각 다리의 전체 구간 contact_ratio ≥ floor (per-leg 관점)
-
-역할이 다르면 수식 수준에서 명확히 분리해야 한다. 역할이 같으면 하나만 구현하고 나머지는 제거하는 것이 낫다.
-
-**구현 전에 두 term의 수식 의도를 확정해야 한다.**
-
----
-
-### F4. `diagonal_coupling` gate — binary 차단은 gradient 불연속
-
-CS 구현안:
-```python
-rl_gate = (metrics[“contact_ratio_rl”] > 0.15).float()  # binary 0 or 1
-corr_b = corr_b * rl_gate
-```
-
-`contact_ratio_rl`이 0.14↔0.16 경계를 오갈 때 reward가 계단식으로 뛴다. PPO 학습에서 이 불연속은 gradient 추정을 불안정하게 만들 수 있다.
-
-soft gate 대안:
-```python
-rl_gate = torch.clamp(metrics[“contact_ratio_rl”] / 0.20, 0.0, 1.0)
-corr_b = corr_b * rl_gate
-```
-
-0~0.20 구간에서 선형으로 기여가 증가하므로 gradient가 연속적이다.
-
-**binary vs soft gate 방식을 결정해야 한다. soft gate를 권장한다.**
-
----
-
-### F5. V25-A 실패 시 V25-B로 전환하는 트리거 기준이 없음
-
-문서 구조상 V25-A 먼저, 실패하면 V25-B로 진행하는 순서로 읽힌다. 그러나 V25-A를 언제 포기할지 기준이 없다. 이 기준이 없으면 V24에서 반복된 “조금 더 지켜보자” 운영이 재발한다.
-
-제안 기준:
-> iter 200 시점에서 `contact_ratio_rl < 0.05` AND `swing_time_rl > 0.95` 이면 V25-A 즉시 중단 → V25-B로 재시작
-
-**V25-A → V25-B 전환 트리거를 명시해야 한다.**
-
----
-
-### F6. abort 자동화 여부 불명확
-
-문서에 “iter 600 collapse 지속 시 즉시 중단”이라고 명시되어 있으나, 이것이 heartbeat 자동 kill인지 사람이 판단하는 것인지 구분이 없다. 구현 범위가 달라진다.
-
-- **자동화**: heartbeat.py에 collapse 감지 → `common.stop_training()` 호출 → Telegram 알림 추가 필요
-- **수동**: Telegram 알림만 보내고 사람이 `/stop` 실행
-
-**구현 방식을 결정해야 한다.**
-
----
-
-### 피드백 요약
-
-| # | 항목 | 결정 필요 사항 |
-|---|------|--------------|
-| F1 | usage proxy | V24 기존 구현 재사용 vs 신규 작성 |
-| F2 | V25-A weight + restart | restart-on-collapse의 V25-A 포함 여부 |
-| F3 | term 중복 | `support_phase_min_participation` vs `per_leg_contact_floor` 역할 분리 또는 폐기 |
-| F4 | diagonal gate | binary vs soft gate |
-| F5 | A→B 전환 트리거 | iter 200 기준 명시 또는 다른 기준 |
-| F6 | abort 방식 | heartbeat 자동화 vs 수동 판단 |
-
-
-
-
-- - -
-Feedback from G V2
-좋습니다.
-개발담당 의견이 반영된 V25_PLAN.md는 방향이 맞고, 이전 G/CS 비교 결과를 꽤 잘 흡수한 통합안입니다.
-
-냉정한 총평
-
-채택 가능합니다.
-다만 그대로 바로 구현에 들어가기 전에 딱 3가지는 더 못 박아야 합니다.
-
-현재 문서는 이미 다음을 분명히 하고 있습니다.
-	•	V25를 단순 튜닝이 아니라 구조 재설계판으로 정의함.  ￼
-	•	문제를 sensor/export가 아니라 학습 objective failure로 규정함.  ￼
-	•	validity-first 우선순위와 G를 뼈대로, CS를 도구로 쓰는 구조를 명시함.  ￼
-	•	3층 validity 구조, V25-A/B/C 분기, fast-ramp, iter 100/200/300/600 운영 기준까지 포함함.  ￼
-
-이 정도면 문서 수준은 충분합니다.
-
-⸻
-
-잘된 점
-
-1. 문제 정의가 정확합니다
-
-문서가 가장 중요한 걸 정확히 잡았습니다.
-	•	V23은 rear-left 미사용 3족 exploit
-	•	V24는 diagnostics/gate는 성공했지만 행동 제어는 실패
-	•	따라서 V25는 objective를 바꾸는 구조 재설계여야 한다는 점
-
-이건 맞습니다. 이 부분이 흔들리면 또 시간 낭비합니다.  ￼
-
-2. G/CS 통합 방식이 적절합니다
-
-문서가 명시적으로
-	•	무엇을 바꿀 것인가 → G
-	•	어떻게 바로 구현할 것인가 → CS
-
-로 정리한 건 좋습니다. 이건 설계 철학과 구현 실행력을 동시에 잡는 방식입니다.  ￼
-
-3. V25-A / B / C 분리가 실무적으로 좋습니다
-
-특히
-	•	V25-A = 본선 일반 구조
-	•	V25-B = direct-fix 실험
-	•	V25-C = validity 성공 후 posture/style
-
-이 구조는 매우 좋습니다.
-이렇게 안 나누면 RL 특화 처방이 본선 구조를 오염시킬 수 있는데, 문서는 그걸 막고 있습니다.  ￼
-
-4. diagonal exploit path 차단을 본선에 넣은 점이 좋습니다
-
-이건 CS의 가장 강한 부분이었고, 문서가 V25-A 본선에 넣은 건 잘한 결정입니다.
-이번 실패는 “벌점이 약했다”뿐 아니라 잘못된 보상 경로가 열려 있었다는 문제도 있었기 때문입니다.  ￼
-
-⸻
-
-아직 보완이 필요한 3가지
-
-1. per_leg_contact_floor_penalty와 rear_left_contact_floor_penalty의 역할 충돌을 정리해야 합니다
-
-현재 문서는 Layer 1 후보로 per_leg_contact_floor_penalty를 두고, V25-B에서 rear_left_contact_floor_penalty를 추가합니다.  ￼
-
-이 구조 자체는 괜찮지만, 구현 들어가면 이런 문제가 생길 수 있습니다.
-	•	본선 일반 penalty와 RL 특화 penalty가 같은 현상을 이중 처벌
-	•	결과적으로 어떤 항목이 실제로 행동을 바꿨는지 attribution이 흐려짐
-
-권장
-
-구현 지시서에는 이렇게 못 박는 게 좋습니다.
-	•	V25-A: per_leg_contact_floor_penalty 또는 per_leg_propulsion_floor_penalty 중 하나를 주된 existence floor로 사용
-	•	V25-B: 그 위에 rear_left_contact_floor_penalty를 direct-fix ablation으로 추가
-	•	둘 다 동시에 full-weight로 켜지 않음
-
-즉 A는 일반 구조, B는 RL 직접 처방 비교 실험으로 명확히 분리해야 합니다.
-
-⸻
-
-2. iter 300399와 400600의 차이를 더 명확히 해야 합니다
-
-문서는 현재:
-	•	300~399: strong fail
-	•	400~600: abort 후보
-	•	600+: 즉시 중단
-
-으로 되어 있습니다.  ￼
-
-이건 괜찮지만, 실무에서는 누가 언제 stop 버튼을 누르는지가 더 분명해야 합니다.
-
-권장
-
-운영 문구를 이렇게 바꾸는 것이 좋습니다.
-	•	iter 300~399: collapse reason 지속 시 “기본 중단 권고”
-	•	iter 400~599: collapse reason 지속 시 “중단 기본값, 특별 사유 없으면 계속 금지”
-	•	iter 600+: 자동 중단 또는 즉시 수동 중단
-
-지금 문구는 아직 “조금 더 볼까?”의 여지를 남깁니다.
-이번 프로젝트는 그 여지를 줄여야 합니다.
-
-⸻
-
-3. 최상위 리포트 경고 우선순위를 코드에도 강제해야 합니다
-
-문서는 analysis report 최상위 경고가 생존률이 아니라 limb validity fail이어야 한다고 했습니다. 이건 매우 맞습니다.  ￼
-
-하지만 이건 문구 수준이 아니라 리포트 생성 우선순위 로직으로 강제해야 합니다.
-
-권장
-
-개발 지시서에 아래를 추가하세요.
-	•	rear_left_contact_collapse(...) 또는 single-limb collapse가 있으면
-다른 모든 요약보다 먼저 최상단 CRITICAL로 출력
-	•	survival/fall/reward는 그 아래 secondary summary로 내림
-
-이걸 안 하면 또 보고서가 “reward 좋음 / survival 좋음”을 먼저 보여줘서 사람 판단을 흐립니다.
-
-⸻
-
-최종 판정
-
-판정
-
-수정 후 채택입니다.
-
-즉 지금 문서는 폐기할 수준이 아니라,
-이제 바로 구현 가능한 수준까지 왔습니다.
-다만 아래 3가지를 추가로 못 박고 들어가야 합니다.
-	1.	A와 B의 penalty 역할 분리
-	2.	300/400/600 운영 의사결정 문구 강화
-	3.	report 최상위 경고를 limb collapse 우선으로 코드 강제
-
-⸻
-
-개발/훈련 AI에게 바로 줄 보완 지시문
-
-아래처럼 보내면 됩니다.
-
-⸻
-
-현재 V25_PLAN.md 방향에는 동의합니다.
-다만 구현 전에 아래 3가지를 더 명확히 고정하고 싶습니다.
-	1.	V25-A / V25-B penalty 역할 분리
-	•	V25-A는 일반 구조 검증이 목적이므로 existence floor는 일반화된 항목(per_leg_contact_floor_penalty 또는 per_leg_propulsion_floor_penalty) 중심으로 갑니다.
-	•	V25-B는 direct-fix 실험이므로 rear_left_contact_floor_penalty를 추가합니다.
-	•	A와 B에서 일반 penalty와 RL 특화 penalty가 동시에 full-strength로 중첩되지 않도록 분리해주세요.
-	2.	운영 중단 기준 문구 강화
-	•	iter 300~399: collapse reason 지속 시 기본 중단 권고
-	•	iter 400~599: 중단 기본값, 특별 사유 없으면 계속 금지
-	•	iter 600+: 즉시 중단
-현재 문서의 strong fail / abort 후보를 실제 stop decision 기준으로 더 명확히 반영해주세요.
-	3.	리포트 최상위 경고 우선순위 강제
-	•	rear_left_contact_collapse(...) 또는 single-limb collapse가 있으면 report 최상단 CRITICAL로 항상 먼저 출력
-	•	reward / survival / ep_len은 그 아래 secondary summary로 내려주세요
-
-이 3가지를 반영하면 V25_PLAN.md는 바로 구현 기준 문서로 채택하겠습니다.
-
-⸻
-
-한 줄로 정리하면,
-이번 개발담당 의견 반영본은 방향이 맞고 채택 가능하지만, A/B penalty 역할 분리와 중단 기준, 리포트 경고 우선순위를 더 강하게 못 박아야 합니다.
-
-- - -
-
-## 개발담당 재검토 의견 — G V2 피드백에 대한 반론
-
-> 작성: Claude Sonnet 4.6 / 2026-03-14
-> 목적: G V2 피드백 3가지에 동의하는 부분과 반론을 명시. 구현 전 최종 조율 근거로 사용.
-
----
-
-### R1. G2-F2 반론 — iter 400+ 자동 stop은 조건 없이 적용하면 너무 이름
-
-G V2는 iter 400~599를 "중단 기본값, 특별 사유 없으면 계속 금지"로 강화하고 자동 stop을 권장했다.
-
-**반론**: V25는 V24와 달리 패널티를 iter 0부터 적용한다. 이 경우 iter 300~400 구간에서 `contact_ratio_rl`이 0.03 → 0.08로 **상승 중인** run도 존재할 수 있다. 이 상태에서 정적 threshold만으로 자동 stop하면 회복 가능했던 run을 자르는 결과가 된다.
-
-V24에서 400 이후 회복 가능성이 0에 가까웠던 것은 패널티 시작이 너무 늦었기 때문이다. V25는 전제가 다르므로 자동 stop 조건에 **추세 체크**가 반드시 포함되어야 한다.
-
-**수정 제안**:
-
-| iter | 조건 | 동작 |
+| 지표 | 수치 | 판정 |
 |------|------|------|
-| 300~399 | collapse reason 지속 | Telegram 중단 권고 알림 — 사람 판단 |
-| 400~599 | `contact_ratio_rl < 0.05` AND 최근 5 heartbeat 상승 추세 없음 | heartbeat 자동 stop |
-| 400~599 | `contact_ratio_rl < 0.05` AND 상승 추세 있음 | 중단 보류, 100 iter 후 재판정 |
-| 600+ | collapse 지속 | 무조건 즉시 stop |
+| mean_reward | 높음 | — |
+| episode_length | 높음 | — |
+| survival | 높음 | — |
+| contact_ratio_rl | ≈ 0.0 | **CRITICAL** |
 
----
+- replay/영상 검증: **rear-left 미사용 3족 보행 exploit**
+- 3족 보행으로 trot reward, survival reward를 동시에 획득하는 local minimum에 수렴
+- contact KPI 문제는 당시 `*_foot_link` 매핑 오류였음 (추후 `*_toe_link`로 수정)
 
-### R2. G2-F1 반론 — `per_leg_contact_floor_penalty`와 `rear_left_contact_floor_penalty`의 기능 차이가 실제로 거의 없음
+### V24 실패
 
-G V2는 V25-A를 "일반 existence floor", V25-B를 "RL 특화 direct-fix"로 역할 분리했다.
+V24 투입 항목:
+- `limb_usage_min_penalty` (weight -12.0)
+- `rear_left_right_usage_diff_penalty`
+- limb validity gate / diagnostics
+- usage proxy (`contact_score * propulsion_score`)
+- fast-ramp (iter 200~600 구간 적용)
 
-**반론**: `per_leg_contact_floor_penalty`를 per-leg으로 구현하면, RL만 붕괴된 상황에서 다른 세 다리는 contact_ratio가 정상이라 gap≈0이다. 결국 패널티는 RL에만 집중되며, `rear_left_contact_floor_penalty`와 **RL에 주는 gradient 신호가 사실상 동일**하다.
+V24 iter 2000 기준 결과:
 
-즉 A/B를 "일반 vs 특화"로 나눠도 학습 관점에서 실질적 차이가 없을 수 있다. 이렇게 되면 A가 실패한 후 B를 돌리는 것은 시간 낭비다.
-
-**수정 제안**: V25-B의 역할을 재정의한다.
-
-- **V25-A**: `per_leg_contact_floor_penalty` (일반) + diagonal coupling soft gate + validity fast-ramp. 충분히 강한 weight로 시작.
-- **V25-B**: A와의 실질적 구조 차이가 있는 변형으로 재정의. 예:
-  - diagonal coupling gate threshold 변경 (0.20 → 0.10으로 강화)
-  - validity ramp 완전 제거 (iter 0부터 full-weight)
-  - `restart-on-collapse` 기준 완화 (iter 300 → iter 200)
-
-A와 B의 차이가 "같은 penalty를 일반 vs 특화로 나눈 것"이 아니라 **설계 가설이 다른 비교 실험**이 되어야 한다.
-
----
-
-### R3. G2-F3 부분 동의 및 보완 — CRITICAL 알림의 observe 구간 오발 가능성
-
-G V2의 "limb collapse 시 report 최상단 CRITICAL 강제" 방향은 맞다.
-
-**단 한 가지 문제**: iter 0~99 observe 구간에서는 패널티도 없고 contact가 형성되기 전이다. 이 구간에서도 `contact_ratio_rl < threshold`이면 CRITICAL이 발생하여 false alarm이 반복된다.
-
-**수정 제안**: CRITICAL 출력을 iter/stage로 gating한다.
-
-| iter | collapse 감지 시 출력 |
-|------|---------------------|
-| 0~99 (observe) | 기록만, 알림 없음 |
-| 100~199 (early_warning) | `[WARNING] limb collapse 감지` — heartbeat 상단 |
-| 200~299 (provisional_fail) | `[CRITICAL] single-limb collapse` — 최상단, 굵게 |
-| 300+ (strong_fail / enforce) | `[CRITICAL] collapse 지속 — 중단 검토` + 자동 판정 로직 연동 |
-
-이 gating 없이 무조건 CRITICAL을 출력하면 초반 warming-up 구간에서 노이즈가 쌓여 실제 중요한 경고가 묻힌다.
-
----
-
-### R4. 미해결 항목 — V25-A 실패 시 V25-B 전환 트리거 (G V2 미답변)
-
-G V2 피드백에서 이 항목은 다루어지지 않았다. 하지만 구현에서 반드시 결정이 필요한 사항이다.
-
-V25-A를 먼저 실행하고 실패하면 V25-B로 전환하는 구조라면, **언제 A를 포기하는지 기준**이 없으면 또 "조금 더 지켜보자"가 반복된다.
-
-**제안 기준**:
-
-> iter 200 시점에서 `contact_ratio_rl < 0.05` AND `swing_time_rl > 0.95` → V25-A 즉시 중단 → V25-B로 재시작
-
-이 기준을 heartbeat 자동 판정에 포함시켜야 한다.
-
----
-
-### 재검토 요약
-
-| # | G V2 제안 | 동의 여부 | 수정 내용 |
-|---|----------|----------|----------|
-| G2-F1 | A/B penalty 역할 분리 | 부분 동의 | per-leg 구현 시 기능 차이 없음 → B를 구조적 차이 실험으로 재정의 |
-| G2-F2 | 400+ 자동 stop | 부분 동의 | 추세 체크 조건 추가 필요 |
-| G2-F3 | CRITICAL 최상단 강제 | 동의 | iter 100+ 이후부터만 적용, stage별 gating |
-| R4 | (미답변) | — | A→B 전환 트리거 iter 200 기준 명시 필요 |
-
-
-
-
-- - -
-
-제 최종 권고
-
-채택
-	•	문서 전체는 채택
-	•	F1~F6는 전부 유효한 결정 포인트로 채택
-
-지금 바로 권고하는 기본값
-
-제가 지금 당장 잠그라고 권하는 값은 이겁니다.
-	•	F1: V24 usage proxy 재사용
-	•	F2: V25-A에도 restart-on-collapse 포함
-	•	F3: 본선에서는 per_leg_contact_floor 또는 per_leg_propulsion_floor 중심으로 하나만 주력, support_phase_min_participation은 후순위
-	•	F4: soft gate 고정
-	•	F5: iter 200 기준 A→B 전환 명시
-	•	F6: 1차는 수동 중단, 자동 kill은 후속
-
-이렇게 잠그면 문서가 바로 실행 문서가 됩니다.
-
----
-
-## 최종 설계 결정 — 개발담당 최종안 (2026-03-14)
-
-### 배경
-
-G의 최종 권고(F1~F6)를 검토한 결과, 구조적으로 더 큰 문제가 있다고 판단했다.
-
-### G 권고를 따르지 않는 이유
-
-**V25-A/B 분기 구조 자체의 문제:**
-
-G 권고는 V25-A(일반) 실패 후 V25-B(특화)로 전환하는 구조를 유지한다. 그러나 V24가 증명한 것은 **collapse가 iter 200 이전에 고착**된다는 것이다. A를 iter 200까지 지켜보다 B로 넘어가면 V24와 같은 패턴이 반복된다. A/B 분기는 시간 낭비일 가능성이 높다.
-
-**F3의 모호함:**
-
-"per_leg_contact_floor 또는 per_leg_propulsion_floor 중 하나"는 결정을 미룬 것이다. contact가 없으면 propulsion도 0이므로 contact를 직접 타겟하는 것이 근본적이다. propulsion_floor는 불필요하다.
-
-**weight 기준 부재:**
-
-G 권고 어디에도 weight 수치가 없다. V24 실패의 직접 원인 중 하나는 weight -12가 총 reward 544의 2%에 불과했다는 것이다. "충분히 강한 weight"를 명시하지 않으면 같은 실수가 반복된다.
-
-### 채택하는 CS 단일 설계
-
-| 항목 | 결정 | 이유 |
+| 지표 | 수치 | 판정 |
 |------|------|------|
-| 분기 구조 | **없음 — 단일 run** | A/B 전환 대기가 V24 패턴 반복을 유발 |
-| penalty target | `rear_left_contact_floor_penalty` 직접 | min_usage proxy는 다른 다리가 희석, per_leg도 RL 붕괴 시 동일 신호 |
-| weight | **-50 ~ -80** | 총 reward의 최소 10% 이상 — V24 -12(2%)는 무의미했음 |
-| ramp | **없음 — iter 0부터 full** | V24 실패의 핵심 원인. collapse보다 패널티가 먼저여야 함 |
-| restart-on-collapse | **iter 100** 기준 | iter 300은 너무 늦음. collapse는 그 전에 고착됨 |
-| diagonal coupling | soft gate, threshold 0.15 | binary는 gradient 차단 |
-| V25-B | V25 메인 run이 iter 300에서 survival ≥ 90% + RL collapse 지속 시에만 설계 | 지금 당장 설계 안 함 |
+| contact_ratio_rl | ≈ 0.0 | **CRITICAL** |
+| stance_time_rl | ≈ 0.0 | 붕괴 |
+| swing_time_rl | ≈ 1.0 | 붕괴 |
+| propulsion_rl | ≈ 0.0 | 붕괴 |
+| limb_usage_rl | ≈ 0.0 | 붕괴 |
+| gate/diagnostics | 정상 작동 | — |
 
-### 설계 원칙
+**V24 실패 원인 분석:**
 
-> **패널티가 작동하려면 collapse보다 먼저, collapse보다 강해야 한다.**
+1. **weight 부족**: `limb_usage_min_penalty -12.0` × gap 0.30 = **-3.6/step** ≈ 총 reward 544의 0.7%
+   → collapse penalty가 3족 보행 이득을 상쇄하지 못함
 
-V24는 둘 다 틀렸다(iter 200 이후 시작, weight -12). V25는 둘 다 맞춰야 한다.
+2. **ramp 시작이 너무 늦음**: iter 200부터 ramp 시작
+   → rear-left collapse는 iter 100~200 이전에 이미 고착됨. 패널티가 시작되기 전에 정책이 굳어버림
 
-### G 권고에서 유지하는 항목
+3. **diagonal_coupling exploit 경로 미차단**: RL이 접지하지 않아도 FR↔RL 관절 속도 상관이 일부 유지되어 diagonal_coupling 보상을 부분적으로 획득할 수 있었음
+   → 3족 보행에서도 diagonal reward를 먹는 경로가 열려 있었음
+
+4. **usage proxy 신호 희석**: `limb_usage_min_penalty`는 4개 다리 평균 또는 min 기반
+   → 나머지 3개 다리가 정상이면 RL 붕괴 신호가 희석됨
+
+---
+
+## 2. V25 핵심 설계 원칙
+
+### 원칙 1: 패널티가 collapse보다 먼저, collapse보다 강해야 한다
+
+V24의 두 가지 실패:
+- **늦게 시작**: iter 200 ramp → collapse 이전에 패널티 없음
+- **너무 약함**: -3.6/step ≈ 총 reward의 0.7%
+
+V25 대응:
+- **iter 0부터 full weight**: ramp 없음
+- **weight -60**: 총 reward의 최소 10% 이상
+
+### 원칙 2: 직접 타겟 — RL에만, contact에만
+
+V24 proxy의 문제: 4개 다리 min 또는 avg → RL 신호 희석
+V25: `rear_left_contact_floor_penalty` — RL만, contact_ratio만 직접 타겟
+
+### 원칙 3: exploit 경로 차단
+
+diagonal_coupling에서 RL 미접지 시 pair_b 보상을 soft gate로 차단
+→ 3족 보행이 diagonal reward까지 얻는 경로를 닫음
+
+### 원칙 4: 단일 run, 분기 없음
+
+G의 V25-A/B 분기 구조를 채택하지 않은 이유:
+- A/B 전환 대기(iter 200~300)가 V24 패턴 재현
+- per_leg_contact_floor와 rear_left_contact_floor는 RL 붕괴 상황에서 gradient 신호가 사실상 동일 → A/B 분리가 의미없음
+- 가장 강한 직접 처방 하나를 iter 0부터 적용하는 것이 더 빠름
+
+---
+
+## 3. 구현된 reward 변경사항
+
+### 3.1 제거된 항목 (V24 → V25)
 
 | 항목 | 이유 |
 |------|------|
-| F1: V24 usage proxy 재사용 | 올바르게 구현됐고 변경 근거 없음 |
-| F4: soft gate 고정 | binary gate는 gradient 차단 |
-| F6: 1차 수동 중단 | 자동 kill은 오발 리스크, 기준 미검증 |
-| R3: CRITICAL 알림 stage gating | iter 0~99 observe 구간 false alarm 방지 |
+| `limb_usage_min_penalty` | weight -12, proxy 희석으로 실패 확인. rear_left_contact_floor로 대체 |
+| `rear_left_right_usage_diff_penalty` | usage proxy 기반으로 동일한 희석 문제. RL collapse 시 이미 rear_left_contact_floor가 작동 |
 
+### 3.2 신규 항목
+
+#### `rear_left_contact_floor_penalty`
+
+```python
+def rear_left_contact_floor_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    floor: float = 0.30,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    rl_contact = _contact_ratio(contact_sensor, sensor_cfg.body_ids, contact_threshold)  # (N, 1)
+    gap = torch.clamp(float(floor) - rl_contact[:, 0], min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+```
+
+설정값:
+```python
+self.rewards.rear_left_contact_floor = RewTerm(
+    func=custom_mdp.rear_left_contact_floor_penalty,
+    weight=-60.0,
+    params={
+        "sensor_cfg": SceneEntityCfg("contact_forces", body_names="rear_left_toe_link"),
+        "contact_threshold": 1.0,
+        "floor": 0.30,
+        "min_vel": 0.05,
+        "asset_cfg": SceneEntityCfg("robot"),
+    },
+)
+```
+
+동작 설명:
+- `contact_ratio_rl < 0.30`이면 `gap = 0.30 - contact_ratio_rl` → 패널티 발생
+- `contact_ratio_rl ≥ 0.30`이면 `gap = 0` → 패널티 없음
+- 전진 속도 < `min_vel` (0.05 m/s)이면 gate=0 → 정지 상태에서는 패널티 없음
+- ramp 없음 — iter 0부터 weight -60 전력 적용
+- weight -60 × gap 최대(0.30) = **-18/step** ≈ 총 reward의 ~3.3%
+  (gap이 더 클수록 패널티 증가, floor 미달 시 최대 -60 × 1.0 = -60/step)
+
+**V24 대비**:
+
+| 항목 | V24 | V25 |
+|------|-----|-----|
+| 방식 | usage proxy (간접) | contact_ratio 직접 |
+| target | 4개 다리 min | RL만 |
+| weight | -12.0 | -60.0 |
+| ramp | iter 200~600 | 없음 (iter 0부터) |
+| 최대 패널티/step | -3.6 | -18 ~ -60 |
+
+### 3.3 수정된 항목
+
+#### `diagonal_joint_coupling_reward` — RL participation soft gate 추가
+
+```python
+# V25: RL 참여 soft gate
+if rl_participation_sensor_cfg is not None:
+    contact_sensor = env.scene.sensors[rl_participation_sensor_cfg.name]
+    rl_contact = _contact_ratio(contact_sensor, rl_participation_sensor_cfg.body_ids, rl_contact_threshold)[:, 0]
+    rl_gate = torch.clamp(rl_contact / max(float(rl_min_contact), 1e-6), 0.0, 1.0)
+    pair_b_reward = pair_b_reward * rl_gate
+```
+
+설정값:
+```python
+self.rewards.diagonal_coupling = RewTerm(
+    func=custom_mdp.diagonal_joint_coupling_reward,
+    weight=25.0,
+    params={
+        ...
+        # V25 추가 파라미터
+        "rl_participation_sensor_cfg": SceneEntityCfg("contact_forces", body_names="rear_left_toe_link"),
+        "rl_contact_threshold": 1.0,
+        "rl_min_contact": 0.15,
+    },
+)
+```
+
+동작 설명:
+- `rl_gate = clamp(contact_ratio_rl / 0.15, 0, 1)`
+- `contact_ratio_rl = 0` → gate = 0 → pair_b(FR↔RL) 보상 완전 차단
+- `contact_ratio_rl = 0.15` → gate = 1.0 → 정상 보상
+- 0~0.15 구간 선형 증가 → gradient 연속 (binary gate 불사용)
+- pair_a(FL↔RR)는 영향 없음 — RL 붕괴가 FL↔RR 보상을 막지 않음
+
+**왜 binary가 아닌 soft gate인가:**
+0.14↔0.16 경계에서 reward가 계단식으로 변하면 PPO gradient 추정이 불안정해짐.
+soft gate는 0~0.15 전 구간에서 gradient를 유지.
+
+### 3.4 curriculum validity ramp 무력화
+
+V24의 validity_ramp가 iter 200 이전에는 패널티를 주지 않았던 문제를 해결.
+V25에서 validity ramp를 사실상 비활성화:
+
+```python
+"validity_ramp_start": 0,   # V25: 해당 term 없음 — no-op
+"validity_ramp_end": 1,
+```
+
+`initial_weight`와 `final_weight` 모두 0.0으로 유지 → ramp term이 있어도 아무 효과 없음.
+
+---
+
+## 4. restart-on-collapse 자동화 (heartbeat.py)
+
+### 목적
+
+collapse는 iter 100~200에 고착된다. iter 300이 되어서 사람이 판단하면 이미 늦다.
+heartbeat가 자동으로 감지하여 fresh restart를 실행.
+
+### 상수 설정
+
+```python
+_COLLAPSE_CHECK_ITER_MIN = 100   # iter 100 이전은 warming-up — 감지 안 함
+_COLLAPSE_CHECK_ITER_MAX = 300   # iter 300 이후는 이미 늦음 — restart 대신 알림만
+_COLLAPSE_CONTACT_THRESHOLD = 0.05
+_COLLAPSE_SWING_THRESHOLD = 0.95
+_COLLAPSE_CONSECUTIVE_REQUIRED = 3  # 연속 N회 감지 시 실제 collapse로 판정
+```
+
+### 감지 조건
+
+iter 100~300 구간에서 매 poll 마다 아래를 체크:
+
+```
+contact_ratio_rl < 0.05  AND  swing_time_rl > 0.95
+```
+
+이 조건이 **연속 3회** 충족되면 collapse로 확정.
+
+### 동작 흐름
+
+```
+조건 충족 (연속 1회) → collapse_consecutive_count = 1, 로그만
+조건 충족 (연속 2회) → collapse_consecutive_count = 2, 로그만
+조건 충족 (연속 3회) → collapse 확정
+  → stop_training()
+  → Telegram: 🚨 COLLAPSE RESTART — iter N
+  → launch_training(fresh=True)  ← 반드시 fresh=True
+  → collapse_restart_done = True  (한 run에서 1회만)
+```
+
+**왜 fresh=True인가:**
+collapsed 모델 checkpoint로 resume하면 동일한 collapse로 즉시 복귀.
+iter 0부터 다시 학습해야 의미 있는 재시작.
+
+### iter 300 이후
+
+`_COLLAPSE_CHECK_ITER_MAX = 300` 이후에는 restart를 실행하지 않음.
+이유: iter 300에서도 collapse가 남아있으면 설계 자체를 재검토해야 할 상황.
+자동 restart가 아니라 수동 판단 + V26 설계 검토가 올바른 대응.
+
+### collapse_restart_done 플래그
+
+한 run 안에서 restart는 1회만 실행.
+restart 후 새 run에서는 플래그가 초기화되어 다시 감지 시작.
+
+---
+
+## 5. 운영 기준 (heartbeat / KPI 기반)
+
+### 단계별 기준
+
+| iter 구간 | 동작 |
+|-----------|------|
+| 0~99 | warming-up — collapse 감지 안 함, 기록만 |
+| 100~299 | collapse 감지 구간 — 연속 3회 확인 시 automatic fresh restart |
+| 300+ | restart 없음 — KPI 확인 후 수동 판단 |
+
+### iter 300 기준 KPI 판정
+
+| 지표 | 통과 기준 | 판정 |
+|------|-----------|------|
+| contact_ratio_rl | ≥ 0.10 | 최소 접지 형성 |
+| swing_time_rl | ≤ 0.85 | 공중 지속 개선 |
+| contact_ratio_rl | ≥ 0.05 | 신호라도 있으면 관찰 유지 |
+| contact_ratio_rl | < 0.05 | **설계 검토 권고** |
+
+### 중단 기준
+
+| 상황 | 대응 |
+|------|------|
+| iter 300, contact_ratio_rl < 0.05 지속 | 수동 중단, V25 설계 재검토 |
+| iter 300, contact_ratio_rl 0.05~0.10 + 상승 추세 | 100 iter 추가 관찰 |
+| iter 600, contact_ratio_rl < 0.05 | 즉시 중단, V26 설계 |
+
+**원칙**: reward/survival이 좋아도 RL collapse가 남아있으면 실패.
+
+---
+
+## 6. `/start` vs `/resume` 명령 분리
+
+V25 훈련 시작 전 state.json에 V24 checkpoint가 남아있는 문제 해결을 위해 구현.
+
+### 흐름
+
+```
+Telegram: /start
+  → checkpoint 존재 여부 확인 (state.json 기록 기준, 파일 존재 무관)
+  → 없으면: 즉시 fresh start → 메시지1
+  → 있으면: 메시지2 표시 (현재 iter 표기) → 사용자 응답 대기
+
+사용자 Y 입력:
+  → launch_training(fresh=True) → 메시지1
+
+Y 외 모든 입력:
+  → "취소되었습니다." → 중단
+  (60초 무응답도 자동 취소)
+```
+
+### 메시지1 (fresh start 완료)
+
+```
+🚀 TRAINING START (FRESH)
+run: 2026-03-14_22-23-04
+iter 0부터 시작합니다.
+```
+
+### 메시지2 (기존 checkpoint 있을 때)
+
+```
+⚠️ 확인 필요 — FRESH START
+현재 진행: iter 2,000 (model_2000.pt)
+
+이 진행상황을 초기화하고 iter 0부터 새로 시작합니다.
+계속하려면 Y를 입력하세요. (60초 내, 다른 입력은 취소)
+```
+
+### `launch_training(fresh=True)` 구현 핵심
+
+```python
+if fresh:
+    update_state(active_run="", active_checkpoint="", last_command="start-fresh")
+    command = build_train_command()  # checkpoint 인수 없음 — iter 0부터
+    ...
+    # 5초 대기 후 state 업데이트 시 구 checkpoint 참조 금지
+    active_checkpoint = None  # fresh start는 checkpoint 없음
+```
+
+**버그 수정 이력**:
+- 최초 구현에서 `fresh=True`임에도 5초 대기 후 구 run의 checkpoint를 조회하여 state에 다시 쓰는 버그 있었음
+- 수정: `fresh=True` 시 `active_checkpoint = None` 고정, 구 run 조회 없음
+
+---
+
+## 7. 요약: V24 → V25 변경 전체 목록
+
+### reward 변경
+
+| 항목 | V24 | V25 |
+|------|-----|-----|
+| `limb_usage_min_penalty` | weight -12.0 | **제거** |
+| `rear_left_right_usage_diff_penalty` | weight -8.0 | **제거** |
+| `rear_left_contact_floor_penalty` | 없음 | **신규** weight -60.0 |
+| `diagonal_coupling` — RL gate | 없음 | **추가** soft gate threshold 0.15 |
+| validity_ramp | iter 200~600 | **무력화** (0~1, initial/final=0) |
+| `TRAIN_VERSION` | "V24" | "V25" |
+
+### 인프라 변경
+
+| 항목 | 변경 내용 |
+|------|----------|
+| heartbeat.py | restart-on-collapse 추가 (iter 100~300, 연속 3회) |
+| supervisor.py | `/start` fresh start 확인 흐름 (Y만 확인, 나머지 취소) |
+| supervisor.py | `/resume` 명령 신규 분리 |
+| common.py | `launch_training(fresh=True/False)` 파라미터 추가 |
+| common.py | `fresh=True` 시 구 checkpoint 재참조 버그 수정 |
+
+---
+
+## 9. 훈련 경과 기록
+
+### iter ~300 중간 판정 (2026-03-14)
+
+**판정: 유지 가능하지만, 아직 성공 아님**
+
+iter 200 대비 명확한 개선:
+
+| 지표 | 값 |
+|------|----|
+| reward | 196 |
+| ep_len | 189.6 |
+| survival rate | 37.9% |
+| timeout rate | 73% |
+| stability | **F 지속** |
+
+**관찰된 위험 신호**:
+- `rear_alternation` / `rear_joint_velocity` 리워드가 TOP 순위 → rear-driven 쏠림 가능성
+- RL limb-wise 핵심값(`contact_ratio_rl`, `propulsion_rl`, `swing_time_rl`, `limb_usage_rl`, `limb_validity_reason`)이 리포트에 누락 → iter 400 전까지 수동 확인 필요
+
+**iter 400 필수 확인 항목**:
+
+| 항목 | 기준 | 비고 |
+|------|------|------|
+| `contact_ratio_rl` | ≥ 0.05 | rear_left 발바닥 접촉 여부 |
+| `propulsion_rl` | ≥ 0.05 | rear_left 추진 기여 여부 |
+| `swing_time_rl` | ≥ 0.05 | rear_left swing 동작 여부 |
+| `limb_usage_rl` | ≥ 0.05 | rear_left 전반적 참여 |
+| `limb_validity_reason` | 모든 limb 비율 ≥ 0.1 | 특정 limb 고사 여부 |
+| `rear_alternation` 비율 | TOP에서 하락 | rear-쏠림 완화 추세 확인 |
+| survival rate | ≥ 50% | 최소 생존 기준 |
+
+**즉시 중단 조건** (iter 400 기준):
+- `contact_ratio_rl` < 0.02 지속 → rear_left 완전 사망, V25 실패
+- survival rate < 25% → 오히려 V24보다 퇴보
+- reward < 150 → 명백한 회귀
+
+### iter ~500 중간 판정 (2026-03-15)
+
+**판정: 유지. 그러나 핵심 문제는 아직 미확인**
+
+수치 지속 개선:
+
+| 지표 | iter ~300 | iter ~500 |
+|------|-----------|-----------|
+| reward | 196 | **312** |
+| ep_len | 189.6 | **233** |
+| survival rate | 37.9% | **46.6%** |
+| timeout rate | 73% | **86%** |
+| stability | F | **F (지속)** |
+
+**판단 근거**:
+- 기초 안정화와 전진 형성은 살아 있음 → 유지 유효
+- stability = F 지속, TOP 보상이 여전히 `rear_alternation` / `rear_joint_velocity` → rear-driven 쏠림 의심 강화
+- RL 핵심 지표(contact_ratio_rl 등) 여전히 리포트 없음 → "문제 없음" 판단 불가
+
+**iter 600 필수 확인 항목** (이전과 동일, 절대 생략 불가):
+
+| 항목 | 판단 기준 |
+|------|----------|
+| `contact_ratio_rl` | RL 참여 여부 |
+| `propulsion_rl` | 추진 기여 여부 |
+| `swing_time_rl` | swing 동작 여부 |
+| `limb_usage_rl` | 전반적 참여 여부 |
+| `limb_validity_reason` | limb별 고사 여부 |
+
+**즉시 중단 조건** (iter 600 기준):
+- `contact_ratio_rl` ≈ 0, `propulsion_rl` ≈ 0, `swing_time_rl` ≈ 1 → rear_left 완전 미참여, V25 실패
+
+> 한 줄 요약: 전체 학습은 올라가고 있지만, 우리가 해결하려는 핵심 문제(rear-left collapse)는 아직 확인조차 안 된 상태.
+
+---
+
+## 8. 미결 항목 (V25 결과 확인 후)
+
+| 항목 | 조건 |
+|------|------|
+| V25 실패 시 V26 설계 | iter 300 contact_ratio_rl < 0.05 지속 시 |
+| CRITICAL 알림 stage gating | iter 100+ 이후만 CRITICAL 출력 (false alarm 방지) — 미구현 |
+| 400+ 자동 stop with 추세 체크 | V25 결과 확인 후 필요 시 구현 |
+| report 최상단 limb collapse CRITICAL | V25 결과 확인 후 구현 여부 결정 |

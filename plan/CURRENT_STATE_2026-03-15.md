@@ -1,10 +1,26 @@
 # Current State — 2026-03-15
 
+## [2026-03-15 최신] V26.1 훈련 시작
+
+| 항목 | 값 |
+|------|-----|
+| 상태 | V26.1 훈련 진행 중 (fresh run) |
+| TRAIN_VERSION | `"V26"` |
+| supervisor PID | 18064 |
+| 진입점 | `logs\_launch_supervisor.cmd` |
+| 핵심 설계 | Symmetric Existence Floor + Load Sharing (8 reward terms) |
+| 이전 버전 | V25 실패 — iter 400, RR collapse (비대칭 패널티의 한계) |
+
+상세 내용은 [V26.1_PLAN.md](V26.1_PLAN.md) 참조.
+
+---
+
 ## 1. 문서 목적
 
 2026-03-14 야간 세션 기준 실제 코드 상태, 운영 상태, 버그 수정 내역, 다음 할 일을 정리한 handoff 문서.
 
 **[2026-03-14 추가]** V24 훈련 종료. iter 2002까지 진행. 목표 미달성 — V25 설계 필요.
+**[2026-03-15 추가]** V25 훈련 종료. iter 400, RR collapse — V26.1 전환.
 
 ---
 
