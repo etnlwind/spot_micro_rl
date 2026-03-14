@@ -33,9 +33,9 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-V23_TRAIN_VERSION = "V24"
-V23_MASTER_LOG_FILENAME = "spotmicro_v24_training_master_log.xlsx"
-V23_CHECKPOINT_REVIEW_FILENAME = "spotmicro_v24_checkpoint_review.xlsx"
+V23_TRAIN_VERSION = "V26.1"
+V23_MASTER_LOG_FILENAME = "spotmicro_v26_training_master_log.xlsx"
+V23_CHECKPOINT_REVIEW_FILENAME = "spotmicro_v26_checkpoint_review.xlsx"
 
 
 def _load_env(path: str) -> dict:
@@ -1271,7 +1271,17 @@ def launch_training(log_path: str, fresh: bool = False) -> dict:
     write_log(f"Launching training (fresh={fresh}): {command}", log_path)
     launcher_path = _launch_training_command(command, "_launch_training.cmd")
     write_log(f"Training launcher: {launcher_path}", log_path)
-    time.sleep(5)
+    # Wait up to 30s for a new run directory to appear (Isaac Lab takes >5s to create it)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        time.sleep(3)
+        candidate = get_latest_run_dir()
+        if fresh:
+            if candidate and (not baseline_run or os.path.basename(candidate) > os.path.basename(baseline_run)):
+                break
+        else:
+            if candidate:
+                break
     active_run = get_latest_run_dir()
     if fresh:
         # fresh start: checkpoint는 아직 없음 — 구 run의 checkpoint를 절대 참조하지 않음
@@ -2618,7 +2628,7 @@ def _build_v23_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], lis
         "git_commit": _get_repo_git_commit(),
         "task_name": env_cfg.get("task_name") or TASK,
         "checkpoint_source": f"{agent_cfg.get('load_run') or 'fresh'}:{agent_cfg.get('load_checkpoint') or ''}" if agent_cfg.get("resume") else "fresh",
-        "note": "V24 dedicated style/logging workbook",
+        "note": "V26.1 dedicated style/logging workbook",
         "resume": agent_cfg.get("resume"),
         "seed": agent_cfg.get("seed") or env_cfg.get("seed"),
         "num_envs": env_cfg.get("scene", {}).get("num_envs") if isinstance(env_cfg.get("scene"), dict) else None,
