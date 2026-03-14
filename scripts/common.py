@@ -487,7 +487,11 @@ def send_text(text: str, log_path: str, parse_mode: str | None = None) -> None:
         payload_dict["parse_mode"] = parse_mode
     payload = urllib.parse.urlencode(payload_dict).encode("utf-8")
     request = urllib.request.Request(f"{TG_BASE_URL}/sendMessage", data=payload)
-    urllib.request.urlopen(request, timeout=15)
+    try:
+        urllib.request.urlopen(request, timeout=15)
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        write_log(f"[TG] Failed to send text: {err}", log_path)
+        return
     write_log(f"[TG] Sent text: {text[:80].replace(chr(10), ' ')}", log_path)
 
 
@@ -518,7 +522,11 @@ def send_video(video_path: str, caption: str, log_path: str) -> None:
             "video/mp4",
             file.read(),
         )
-    urllib.request.urlopen(request, timeout=180)
+    try:
+        urllib.request.urlopen(request, timeout=180)
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        write_log(f"[TG] Failed to send video {os.path.basename(video_path)}: {err}", log_path)
+        return
     write_log(f"[TG] Sent video: {os.path.basename(video_path)}", log_path)
 
 
@@ -534,7 +542,11 @@ def send_document(file_path: str, caption: str, log_path: str) -> None:
             "application/octet-stream",
             file.read(),
         )
-    urllib.request.urlopen(request, timeout=180)
+    try:
+        urllib.request.urlopen(request, timeout=180)
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        write_log(f"[TG] Failed to send document {os.path.basename(file_path)}: {err}", log_path)
+        return
     write_log(f"[TG] Sent document: {os.path.basename(file_path)}", log_path)
 
 
@@ -580,7 +592,12 @@ def prime_update_offset(log_path: str) -> int:
         _tg_offset = stored_offset
         write_log(f"Telegram offset restored: {stored_offset}", log_path)
         return stored_offset
-    updates = _telegram_get_updates(0, timeout_sec=0)
+    try:
+        updates = _telegram_get_updates(0, timeout_sec=0)
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        _tg_offset = stored_offset if stored_offset > 0 else 0
+        write_log(f"Telegram offset prime skipped due to network error: {err}", log_path)
+        return _tg_offset
     if updates is None:
         _tg_offset = 0
         _handle_telegram_poll_conflict(log_path)
@@ -600,7 +617,12 @@ def fetch_updates(timeout_sec: int = 0, log_path: str | None = None) -> list[dic
     global _tg_offset
     if _tg_offset is None:
         _tg_offset = load_telegram_offset()
-    updates = _telegram_get_updates(_tg_offset, timeout_sec=timeout_sec)
+    try:
+        updates = _telegram_get_updates(_tg_offset, timeout_sec=timeout_sec)
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        if log_path:
+            write_log(f"Telegram polling failed due to network error: {err}", log_path)
+        return []
     if updates is None:
         _handle_telegram_poll_conflict(log_path)
         return []
