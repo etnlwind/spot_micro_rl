@@ -350,11 +350,14 @@ def handle_command(command: str, checkpoint_iter: int | None = None) -> None:
         common.request_supervisor_shutdown("telegram-command")
         _send_notice("SUPERVISOR SHUTDOWN QUEUED", "Supervisor 종료 요청을 기록했습니다.", icon="👮")
         return
+    if command == "hb":
+        if not run_dir:
+            _send_notice("CONTEXT NOT FOUND", "active run을 찾지 못했습니다.", icon="⚠️")
+            return
+        _handle_hb_command(run_dir, iteration=checkpoint_iter)
+        return
     if not run_dir or not checkpoint:
         _send_notice("CONTEXT NOT FOUND", "active run/checkpoint를 찾지 못했습니다.", icon="⚠️")
-        return
-    if command == "hb":
-        _handle_hb_command(run_dir, iteration=checkpoint_iter)
         return
     if command == "report":
         _handle_report_command(run_dir, checkpoint, checkpoint_iter=checkpoint_iter)
