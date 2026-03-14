@@ -387,3 +387,256 @@ corr_b = corr_b * rl_gate
 | F4 | diagonal gate | binary vs soft gate |
 | F5 | A→B 전환 트리거 | iter 200 기준 명시 또는 다른 기준 |
 | F6 | abort 방식 | heartbeat 자동화 vs 수동 판단 |
+
+
+
+
+- - -
+Feedback from G V2
+좋습니다.
+개발담당 의견이 반영된 V25_PLAN.md는 방향이 맞고, 이전 G/CS 비교 결과를 꽤 잘 흡수한 통합안입니다.
+
+냉정한 총평
+
+채택 가능합니다.
+다만 그대로 바로 구현에 들어가기 전에 딱 3가지는 더 못 박아야 합니다.
+
+현재 문서는 이미 다음을 분명히 하고 있습니다.
+	•	V25를 단순 튜닝이 아니라 구조 재설계판으로 정의함.  ￼
+	•	문제를 sensor/export가 아니라 학습 objective failure로 규정함.  ￼
+	•	validity-first 우선순위와 G를 뼈대로, CS를 도구로 쓰는 구조를 명시함.  ￼
+	•	3층 validity 구조, V25-A/B/C 분기, fast-ramp, iter 100/200/300/600 운영 기준까지 포함함.  ￼
+
+이 정도면 문서 수준은 충분합니다.
+
+⸻
+
+잘된 점
+
+1. 문제 정의가 정확합니다
+
+문서가 가장 중요한 걸 정확히 잡았습니다.
+	•	V23은 rear-left 미사용 3족 exploit
+	•	V24는 diagnostics/gate는 성공했지만 행동 제어는 실패
+	•	따라서 V25는 objective를 바꾸는 구조 재설계여야 한다는 점
+
+이건 맞습니다. 이 부분이 흔들리면 또 시간 낭비합니다.  ￼
+
+2. G/CS 통합 방식이 적절합니다
+
+문서가 명시적으로
+	•	무엇을 바꿀 것인가 → G
+	•	어떻게 바로 구현할 것인가 → CS
+
+로 정리한 건 좋습니다. 이건 설계 철학과 구현 실행력을 동시에 잡는 방식입니다.  ￼
+
+3. V25-A / B / C 분리가 실무적으로 좋습니다
+
+특히
+	•	V25-A = 본선 일반 구조
+	•	V25-B = direct-fix 실험
+	•	V25-C = validity 성공 후 posture/style
+
+이 구조는 매우 좋습니다.
+이렇게 안 나누면 RL 특화 처방이 본선 구조를 오염시킬 수 있는데, 문서는 그걸 막고 있습니다.  ￼
+
+4. diagonal exploit path 차단을 본선에 넣은 점이 좋습니다
+
+이건 CS의 가장 강한 부분이었고, 문서가 V25-A 본선에 넣은 건 잘한 결정입니다.
+이번 실패는 “벌점이 약했다”뿐 아니라 잘못된 보상 경로가 열려 있었다는 문제도 있었기 때문입니다.  ￼
+
+⸻
+
+아직 보완이 필요한 3가지
+
+1. per_leg_contact_floor_penalty와 rear_left_contact_floor_penalty의 역할 충돌을 정리해야 합니다
+
+현재 문서는 Layer 1 후보로 per_leg_contact_floor_penalty를 두고, V25-B에서 rear_left_contact_floor_penalty를 추가합니다.  ￼
+
+이 구조 자체는 괜찮지만, 구현 들어가면 이런 문제가 생길 수 있습니다.
+	•	본선 일반 penalty와 RL 특화 penalty가 같은 현상을 이중 처벌
+	•	결과적으로 어떤 항목이 실제로 행동을 바꿨는지 attribution이 흐려짐
+
+권장
+
+구현 지시서에는 이렇게 못 박는 게 좋습니다.
+	•	V25-A: per_leg_contact_floor_penalty 또는 per_leg_propulsion_floor_penalty 중 하나를 주된 existence floor로 사용
+	•	V25-B: 그 위에 rear_left_contact_floor_penalty를 direct-fix ablation으로 추가
+	•	둘 다 동시에 full-weight로 켜지 않음
+
+즉 A는 일반 구조, B는 RL 직접 처방 비교 실험으로 명확히 분리해야 합니다.
+
+⸻
+
+2. iter 300399와 400600의 차이를 더 명확히 해야 합니다
+
+문서는 현재:
+	•	300~399: strong fail
+	•	400~600: abort 후보
+	•	600+: 즉시 중단
+
+으로 되어 있습니다.  ￼
+
+이건 괜찮지만, 실무에서는 누가 언제 stop 버튼을 누르는지가 더 분명해야 합니다.
+
+권장
+
+운영 문구를 이렇게 바꾸는 것이 좋습니다.
+	•	iter 300~399: collapse reason 지속 시 “기본 중단 권고”
+	•	iter 400~599: collapse reason 지속 시 “중단 기본값, 특별 사유 없으면 계속 금지”
+	•	iter 600+: 자동 중단 또는 즉시 수동 중단
+
+지금 문구는 아직 “조금 더 볼까?”의 여지를 남깁니다.
+이번 프로젝트는 그 여지를 줄여야 합니다.
+
+⸻
+
+3. 최상위 리포트 경고 우선순위를 코드에도 강제해야 합니다
+
+문서는 analysis report 최상위 경고가 생존률이 아니라 limb validity fail이어야 한다고 했습니다. 이건 매우 맞습니다.  ￼
+
+하지만 이건 문구 수준이 아니라 리포트 생성 우선순위 로직으로 강제해야 합니다.
+
+권장
+
+개발 지시서에 아래를 추가하세요.
+	•	rear_left_contact_collapse(...) 또는 single-limb collapse가 있으면
+다른 모든 요약보다 먼저 최상단 CRITICAL로 출력
+	•	survival/fall/reward는 그 아래 secondary summary로 내림
+
+이걸 안 하면 또 보고서가 “reward 좋음 / survival 좋음”을 먼저 보여줘서 사람 판단을 흐립니다.
+
+⸻
+
+최종 판정
+
+판정
+
+수정 후 채택입니다.
+
+즉 지금 문서는 폐기할 수준이 아니라,
+이제 바로 구현 가능한 수준까지 왔습니다.
+다만 아래 3가지를 추가로 못 박고 들어가야 합니다.
+	1.	A와 B의 penalty 역할 분리
+	2.	300/400/600 운영 의사결정 문구 강화
+	3.	report 최상위 경고를 limb collapse 우선으로 코드 강제
+
+⸻
+
+개발/훈련 AI에게 바로 줄 보완 지시문
+
+아래처럼 보내면 됩니다.
+
+⸻
+
+현재 V25_PLAN.md 방향에는 동의합니다.
+다만 구현 전에 아래 3가지를 더 명확히 고정하고 싶습니다.
+	1.	V25-A / V25-B penalty 역할 분리
+	•	V25-A는 일반 구조 검증이 목적이므로 existence floor는 일반화된 항목(per_leg_contact_floor_penalty 또는 per_leg_propulsion_floor_penalty) 중심으로 갑니다.
+	•	V25-B는 direct-fix 실험이므로 rear_left_contact_floor_penalty를 추가합니다.
+	•	A와 B에서 일반 penalty와 RL 특화 penalty가 동시에 full-strength로 중첩되지 않도록 분리해주세요.
+	2.	운영 중단 기준 문구 강화
+	•	iter 300~399: collapse reason 지속 시 기본 중단 권고
+	•	iter 400~599: 중단 기본값, 특별 사유 없으면 계속 금지
+	•	iter 600+: 즉시 중단
+현재 문서의 strong fail / abort 후보를 실제 stop decision 기준으로 더 명확히 반영해주세요.
+	3.	리포트 최상위 경고 우선순위 강제
+	•	rear_left_contact_collapse(...) 또는 single-limb collapse가 있으면 report 최상단 CRITICAL로 항상 먼저 출력
+	•	reward / survival / ep_len은 그 아래 secondary summary로 내려주세요
+
+이 3가지를 반영하면 V25_PLAN.md는 바로 구현 기준 문서로 채택하겠습니다.
+
+⸻
+
+한 줄로 정리하면,
+이번 개발담당 의견 반영본은 방향이 맞고 채택 가능하지만, A/B penalty 역할 분리와 중단 기준, 리포트 경고 우선순위를 더 강하게 못 박아야 합니다.
+
+- - -
+
+## 개발담당 재검토 의견 — G V2 피드백에 대한 반론
+
+> 작성: Claude Sonnet 4.6 / 2026-03-14
+> 목적: G V2 피드백 3가지에 동의하는 부분과 반론을 명시. 구현 전 최종 조율 근거로 사용.
+
+---
+
+### R1. G2-F2 반론 — iter 400+ 자동 stop은 조건 없이 적용하면 너무 이름
+
+G V2는 iter 400~599를 "중단 기본값, 특별 사유 없으면 계속 금지"로 강화하고 자동 stop을 권장했다.
+
+**반론**: V25는 V24와 달리 패널티를 iter 0부터 적용한다. 이 경우 iter 300~400 구간에서 `contact_ratio_rl`이 0.03 → 0.08로 **상승 중인** run도 존재할 수 있다. 이 상태에서 정적 threshold만으로 자동 stop하면 회복 가능했던 run을 자르는 결과가 된다.
+
+V24에서 400 이후 회복 가능성이 0에 가까웠던 것은 패널티 시작이 너무 늦었기 때문이다. V25는 전제가 다르므로 자동 stop 조건에 **추세 체크**가 반드시 포함되어야 한다.
+
+**수정 제안**:
+
+| iter | 조건 | 동작 |
+|------|------|------|
+| 300~399 | collapse reason 지속 | Telegram 중단 권고 알림 — 사람 판단 |
+| 400~599 | `contact_ratio_rl < 0.05` AND 최근 5 heartbeat 상승 추세 없음 | heartbeat 자동 stop |
+| 400~599 | `contact_ratio_rl < 0.05` AND 상승 추세 있음 | 중단 보류, 100 iter 후 재판정 |
+| 600+ | collapse 지속 | 무조건 즉시 stop |
+
+---
+
+### R2. G2-F1 반론 — `per_leg_contact_floor_penalty`와 `rear_left_contact_floor_penalty`의 기능 차이가 실제로 거의 없음
+
+G V2는 V25-A를 "일반 existence floor", V25-B를 "RL 특화 direct-fix"로 역할 분리했다.
+
+**반론**: `per_leg_contact_floor_penalty`를 per-leg으로 구현하면, RL만 붕괴된 상황에서 다른 세 다리는 contact_ratio가 정상이라 gap≈0이다. 결국 패널티는 RL에만 집중되며, `rear_left_contact_floor_penalty`와 **RL에 주는 gradient 신호가 사실상 동일**하다.
+
+즉 A/B를 "일반 vs 특화"로 나눠도 학습 관점에서 실질적 차이가 없을 수 있다. 이렇게 되면 A가 실패한 후 B를 돌리는 것은 시간 낭비다.
+
+**수정 제안**: V25-B의 역할을 재정의한다.
+
+- **V25-A**: `per_leg_contact_floor_penalty` (일반) + diagonal coupling soft gate + validity fast-ramp. 충분히 강한 weight로 시작.
+- **V25-B**: A와의 실질적 구조 차이가 있는 변형으로 재정의. 예:
+  - diagonal coupling gate threshold 변경 (0.20 → 0.10으로 강화)
+  - validity ramp 완전 제거 (iter 0부터 full-weight)
+  - `restart-on-collapse` 기준 완화 (iter 300 → iter 200)
+
+A와 B의 차이가 "같은 penalty를 일반 vs 특화로 나눈 것"이 아니라 **설계 가설이 다른 비교 실험**이 되어야 한다.
+
+---
+
+### R3. G2-F3 부분 동의 및 보완 — CRITICAL 알림의 observe 구간 오발 가능성
+
+G V2의 "limb collapse 시 report 최상단 CRITICAL 강제" 방향은 맞다.
+
+**단 한 가지 문제**: iter 0~99 observe 구간에서는 패널티도 없고 contact가 형성되기 전이다. 이 구간에서도 `contact_ratio_rl < threshold`이면 CRITICAL이 발생하여 false alarm이 반복된다.
+
+**수정 제안**: CRITICAL 출력을 iter/stage로 gating한다.
+
+| iter | collapse 감지 시 출력 |
+|------|---------------------|
+| 0~99 (observe) | 기록만, 알림 없음 |
+| 100~199 (early_warning) | `[WARNING] limb collapse 감지` — heartbeat 상단 |
+| 200~299 (provisional_fail) | `[CRITICAL] single-limb collapse` — 최상단, 굵게 |
+| 300+ (strong_fail / enforce) | `[CRITICAL] collapse 지속 — 중단 검토` + 자동 판정 로직 연동 |
+
+이 gating 없이 무조건 CRITICAL을 출력하면 초반 warming-up 구간에서 노이즈가 쌓여 실제 중요한 경고가 묻힌다.
+
+---
+
+### R4. 미해결 항목 — V25-A 실패 시 V25-B 전환 트리거 (G V2 미답변)
+
+G V2 피드백에서 이 항목은 다루어지지 않았다. 하지만 구현에서 반드시 결정이 필요한 사항이다.
+
+V25-A를 먼저 실행하고 실패하면 V25-B로 전환하는 구조라면, **언제 A를 포기하는지 기준**이 없으면 또 "조금 더 지켜보자"가 반복된다.
+
+**제안 기준**:
+
+> iter 200 시점에서 `contact_ratio_rl < 0.05` AND `swing_time_rl > 0.95` → V25-A 즉시 중단 → V25-B로 재시작
+
+이 기준을 heartbeat 자동 판정에 포함시켜야 한다.
+
+---
+
+### 재검토 요약
+
+| # | G V2 제안 | 동의 여부 | 수정 내용 |
+|---|----------|----------|----------|
+| G2-F1 | A/B penalty 역할 분리 | 부분 동의 | per-leg 구현 시 기능 차이 없음 → B를 구조적 차이 실험으로 재정의 |
+| G2-F2 | 400+ 자동 stop | 부분 동의 | 추세 체크 조건 추가 필요 |
+| G2-F3 | CRITICAL 최상단 강제 | 동의 | iter 100+ 이후부터만 적용, stage별 gating |
+| R4 | (미답변) | — | A→B 전환 트리거 iter 200 기준 명시 필요 |
