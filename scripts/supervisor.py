@@ -510,12 +510,12 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
         common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
         result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
         run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
-        checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "fresh (iter 0)"
         if result["mode"] == "already-running":
-            _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nsource: cli", icon="🚀")
-            _print_local(f"training already running\nrun: {run_name}\ncheckpoint: {checkpoint_name}")
+            existing_ckpt = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A"
+            _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {existing_ckpt}\nsource: cli", icon="🚀")
+            _print_local(f"training already running\nrun: {run_name}\ncheckpoint: {existing_ckpt}")
         else:
-            _send_notice("TRAINING START (FRESH)", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nsource: cli", icon="🚀")
+            _send_notice("TRAINING START (FRESH)", f"run: {run_name}\ncheckpoint: iter 0 (fresh)\nsource: cli", icon="🚀")
             _print_local(f"training started fresh\nrun: {run_name}")
         return 0
     if action == "resume":
@@ -626,9 +626,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
         common.SUPERVISOR_LOG,
         parse_mode="HTML",
     )
-    pending_confirm: dict | None = None  # {"action": "fresh_start", "checkpoint_name": str, "expires_at": float}
-    _CONFIRM_YES = {"y", "yes", "ok", "confirm", "확인", "예"}
-    _CONFIRM_NO = {"n", "no", "cancel", "취소", "아니오"}
+    pending_confirm: dict | None = None  # {"action": "fresh_start", "ckpt_iter": int, "ckpt_name": str, "expires_at": float}
     _CONFIRM_TIMEOUT_SEC = 60.0
     try:
         while True:
@@ -649,35 +647,35 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                         )
                         continue
 
-                    # pending confirmation 처리
+                    # pending confirmation 처리 — y/Y 만 확인, 나머지는 모두 취소
                     if pending_confirm:
                         if time.time() > pending_confirm.get("expires_at", 0):
                             pending_confirm = None
                             _send_notice("START CANCELLED", "확인 시간이 초과되었습니다 (60초).", icon="⛔")
                             # fall through to normal command processing
+                        elif text.strip() in {"y", "Y"}:
+                            action = pending_confirm["action"]
+                            pending_confirm = None
+                            common.write_log(f"[Confirm] action={action} confirmed by user", common.SUPERVISOR_LOG)
+                            if action == "fresh_start":
+                                result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
+                                run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
+                                if result["mode"] == "already-running":
+                                    _send_notice("TRAINING ACTIVE", f"run: {run_name}", icon="🚀")
+                                else:
+                                    common.send_text(
+                                        f"🚀 <b>TRAINING START (FRESH)</b>\n"
+                                        f"<i>run: {run_name}</i>\n"
+                                        f"<i>iter 0부터 시작합니다.</i>",
+                                        common.SUPERVISOR_LOG,
+                                        parse_mode="HTML",
+                                    )
+                            continue
                         else:
-                            normalized = text.strip().lower().lstrip("/")
-                            if normalized in _CONFIRM_YES:
-                                action = pending_confirm["action"]
-                                pending_confirm = None
-                                common.write_log(f"[Confirm] action={action} confirmed by user", common.SUPERVISOR_LOG)
-                                if action == "fresh_start":
-                                    result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
-                                    run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
-                                    if result["mode"] == "already-running":
-                                        _send_notice("TRAINING ACTIVE", f"run: {run_name}", icon="🚀")
-                                    else:
-                                        _send_notice("TRAINING START (FRESH)", f"run: {run_name}\ncheckpoint: fresh (iter 0)", icon="🚀")
-                                continue
-                            elif normalized in _CONFIRM_NO:
-                                pending_confirm = None
-                                _send_notice("START CANCELLED", "취소되었습니다.", icon="⛔")
-                                continue
-                            else:
-                                # 다른 명령 수신 → 확인 취소 후 해당 명령 처리
-                                pending_confirm = None
-                                _send_notice("START CANCELLED", "다른 명령이 수신되어 취소되었습니다.", icon="⛔")
-                                # fall through to normal command processing
+                            # y/Y 외 모든 입력 → 취소
+                            pending_confirm = None
+                            _send_notice("START CANCELLED", "취소되었습니다.", icon="⛔")
+                            continue
 
                     command, arg_text = _parse_command_request(text)
                     if command not in common.command_variants():
@@ -691,24 +689,32 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                         continue
                     checkpoint_iter = _parse_checkpoint_iter(arg_text)
 
-                    # /start: checkpoint 존재 시 확인 요청
+                    # /start: checkpoint 존재 시 확인 요청 (파일 존재 여부와 무관하게 state.json 기록 기준)
                     if command == "start":
-                        existing_checkpoint = common.resolve_active_checkpoint(common.resolve_active_run_dir())
+                        state_ckpt = common.load_state().get("active_checkpoint") or ""
+                        existing_checkpoint = common.resolve_active_checkpoint(common.resolve_active_run_dir()) or state_ckpt
                         if existing_checkpoint:
                             ckpt_name = os.path.basename(existing_checkpoint)
-                            pending_confirm = {"action": "fresh_start", "checkpoint_name": ckpt_name, "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC}
+                            ckpt_iter = common.get_checkpoint_iter(existing_checkpoint)
+                            pending_confirm = {"action": "fresh_start", "ckpt_iter": ckpt_iter, "ckpt_name": ckpt_name, "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC}
                             common.send_text(
                                 f"⚠️ <b>확인 필요 — FRESH START</b>\n"
-                                f"<i>마지막 checkpoint: {ckpt_name}</i>\n\n"
-                                f"이 checkpoint를 버리고 <b>iter 0부터 새로 시작</b>합니다.\n"
-                                f"Y 또는 확인을 입력하세요. (취소: N)",
+                                f"<i>현재 진행: iter {ckpt_iter:,} ({ckpt_name})</i>\n\n"
+                                f"이 진행상황을 초기화하고 <b>iter 0부터 새로 시작</b>합니다.\n"
+                                f"<i>계속하려면 Y를 입력하세요. (60초 내, 다른 입력은 취소)</i>",
                                 common.SUPERVISOR_LOG,
                                 parse_mode="HTML",
                             )
                         else:
                             result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
                             run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
-                            _send_notice("TRAINING START (FRESH)", f"run: {run_name}\ncheckpoint: fresh (iter 0)", icon="🚀")
+                            common.send_text(
+                                f"🚀 <b>TRAINING START (FRESH)</b>\n"
+                                f"<i>run: {run_name}</i>\n"
+                                f"<i>iter 0부터 시작합니다.</i>",
+                                common.SUPERVISOR_LOG,
+                                parse_mode="HTML",
+                            )
                         continue
 
                     common.send_text(_build_command_ack(command, checkpoint_iter=checkpoint_iter), common.SUPERVISOR_LOG, parse_mode="HTML")

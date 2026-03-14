@@ -1273,10 +1273,13 @@ def launch_training(log_path: str, fresh: bool = False) -> dict:
     write_log(f"Training launcher: {launcher_path}", log_path)
     time.sleep(5)
     active_run = get_latest_run_dir()
-    if not fresh:
+    if fresh:
+        # fresh start: checkpoint는 아직 없음 — 구 run의 checkpoint를 절대 참조하지 않음
+        active_checkpoint = None
+    else:
         if baseline_run and active_run and os.path.basename(active_run) <= os.path.basename(baseline_run):
             active_run = resume_run or active_run
-    active_checkpoint = resolve_active_checkpoint(active_run)
+        active_checkpoint = resolve_active_checkpoint(active_run)
     update_state(
         mode="training",
         active_run=os.path.basename(active_run) if active_run else "",
