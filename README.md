@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V20 학습 커리큘럼 + V22 운영/아티팩트 체계 + 단순화된 운영 스크립트, V23 준비 중
+**현재 상태**: V24 Limb Validity Gating 구현 완료, 첫 run 진행 중
 
 ### 기술 스택
 
@@ -50,10 +50,12 @@ spot_micro_rl/
 │   ├── rsl_rl/
 │   │   ├── train.py                    # 훈련 entry point
 │   │   └── play.py                     # 평가/비디오 entry point (카메라 preset, contact CSV 지원)
-│   ├── common.py                       # Telegram, process, state, report/video helper
+│   ├── common.py                       # Telegram, process, state, report/video helper, limb validity 분석
 │   ├── supervisor.py                   # Telegram command loop
-│   ├── heartbeat.py                    # read-only KPI heartbeat loop
-│   ├── milestone_monitor.py            # V20 ramp milestone 자동 스냅샷/리포트
+│   ├── heartbeat.py                    # KPI heartbeat (100 iter) + 자동 영상 리포트 (1000 iter)
+│   ├── utils/
+│   │   ├── evaluate_limb_gate_checkpoint.py  # checkpoint 단위 limb validity 수동 평가
+│   │   └── analyze_training.py         # limb validity 열 추출, collapse 감지, workbook 기록
 │   ├── collect_checkpoint_diagnostics.py    # foot/toe/aggregate contact 진단 패키지
 │   ├── make_multiview_screenshot_pack.py    # 멀티뷰 스크린샷 ZIP 생성
 │   ├── analyze_v19.py                  # V19 훈련 분석 스크립트
@@ -66,7 +68,8 @@ spot_micro_rl/
 │   ├── V20_ANALYSIS.md                 # V20 분석 리포트
 │   ├── V21_ANALYSIS.md                 # V21 운영/관측 체계 리포트
 │   ├── V22_ANALYSIS.md                 # V22 멀티뷰/워크북/ZIP 아티팩트 리포트
-│   ├── V23_PLAN.md                     # V23 준비 문서
+│   ├── V23_PLAN.md                     # V23 posture-first refinement 계획
+│   ├── V24_PLAN.md                     # V24 limb validity gating 설계 및 분석
 │   └── V01-V08_HISTORY.md ~ V18_HISTORY.md  # 버전별 히스토리
 ├── assets/robots/spot_micro/           # SpotMicro URDF
 ├── logs/rsl_rl/spot_micro_flat/        # 훈련 로그 + 체크포인트
@@ -180,8 +183,8 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
 # TensorBoard
 python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat_current --port=6006
 
-# Heartbeat (read-only, gait-quality-first KPI를 100 iter마다 Telegram 리포트)
-python scripts/heartbeat.py --iter_step 100 --poll 30
+# Heartbeat (KPI를 100 iter마다 Telegram 리포트 + 1000 iter마다 자동 영상 리포트)
+python scripts/heartbeat.py --iter_step 100 --video_iter_step 1000 --poll 30
 
 # Supervisor (Telegram command loop)
 python scripts/supervisor.py
@@ -189,7 +192,10 @@ python scripts/supervisor.py
 
 ### Heartbeat / Supervisor 역할 분담
 
-- `heartbeat.py`: TensorBoard 기반 상태 감시와 heartbeat 전송만 담당하는 read-only 루프. `standing_height`, `forward_velocity`, `diagonal_coupling`, `trot_gait`, `rear_joint_velocity`, `foot_clearance`를 우선 KPI로 판정
+- `heartbeat.py`: TensorBoard 기반 상태 감시. 두 가지 주기로 동작:
+  - **텍스트 heartbeat** (100 iter): `standing_height`, `forward_velocity`, `diagonal_coupling`, `trot_gait`, `rear_joint_velocity`, `foot_clearance` 등 KPI를 Telegram 리포트
+  - **자동 영상 리포트** (1000 iter): 훈련 정지 → 해당 milestone checkpoint(model_1000.pt 등)로 영상 녹화 → Telegram 전송 → 훈련 재개. 누락된 milestone이 복수 개이면 순차 소급 보완.
+  - 환경변수 `VIDEO_REPORT_ITER_STEP=1000`으로 주기 변경 가능
 - `supervisor.py`: Telegram 명령 처리 담당. `start`, `stop`, `status`, `report`, `front`, `rear`, `top`, `side`, `help` 지원
 - active 운영 원칙:
   - `start` / `stop`만 훈련 상태를 바꿈
@@ -205,14 +211,11 @@ python scripts/supervisor.py
 
 ### 현재 운영 기준
 
-- 학습 버전: `V20`
-- 운영/아티팩트 버전: `V22`
-- 다음 준비 버전: `V23`
+- 학습 버전: `V24` (Limb Validity Gating)
 - active 운영 스크립트: `scripts/supervisor.py`, `scripts/heartbeat.py`, `scripts/common.py`
 - 접촉 해석 기본값: `toe_link`
-- 참고 문서: `plan/V21_ANALYSIS.md`
-- 참고 문서: `plan/V22_ANALYSIS.md`
-- 준비 문서: `plan/V23_PLAN.md`
+- 참고 문서: `plan/V24_PLAN.md`
+- 이전 버전 문서: `plan/V23_PLAN.md`, `plan/V22_ANALYSIS.md`, `plan/V21_ANALYSIS.md`
 
 ---
 
@@ -278,9 +281,11 @@ V21 이후 운영 해석 원칙:
 | V17.1 | 03-04~03-05 | Action rate + gait cycle + stride | ❌ 정지 함정 (35개 리워드 과부하) |
 | V18~V18.3 | 03-06~03-07 | 3-Phase 커리큘럼 (hard switch) | Phase 2 데드락 → V19로 개선 |
 | V19 | 03-08 | Phase 가중치 튜닝, hard switch | ❌ critic shock (value_loss 1000) |
-| **V20** | **03-08~** | **Soft-ramp 선형 보간 커리큘럼** | 🔄 학습 운영 중 |
-| **V21** | **03-10~** | **gait-quality-first 모니터링, iter cadence supervisor, toe contact 진단** | ✅ 운영 반영 |
-| **V22** | **03-11~** | **멀티뷰 비디오 패키지, heartbeat workbook, ZIP artifact, top/front view 정리** | ✅ 검증 완료 |
+| **V20** | **03-08~** | **Soft-ramp 선형 보간 커리큘럼** | ✅ 완료 |
+| **V21** | **03-10~** | **gait-quality-first 모니터링, iter cadence supervisor, toe contact 진단** | ✅ 완료 |
+| **V22** | **03-11~** | **멀티뷰 비디오 패키지, heartbeat workbook, ZIP artifact, top/front view 정리** | ✅ 완료 |
+| **V23** | **03-12~** | **posture-first refinement, rear joint velocity 강화** | ✅ 완료 |
+| **V24** | **03-13~** | **Limb Validity Gating: rear-left collapse 차단, 좌우 비대칭 페널티, 자동 영상 리포트** | 🔄 운영 중 |
 
 ### 핵심 교훈
 
@@ -309,6 +314,7 @@ python scripts/analyze_v20.py
 - `plan/V21_ANALYSIS.md`
 - `plan/V22_ANALYSIS.md`
 - `plan/V23_PLAN.md`
+- `plan/V24_PLAN.md`
 
 ---
 
