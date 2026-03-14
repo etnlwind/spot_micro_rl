@@ -1251,20 +1251,31 @@ def build_train_command(resume_run_dir: str | None = None, checkpoint_path: str 
     return _wrap_conda_command(" && ".join(parts[:2]) + " && " + " ".join(parts[2:]), force_activate=True)
 
 
-def launch_training(log_path: str) -> dict:
+def launch_training(log_path: str, fresh: bool = False) -> dict:
+    """훈련 시작.
+
+    fresh=True: state의 checkpoint를 무시하고 iter 0부터 새 run으로 시작.
+    fresh=False: 기존 active_checkpoint에서 재개 (이전 동작 유지).
+    """
     if is_training_running():
         return {"mode": "already-running", "run_dir": resolve_active_run_dir(), "checkpoint": resolve_active_checkpoint()}
-    baseline_run = get_latest_run_dir()
-    resume_run = resolve_active_run_dir()
-    checkpoint = resolve_active_checkpoint(resume_run)
-    command = build_train_command(resume_run, checkpoint) if checkpoint else build_train_command()
-    write_log(f"Launching training: {command}", log_path)
+    if fresh:
+        update_state(active_run="", active_checkpoint="", last_command="start-fresh")
+        baseline_run = get_latest_run_dir()
+        command = build_train_command()
+    else:
+        baseline_run = get_latest_run_dir()
+        resume_run = resolve_active_run_dir()
+        checkpoint = resolve_active_checkpoint(resume_run)
+        command = build_train_command(resume_run, checkpoint) if checkpoint else build_train_command()
+    write_log(f"Launching training (fresh={fresh}): {command}", log_path)
     launcher_path = _launch_training_command(command, "_launch_training.cmd")
     write_log(f"Training launcher: {launcher_path}", log_path)
     time.sleep(5)
     active_run = get_latest_run_dir()
-    if baseline_run and active_run and os.path.basename(active_run) <= os.path.basename(baseline_run):
-        active_run = resume_run or active_run
+    if not fresh:
+        if baseline_run and active_run and os.path.basename(active_run) <= os.path.basename(baseline_run):
+            active_run = resume_run or active_run
     active_checkpoint = resolve_active_checkpoint(active_run)
     update_state(
         mode="training",
@@ -1274,7 +1285,7 @@ def launch_training(log_path: str) -> dict:
         last_report_checkpoint="",
         last_videos={},
         last_video_checkpoint="",
-        last_command="start",
+        last_command="start-fresh" if fresh else "start",
         last_error="",
     )
     return {"mode": "started", "run_dir": active_run, "checkpoint": active_checkpoint}
@@ -4326,13 +4337,14 @@ def resolve_context() -> tuple[str | None, str | None]:
 
 
 def command_variants() -> set[str]:
-    return {"start", "stop", "status", "selfcheck", "report", "front", "rear", "top", "side", "help", "shutdown"}
+    return {"start", "resume", "stop", "status", "selfcheck", "report", "front", "rear", "top", "side", "help", "shutdown"}
 
 
 def help_text() -> str:
     return (
         "Command Menu\n"
-        "/start : 훈련 시작 또는 latest checkpoint 재개\n"
+        "/start : iter 0부터 새로 시작 (checkpoint 있으면 확인 요청)\n"
+        "/resume : 마지막 checkpoint에서 재개\n"
         "/stop : 현재 훈련만 중단\n"
         "/status : 현재 상태 조회\n"
         "/selfcheck : run/checkpoint/context 해석 우선순위 점검\n"
