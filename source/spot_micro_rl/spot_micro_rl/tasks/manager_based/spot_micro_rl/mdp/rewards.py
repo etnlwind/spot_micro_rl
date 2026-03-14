@@ -375,6 +375,26 @@ def rear_left_right_usage_diff_penalty(
     return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
 
 
+def rear_left_contact_floor_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    floor: float = 0.30,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V25: rear-left contact_ratio가 floor 미달 시 직접 패널티.
+
+    V24 limb_usage_min_penalty(min_usage proxy)와 달리, rear-left에만 직접 적용.
+    ramp 없이 iter 0부터 full weight로 작동.
+    gap = max(0, floor - contact_ratio_rl) → 접지할수록 패널티 감소.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    rl_contact = _contact_ratio(contact_sensor, sensor_cfg.body_ids, contact_threshold)  # (N, 1)
+    gap = torch.clamp(float(floor) - rl_contact[:, 0], min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
 def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Penalize joint position deviation from a target value."""
     # extract the used quantities (to enable type-hinting)
@@ -1234,6 +1254,9 @@ def diagonal_joint_coupling_reward(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     vel_deadzone: float = 0.1,
     min_vel: float = 0.05,
+    rl_participation_sensor_cfg: SceneEntityCfg | None = None,
+    rl_contact_threshold: float = 1.0,
+    rl_min_contact: float = 0.15,
 ) -> torch.Tensor:
     """대각선 쌍 관절 커플링 보상: trot의 핵심 구조를 직접 강제.
 
@@ -1271,6 +1294,15 @@ def diagonal_joint_coupling_reward(
     # 양의 상관만 보상 (같은 방향), 음의 상관이나 0은 보상 없음
     pair_a_reward = torch.clamp(pair_a_corr, 0.0, 1.0).mean(dim=1)
     pair_b_reward = torch.clamp(pair_b_corr, 0.0, 1.0).mean(dim=1)
+
+    # V25: RL 참여 soft gate — RL이 접지하지 않으면 pair_b(FR↔RL) 보상 차감
+    # 3다리 보행으로 diagonal_coupling 보상을 얻는 경로를 차단
+    if rl_participation_sensor_cfg is not None:
+        contact_sensor: ContactSensor = env.scene.sensors[rl_participation_sensor_cfg.name]
+        rl_contact = _contact_ratio(contact_sensor, rl_participation_sensor_cfg.body_ids, rl_contact_threshold)[:, 0]
+        rl_gate = torch.clamp(rl_contact / max(float(rl_min_contact), 1.0e-6), 0.0, 1.0)
+        pair_b_reward = pair_b_reward * rl_gate
+
     reward = (pair_a_reward + pair_b_reward) / 2.0
 
     # 전진 게이팅
@@ -1723,8 +1755,9 @@ _LOG_WEIGHT_TERMS = [
     "trot_gait",
     "joint_vel_l2",
     "dof_acc_l2",
-    "limb_usage_min_penalty",
-    "rear_left_right_usage_diff_penalty",
+    "rear_left_contact_floor",   # V25
+    "limb_usage_min_penalty",    # V24 (없으면 skip)
+    "rear_left_right_usage_diff_penalty",  # V24 (없으면 skip)
 ]
 _LOG_RAW_GAIT_TERMS = ["forward_velocity", "trot_gait", "diagonal_coupling", "leg_lift", "foot_clearance"]
 _LOG_RAW_QUALITY_TERMS = ["joint_vel_l2", "dof_acc_l2", "action_rate_l2"]

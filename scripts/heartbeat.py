@@ -12,6 +12,22 @@ else:
     import common
 
 
+# V25: restart-on-collapse 설정
+_COLLAPSE_CHECK_ITER_MIN = 100   # iter 100 이전은 warming-up — 감지 안 함
+_COLLAPSE_CHECK_ITER_MAX = 300   # iter 300 이후는 이미 늦음 — 재시작 대신 알림만
+_COLLAPSE_CONTACT_THRESHOLD = 0.05
+_COLLAPSE_SWING_THRESHOLD = 0.95
+_COLLAPSE_CONSECUTIVE_REQUIRED = 3  # 연속 N회 감지 시 실제 collapse로 판정
+
+
+def _get_collapse_metrics(data: dict) -> tuple[float | None, float | None]:
+    """tfevents data에서 최신 contact_ratio_rl, swing_time_rl 반환."""
+    def _latest(tag):
+        vals = data.get(f"Episode_Reward/{tag}", [])
+        return float(vals[-1][1]) if vals else None
+    return _latest("contact_ratio_rl"), _latest("swing_time_rl")
+
+
 def _restore_last_milestone(run_dir: str, iter_step: int) -> int:
     records = common.load_report_history(run_dir)
     last_milestone = 0
@@ -142,6 +158,8 @@ def main() -> None:
     last_sent_milestone = 0
     last_video_milestone = 0
     last_run_name = ""
+    collapse_consecutive_count = 0
+    collapse_restart_done = False  # 현재 run에서 이미 restart했으면 중복 방지
     try:
         while True:
             try:
@@ -168,6 +186,41 @@ def main() -> None:
                     if resume_iter > 0:
                         skip_up_to = (resume_iter // args.video_iter_step) * args.video_iter_step
                         last_video_milestone = max(last_video_milestone, skip_up_to)
+                    collapse_consecutive_count = 0
+                    collapse_restart_done = False
+
+                # V25: restart-on-collapse (iter 100~300 구간)
+                if (not collapse_restart_done
+                        and _COLLAPSE_CHECK_ITER_MIN <= current_iter <= _COLLAPSE_CHECK_ITER_MAX):
+                    rl_contact, rl_swing = _get_collapse_metrics(data)
+                    if (rl_contact is not None and rl_swing is not None
+                            and rl_contact < _COLLAPSE_CONTACT_THRESHOLD
+                            and rl_swing > _COLLAPSE_SWING_THRESHOLD):
+                        collapse_consecutive_count += 1
+                        common.write_log(
+                            f"[Collapse] iter={current_iter} contact_rl={rl_contact:.4f} swing_rl={rl_swing:.4f}"
+                            f" consecutive={collapse_consecutive_count}/{_COLLAPSE_CONSECUTIVE_REQUIRED}",
+                            common.HEARTBEAT_LOG,
+                        )
+                        if collapse_consecutive_count >= _COLLAPSE_CONSECUTIVE_REQUIRED:
+                            collapse_restart_done = True
+                            common.write_log(
+                                f"[Collapse] RESTART triggered @ iter {current_iter} — rear-left collapse confirmed",
+                                common.HEARTBEAT_LOG,
+                            )
+                            common.stop_training(common.HEARTBEAT_LOG)
+                            common.send_text(
+                                f"🚨 <b>COLLAPSE RESTART — iter {current_iter:,}</b>\n"
+                                f"<i>contact_ratio_rl={rl_contact:.4f}, swing_time_rl={rl_swing:.4f}</i>\n"
+                                f"<i>rear-left collapse 확정 ({_COLLAPSE_CONSECUTIVE_REQUIRED}회 연속) — 훈련 재시작</i>",
+                                common.HEARTBEAT_LOG,
+                                parse_mode="HTML",
+                            )
+                            common.launch_training(common.HEARTBEAT_LOG)
+                            time.sleep(args.poll)
+                            continue
+                    else:
+                        collapse_consecutive_count = 0
 
                 # 누락된 video milestone 목록 수집 (복수 대응)
                 missed = _collect_missed_milestones(last_video_milestone, current_iter, args.video_iter_step)

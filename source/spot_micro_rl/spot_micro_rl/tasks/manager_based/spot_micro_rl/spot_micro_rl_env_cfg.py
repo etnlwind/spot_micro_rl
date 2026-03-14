@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V24"
+TRAIN_VERSION = "V25"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -153,12 +153,12 @@ class SpotMicroRewardCurriculumCfg:
             "ramp1_end": 3000,
             "ramp2_start": 5500,
             "ramp2_end": 8000,
-            "validity_ramp_start": 200,
-            "validity_ramp_end": 600,
-            "validity_limb_usage_initial": -3.0,
-            "validity_limb_usage_final": -12.0,
-            "validity_rear_diff_initial": -2.0,
-            "validity_rear_diff_final": -8.0,
+            "validity_ramp_start": 0,   # V25: 해당 term 없음 — no-op
+            "validity_ramp_end": 1,
+            "validity_limb_usage_initial": 0.0,
+            "validity_limb_usage_final": 0.0,
+            "validity_rear_diff_initial": 0.0,
+            "validity_rear_diff_final": 0.0,
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -548,33 +548,17 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V24: 특정 다리 미사용 exploit를 줄이기 위한 최소 limb usage 페널티
-        self.rewards.limb_usage_min_penalty = RewTerm(
-            func=custom_mdp.limb_usage_min_penalty,
-            weight=-12.0,
+        # V25: rear-left contact_ratio 직접 floor 패널티 (ramp 없음 — iter 0부터 full weight)
+        # V24의 limb_usage_min_penalty(-12, proxy 방식) 실패 교훈: 직접 타겟, 강한 weight
+        self.rewards.rear_left_contact_floor = RewTerm(
+            func=custom_mdp.rear_left_contact_floor_penalty,
+            weight=-60.0,
             params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "min_usage": 0.30,
-                "contact_target": 0.50,
-                "propulsion_target": 0.30,
-                "leg_lift_target": 0.18,
-                "clearance_target": 0.03,
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names="rear_left_toe_link"),
+                "contact_threshold": 1.0,
+                "floor": 0.30,
                 "min_vel": 0.05,
-            },
-        )
-
-        # V24: rear-left / rear-right 사용 비대칭 페널티
-        self.rewards.rear_left_right_usage_diff_penalty = RewTerm(
-            func=custom_mdp.rear_left_right_usage_diff_penalty,
-            weight=-8.0,
-            params={
                 "asset_cfg": SceneEntityCfg("robot"),
-                "max_diff": 0.18,
-                "contact_target": 0.50,
-                "propulsion_target": 0.30,
-                "leg_lift_target": 0.18,
-                "clearance_target": 0.03,
-                "min_vel": 0.05,
             },
         )
 
@@ -603,6 +587,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "asset_cfg": SceneEntityCfg("robot"),
                 "vel_deadzone": 0.1,
                 "min_vel": 0.05,
+                # V25: RL 참여 soft gate — RL 미접지 시 pair_b 보상 차단
+                "rl_participation_sensor_cfg": SceneEntityCfg("contact_forces", body_names="rear_left_toe_link"),
+                "rl_contact_threshold": 1.0,
+                "rl_min_contact": 0.15,
             },
         )
 
