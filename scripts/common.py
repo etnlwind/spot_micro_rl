@@ -102,6 +102,7 @@ REPORT_REQUIRE_XLSX = _parse_env_flag(
 SUPERVISOR_POLL_SECONDS = int(_env.get("SUPERVISOR_POLL_SECONDS", "10"))
 HEARTBEAT_POLL_SECONDS = int(_env.get("HEARTBEAT_POLL_SECONDS", _env.get("V2_HEARTBEAT_POLL_SECONDS", "30")))
 HEARTBEAT_ITER_STEP = int(_env.get("HEARTBEAT_ITER_STEP", _env.get("V2_HEARTBEAT_ITER_STEP", "100")))
+VIDEO_REPORT_ITER_STEP = int(_env.get("VIDEO_REPORT_ITER_STEP", "1000"))
 ZIP_FRAME_COUNT = int(_env.get("ZIP_FRAME_COUNT", "40"))
 ZIP_IMAGE_MAX_WIDTH = int(_env.get("ZIP_IMAGE_MAX_WIDTH", "960"))
 ZIP_IMAGE_QUALITY = int(_env.get("ZIP_IMAGE_QUALITY", "78"))
@@ -1187,25 +1188,26 @@ def _process_status_version_text(processes: list[dict], watched_files: list[str]
     return f"{repo_version} | {freshness} | pid {int(active_entry.get('pid') or 0)}"
 
 
-def build_heartbeat_command(iter_step: int | None = None, poll: int | None = None) -> str:
+def build_heartbeat_command(iter_step: int | None = None, poll: int | None = None, video_iter_step: int | None = None) -> str:
     heartbeat_script = HEARTBEAT_SCRIPT
     iter_step = int(iter_step or HEARTBEAT_ITER_STEP)
     poll = int(poll or HEARTBEAT_POLL_SECONDS)
+    video_iter_step = int(video_iter_step or VIDEO_REPORT_ITER_STEP)
     python_cmd = 'python'
     if _running_in_target_conda_env() and sys.executable:
         python_cmd = f'"{sys.executable}"'
     command = (
         f'cd /d "{PROJECT_ROOT}" && '
         'set PYTHONIOENCODING=utf-8 && '
-        f'{python_cmd} "{heartbeat_script}" --iter_step={iter_step} --poll={poll}'
+        f'{python_cmd} "{heartbeat_script}" --iter_step={iter_step} --video_iter_step={video_iter_step} --poll={poll}'
     )
     return _wrap_conda_command(command)
 
 
-def launch_heartbeat(log_path: str, iter_step: int | None = None, poll: int | None = None) -> dict:
+def launch_heartbeat(log_path: str, iter_step: int | None = None, poll: int | None = None, video_iter_step: int | None = None) -> dict:
     if is_heartbeat_running():
         return {"mode": "already-running", "processes": list_heartbeat_processes()}
-    command = build_heartbeat_command(iter_step=iter_step, poll=poll)
+    command = build_heartbeat_command(iter_step=iter_step, poll=poll, video_iter_step=video_iter_step)
     write_log(f"Launching heartbeat: {command}", log_path)
     with open(HEARTBEAT_LOG, "ab") as heartbeat_log_file:
         proc = _popen_hidden_cmd(command, stdout=heartbeat_log_file, stderr=subprocess.STDOUT)
@@ -1243,10 +1245,10 @@ def stop_heartbeat(log_path: str) -> list[int]:
     return killed
 
 
-def ensure_heartbeat_running(log_path: str, iter_step: int | None = None, poll: int | None = None) -> dict:
+def ensure_heartbeat_running(log_path: str, iter_step: int | None = None, poll: int | None = None, video_iter_step: int | None = None) -> dict:
     if is_heartbeat_running():
         return {"mode": "already-running", "processes": list_heartbeat_processes()}
-    return launch_heartbeat(log_path, iter_step=iter_step, poll=poll)
+    return launch_heartbeat(log_path, iter_step=iter_step, poll=poll, video_iter_step=video_iter_step)
 
 
 def build_train_command(resume_run_dir: str | None = None, checkpoint_path: str | None = None) -> str:

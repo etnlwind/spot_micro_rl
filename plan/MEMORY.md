@@ -1,13 +1,13 @@
 # MEMORY.md — Active AI Session Handoff
 > 목적: 새 세션이 이 문서 하나로 현재 학습 상태, 운영 구조, 최근 변경, 다음 할 일을 빠르게 복원하도록 작성.
-> 마지막 갱신: 2026-03-12 17:10
-> 기준 커밋: `de58e68`
+> 마지막 갱신: 2026-03-14
+> 기준 커밋: `3f58591`
 
 ---
 
 ## 1. 한 줄 요약
 
-SpotMicro RL 프로젝트는 현재 **V23 코드베이스**에서 flat 환경 학습을 다시 돌리고 있으며, 운영 계층은 `scripts/common.py` 중심으로 **live-process-aware context resolution**, **V23 workbook export**, **rich heartbeat**, **Telegram supervisor**까지 정리된 상태다.
+SpotMicro RL 프로젝트는 현재 **V24 코드베이스**에서 limb validity gating을 도입한 상태이며, 운영 계층은 `scripts/heartbeat.py`에 **자동 주기적 영상 리포트** (매 1000 iter) 기능이 새로 추가됐다.
 
 ---
 
@@ -15,202 +15,118 @@ SpotMicro RL 프로젝트는 현재 **V23 코드베이스**에서 flat 환경 �
 
 ### 2.1 라이브 런타임 스냅샷
 
-이 문서 갱신 시점 기준:
-
 | 항목 | 값 |
 |------|-----|
-| active run | `logs/rsl_rl/spot_micro_flat/2026-03-11_22-38-08` |
-| active checkpoint | `model_600.pt` |
-| mode | `training` |
-| latest iter snapshot | `613 / 15000` |
-| mean reward | `376.864` |
-| mean episode length | `244.2` |
-| verdict | `🟢 계속 진행` |
-| supervisor version | `de58e68 | latest` |
-| heartbeat version | `de58e68 | latest` |
+| active run | `logs/rsl_rl/spot_micro_flat/2026-03-13_18-53-26` |
+| 최신 checkpoint | `model_1800.pt` |
+| training | **정지** (2026-03-14 세션 중 수동 정지) |
+| supervisor | **정지** |
+| heartbeat | **정지** |
 
-중요:
+**다음 세션 시작 시 supervisor 재시작 + 훈련 재개 필요.**
 
-- 위 수치는 **문서 갱신 시점 스냅샷**이다. 실제 iter/reward는 계속 변한다.
-- active run / checkpoint는 더 이상 `state.json`만 믿지 않고, **실행 중인 training process cmdline**과 같은 run 안의 최신 checkpoint를 우선해 해석한다.
+### 2.2 훈련 진행 상황
 
-### 2.2 현재 무엇이 안정화됐는가
+| iter | reward | survival | gait | posture | limb_validity |
+|------|--------|----------|------|---------|---------------|
+| 600 | 323 | 100% | A | C | enforced_fail |
+| 1000 | ~430 | 100% | A | B | enforced_fail |
+| 1800 | 489 | 100% | A | B | enforced_fail |
 
-- training / heartbeat / supervisor 프로세스는 모두 분리되어 동작한다.
-- `status`는 `supervisor_version`, `heartbeat_version`, `latest/stale`, `pid`를 표시한다.
-- heartbeat는 짧은 알림 수준이 아니라, 사람이 읽고 AI가 후속 해석에 사용 가능한 **상세 진단 텍스트**로 복원됐다.
-- Telegram `/start` 이후 Isaac Lab 초기화가 느려도, 조기 오판 없이 실제 training process를 기준으로 상태를 본다.
-- training stopped 상태에서는 stale checkpoint가 아니라 **같은 run 안의 최신 checkpoint**를 우선 사용한다.
+- gait/posture는 좋아지고 있으나 rear-left collapse 지속 → limb validity 미통과
+- rear-left: contact=0.00, swing=0.99, propulsion=0.00 패턴 반복
 
 ---
 
-## 3. 최근 중요 변경 (2026-03-12)
+## 3. V24 변경 요약
 
-### 3.1 운영 신뢰도 쪽 변경
+### 3.1 새로운 Reward
 
-최근 반영 커밋 흐름:
+| reward | weight | 내용 |
+|--------|--------|------|
+| `limb_usage_min_penalty` | -12.0 | 4개 사지 중 최소 usage < 0.30 시 패널티 |
+| `rear_left_right_usage_diff_penalty` | -8.0 | rear 좌우 usage 차이 > 0.18 시 패널티 |
 
-| 커밋 | 요약 |
-|------|------|
-| `b78f89f` | training 정지 후에도 same-run 최신 checkpoint 우선 사용 |
-| `6485446` | `status`에 supervisor/heartbeat version + freshness 표시 |
-| `44d7169` | 상세 heartbeat 섹션 복원 |
-| `23fafd1` | top-level heartbeat bullet formatting 조정 |
-| `de58e68` | 최종 heartbeat section formatting 정리 |
+iter 200~600에 걸쳐 선형 ramp. 속도 게이트 적용 (min_vel=0.05).
 
-핵심 결과:
+### 3.2 Ops 추가
 
-- `resolve_active_run_dir()` / `resolve_active_checkpoint()` / `resolve_context()`가 live process 우선 해석 구조로 정리됨
-- cached artifact (`last_report_zip`, cached videos)는 active run과 path가 맞을 때만 신뢰
-- video caption iteration도 stale checkpoint 번호가 아니라 current display iteration을 사용
-
-### 3.2 Heartbeat 포맷 최종 상태
-
-현재 heartbeat는 다음 원칙을 따른다.
-
-- 상단 요약 블록은 `•` bullet 사용
-- `운영 판정`, `우선 KPI`, `코어 품질`, `학습 지표`, `좋은 점`, `문제점` 등 같은 depth의 소제목은 모두 **bold**
-- 이모지로 시작하는 KPI/trend 줄은 접두 bullet 없이 바로 시작
-- 설명성 문장과 리스트성 보조 항목은 `•` bullet 사용
-- contact 기반 stride/cycle 계열은 **참고 지표**로만 명시
-
-실제 heartbeat는 다음 계층을 포함한다.
-
-- iter / reward / ep_len / termination / best-worst
-- 운영 판정
-- 우선 KPI
-- 코어 품질
-- KPI 상태
-- 핵심 추세
-- 보행 보상 추세
-- 페널티 추세
-- 동작 품질
-- 학습 지표
-- TOP5 기여 보상 / 패널티
-- 보상 추이
-- 학습 단계
-- 좋은 점 / 문제점
-- AI 분석 의견
-- 참고
-
-### 3.3 실전 검증 여부
-
-2026-03-12 세션에서 아래를 직접 확인했다.
-
-- status 텍스트 생성 성공
-- heartbeat 텍스트 수동 렌더링 성공
-- Telegram으로 heartbeat 수동 전송 성공
-- heartbeat / supervisor 재시작 후 두 프로세스 모두 `latest`로 표기됨
-- 과도하게 남아 있던 idle PowerShell shell 정리 후에도 training/supervisor/heartbeat 생존 확인
+- `LIMB_VALIDITY_THRESHOLDS`, `compute_limb_validity_metrics()` — common.py
+- `evaluate_limb_gate_checkpoint.py` — 수동 limb validity 평가 유틸
+- `analyze_training.py` — limb validity 열, collapse 감지, workbook 기록
 
 ---
 
-## 4. 코드 구조와 역할 분담
+## 4. 자동 영상 리포트 (신규)
 
-### 4.1 현재 active 운영 파일
+`heartbeat.py`에 추가:
+
+- **매 1000 iter**: 훈련 정지 → 해당 milestone checkpoint로 영상 생성 → Telegram 전송 → 훈련 재개
+- 누락 milestone 복수 시 순차 소급 보완
+- 환경변수: `VIDEO_REPORT_ITER_STEP=1000`
+- 실제 소요: 약 5~7분
+
+```
+supervisor 재시작 후 heartbeat가 뜨면
+milestone=1000 이 jsonl에 없으므로 자동으로 model_1000.pt 기준 소급 영상 생성 시작됨
+```
+
+---
+
+## 5. 코드 구조
+
+### 5.1 Active 운영 파일
 
 | 파일 | 역할 |
 |------|------|
-| `scripts/common.py` | 상태 해석, process 탐지, Telegram 전송, report/video helper, V23 workbook export, heartbeat/status formatter |
-| `scripts/supervisor.py` | Telegram 명령 루프, local CLI, start/stop/report/view/shutdown 처리 |
-| `scripts/heartbeat.py` | read-only heartbeat polling loop, heartbeat history 기록, Telegram 송신 |
-| `source/.../spot_micro_rl_env_cfg.py` | 현재 학습 reward/target 정의, `TRAIN_VERSION = "V23"` |
-| `source/.../mdp/rewards.py` | V23 raw metric export, posture/stance/foot-jitter 관련 계산 |
+| `scripts/common.py` | 상태 해석, Telegram, artifact, formatter, V24 workbook, limb validity |
+| `scripts/supervisor.py` | Telegram 명령 루프, start/stop/report/view/shutdown |
+| `scripts/heartbeat.py` | 텍스트 heartbeat (100 iter) + 자동 영상 리포트 (1000 iter) |
+| `source/.../spot_micro_rl_env_cfg.py` | `TRAIN_VERSION = "V24"`, limb penalty 설정 |
+| `source/.../mdp/rewards.py` | `limb_usage_min_penalty`, `rear_left_right_usage_diff_penalty`, `_compute_limb_usage_proxy` |
 
-### 4.2 legacy와 active를 혼동하지 말 것
+### 5.2 운영 동작 원칙
 
-- active 파일은 `scripts/supervisor.py`, `scripts/heartbeat.py`, `scripts/common.py`다.
-- `scripts/legacy/heartbeat.py`, `scripts/legacy/supervisor.py`는 **참고용 보관본**이다.
-- legacy heartbeat는 richer formatter의 아이디어 소스였지만, 현재 실제 송신 코드는 `scripts/common.py::format_report()`를 쓴다.
-
----
-
-## 5. 운영 동작 규칙
-
-### 5.1 supervisor 명령
-
-현재 active 명령:
-
-- `start`
-- `stop`
-- `status`
-- `report`
-- `front`
-- `rear`
-- `top`
-- `side`
-- `help`
-- `shutdown`
-
-### 5.2 report/view 원칙
-
-- training 중이면 기존 최신 artifact만 전송한다.
-- training stopped 상태에서만 현재 active checkpoint 기준으로 새 artifact를 생성한다.
-- heartbeat는 read-only다. training process를 중단하거나 재개하지 않는다.
-
-### 5.3 상태 해석 원칙
-
-- live training process가 있으면 그것이 가장 신뢰도 높은 source다.
-- stopped 상태에서는 같은 run 안의 최신 checkpoint를 우선 사용한다.
-- stale cached path는 active run과 맞지 않으면 버린다.
+- `start` / `stop`만 훈련 상태를 바꾼다
+- `report/front/rear/top/side`: 훈련 중이면 최신 artifact 전송, 정지 시 새로 생성
+- heartbeat 자동 영상 리포트: 훈련 정지 → 녹화 → 재개 (누락 보완 포함)
 
 ---
 
-## 6. V23 기준 핵심 파일과 산출물
-
-### 6.1 학습/환경 쪽
-
-| 파일 | 포인트 |
-|------|--------|
-| `source/spot_micro_rl/spot_micro_rl/tasks/manager_based/spot_micro_rl/spot_micro_rl_env_cfg.py` | `TRAIN_VERSION = "V23"`, shoulder target/stance width 관련 V23 조정 포함 |
-| `source/spot_micro_rl/spot_micro_rl/tasks/manager_based/spot_micro_rl/mdp/rewards.py` | `compute_v23_raw_metrics()`, `accumulate_v23_raw_metrics()`, `reset_v23_raw_metric_extras()` |
-| `source/spot_micro_rl/spot_micro_rl/tasks/manager_based/spot_micro_rl/spot_micro_rl_env.py` | raw metric extras를 episode reset에 연결 |
-
-### 6.2 운영/로그 산출물
+## 6. 로그 산출물
 
 | 경로 | 내용 |
 |------|------|
-| `logs/rsl_rl/spot_micro_flat/<run>/heartbeat_reports.jsonl` | heartbeat history record |
-| `logs/rsl_rl/spot_micro_flat/<run>/spotmicro_v23_run_<run>_training_log.xlsx` | per-run V23 workbook |
-| `logs/rsl_rl/spot_micro_flat/spotmicro_v23_training_master_log.xlsx` | master workbook |
-| `logs/rsl_rl/spot_micro_flat/spotmicro_v23_checkpoint_review.xlsx` | checkpoint review workbook |
-| `logs/training_launch.log` | detached training launch 로그 |
-| `logs/heartbeat.log` | heartbeat 송신/루프 로그 |
+| `logs/rsl_rl/spot_micro_flat/spotmicro_v24_training_master_log.xlsx` | V24 master workbook |
+| `logs/rsl_rl/spot_micro_flat/spotmicro_v24_checkpoint_review.xlsx` | V24 checkpoint review |
+| `logs/rsl_rl/spot_micro_flat/<run>/heartbeat_reports.jsonl` | heartbeat + video report 기록 |
 | `logs/supervisor.log` | supervisor 운영 로그 |
+| `logs/heartbeat.log` | heartbeat / 영상 리포트 로그 |
 
 ---
 
-## 7. 문서 맵
+## 7. 다음 우선순위
 
-현재 문서 읽기 순서 추천:
-
-1. `plan/MEMORY.md`
-2. `plan/CURRENT_STATE_2026-03-12.md`
-3. `plan/V23_PLAN.md`
-4. `plan/V22_ANALYSIS.md`
-5. 필요 시 버전별 히스토리 문서
-
-문서 역할:
-
-- `MEMORY.md`: 가장 짧은 active handoff
-- `CURRENT_STATE_2026-03-12.md`: 이번 세션 기준 운영/코드 상태 상세 정리
-- `PROJECT_HISTORY.md`: 프로젝트 전체 연대기 개요
-- `V23_PLAN.md`: 남은 V23 실험 계획
+1. supervisor 재시작 → 훈련 재개
+2. heartbeat 자동 소급 영상 리포트 (model_1000.pt) 수신 확인
+3. iter 2000~3000 구간에서 rear-left collapse self-correction 여부 관찰
+4. limb_usage_min이 0.30에 접근 못 하면 threshold 조정 또는 rear reward 구조 재검토
 
 ---
 
-## 8. 지금 시점의 다음 우선순위
+## 8. 작업 시 주의
 
-1. 현재 run `2026-03-11_22-38-08`의 초기 구간이 heartbeat/영상 기준으로 정상적으로 이어지는지 계속 관찰
-2. 다음 실제 stop/report/view 사이클에서 same-run latest checkpoint 선택이 계속 맞는지 재검증
-3. V23 posture-first refinement와 운영 계측 레이어를 문서상 분리 유지한 채, 실제 reward 실험을 다시 시작
+- Windows 백그라운드 터미널은 `(base)` 에서 뜬다. `conda activate env_isaaclab` 명시 필요.
+- `conda run` 쓰지 않는다.
+- training 실행: `C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\train.py ...` 형태 유지.
+- 상태 해석은 `state.json` 단독이 아니라 live process cmdline + latest checkpoint 기준으로.
+- play.py 영상 녹화 실제 소요: 5 views × ~50초 = 약 5분 (40분 아님).
 
 ---
 
-## 9. 작업 시 주의
+## 9. 문서 맵
 
-- Windows 백그라운드 터미널은 `(base)`에서 뜬다. `conda activate env_isaaclab`를 명시적으로 먼저 실행한다.
-- `conda run`은 쓰지 않는다.
-- training process에는 `Select-Object -First N` 같은 파이프를 걸지 않는다.
-- training 실행은 항상 `C:\IsaacLab\isaaclab.bat -p scripts\rsl_rl\train.py ...` 형태를 유지한다.
-- 운영 문제를 볼 때는 `state.json`만 보지 말고 process cmdline, current run path, latest checkpoint를 같이 본다.
+1. `plan/MEMORY.md` — 이 문서, 가장 짧은 active handoff
+2. `plan/CURRENT_STATE_2026-03-14.md` — 현재 세션 상태 상세
+3. `plan/V24_PLAN.md` — V24 설계, 구현, 분석
+4. `plan/V23_PLAN.md` — V23 배경 참고용
