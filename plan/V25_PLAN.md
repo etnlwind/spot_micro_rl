@@ -640,3 +640,76 @@ V25-A를 먼저 실행하고 실패하면 V25-B로 전환하는 구조라면, **
 | G2-F2 | 400+ 자동 stop | 부분 동의 | 추세 체크 조건 추가 필요 |
 | G2-F3 | CRITICAL 최상단 강제 | 동의 | iter 100+ 이후부터만 적용, stage별 gating |
 | R4 | (미답변) | — | A→B 전환 트리거 iter 200 기준 명시 필요 |
+
+
+
+
+- - -
+
+제 최종 권고
+
+채택
+	•	문서 전체는 채택
+	•	F1~F6는 전부 유효한 결정 포인트로 채택
+
+지금 바로 권고하는 기본값
+
+제가 지금 당장 잠그라고 권하는 값은 이겁니다.
+	•	F1: V24 usage proxy 재사용
+	•	F2: V25-A에도 restart-on-collapse 포함
+	•	F3: 본선에서는 per_leg_contact_floor 또는 per_leg_propulsion_floor 중심으로 하나만 주력, support_phase_min_participation은 후순위
+	•	F4: soft gate 고정
+	•	F5: iter 200 기준 A→B 전환 명시
+	•	F6: 1차는 수동 중단, 자동 kill은 후속
+
+이렇게 잠그면 문서가 바로 실행 문서가 됩니다.
+
+---
+
+## 최종 설계 결정 — 개발담당 최종안 (2026-03-14)
+
+### 배경
+
+G의 최종 권고(F1~F6)를 검토한 결과, 구조적으로 더 큰 문제가 있다고 판단했다.
+
+### G 권고를 따르지 않는 이유
+
+**V25-A/B 분기 구조 자체의 문제:**
+
+G 권고는 V25-A(일반) 실패 후 V25-B(특화)로 전환하는 구조를 유지한다. 그러나 V24가 증명한 것은 **collapse가 iter 200 이전에 고착**된다는 것이다. A를 iter 200까지 지켜보다 B로 넘어가면 V24와 같은 패턴이 반복된다. A/B 분기는 시간 낭비일 가능성이 높다.
+
+**F3의 모호함:**
+
+"per_leg_contact_floor 또는 per_leg_propulsion_floor 중 하나"는 결정을 미룬 것이다. contact가 없으면 propulsion도 0이므로 contact를 직접 타겟하는 것이 근본적이다. propulsion_floor는 불필요하다.
+
+**weight 기준 부재:**
+
+G 권고 어디에도 weight 수치가 없다. V24 실패의 직접 원인 중 하나는 weight -12가 총 reward 544의 2%에 불과했다는 것이다. "충분히 강한 weight"를 명시하지 않으면 같은 실수가 반복된다.
+
+### 채택하는 CS 단일 설계
+
+| 항목 | 결정 | 이유 |
+|------|------|------|
+| 분기 구조 | **없음 — 단일 run** | A/B 전환 대기가 V24 패턴 반복을 유발 |
+| penalty target | `rear_left_contact_floor_penalty` 직접 | min_usage proxy는 다른 다리가 희석, per_leg도 RL 붕괴 시 동일 신호 |
+| weight | **-50 ~ -80** | 총 reward의 최소 10% 이상 — V24 -12(2%)는 무의미했음 |
+| ramp | **없음 — iter 0부터 full** | V24 실패의 핵심 원인. collapse보다 패널티가 먼저여야 함 |
+| restart-on-collapse | **iter 100** 기준 | iter 300은 너무 늦음. collapse는 그 전에 고착됨 |
+| diagonal coupling | soft gate, threshold 0.15 | binary는 gradient 차단 |
+| V25-B | V25 메인 run이 iter 300에서 survival ≥ 90% + RL collapse 지속 시에만 설계 | 지금 당장 설계 안 함 |
+
+### 설계 원칙
+
+> **패널티가 작동하려면 collapse보다 먼저, collapse보다 강해야 한다.**
+
+V24는 둘 다 틀렸다(iter 200 이후 시작, weight -12). V25는 둘 다 맞춰야 한다.
+
+### G 권고에서 유지하는 항목
+
+| 항목 | 이유 |
+|------|------|
+| F1: V24 usage proxy 재사용 | 올바르게 구현됐고 변경 근거 없음 |
+| F4: soft gate 고정 | binary gate는 gradient 차단 |
+| F6: 1차 수동 중단 | 자동 kill은 오발 리스크, 기준 미검증 |
+| R3: CRITICAL 알림 stage gating | iter 0~99 observe 구간 false alarm 방지 |
+
