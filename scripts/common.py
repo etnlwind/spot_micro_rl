@@ -1018,15 +1018,6 @@ def _write_temp_cmd_script(command: str, prefix: str) -> str:
     return script_path
 
 
-def _escape_cmd_echo_text(text: str) -> str:
-    escaped = str(text)
-    escaped = escaped.replace("^", "^^")
-    escaped = escaped.replace("&", "^&")
-    escaped = escaped.replace("|", "^|")
-    escaped = escaped.replace("<", "^<")
-    escaped = escaped.replace(">", "^>")
-    return escaped
-
 
 def _popen_hidden_cmd(command: str, **kwargs):
     kwargs.setdefault("cwd", PROJECT_ROOT)
@@ -1061,25 +1052,14 @@ def _launch_training_command(command: str, launcher_name: str) -> str:
     os.makedirs(logs_dir, exist_ok=True)
     launcher_path = os.path.join(logs_dir, launcher_name)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    command_for_echo = _escape_cmd_echo_text(command)
-    with open(launcher_path, "w", encoding="utf-8", newline="\n") as file:
+    with open(TRAINING_LOG, "a", encoding="utf-8") as f:
+        f.write(f"===== [{timestamp}] training launch =====\n")
+        f.write(f"cmd: {command}\n")
+    with open(launcher_path, "w", encoding="utf-8", newline="\r\n") as file:
         file.write("@echo off\n")
-        file.write(f'echo ===== [{timestamp}] training launch =====>> "{TRAINING_LOG}"\n')
-        file.write(f'echo cmd: {command_for_echo}>> "{TRAINING_LOG}"\n')
-        file.write(f'{command} >> "{TRAINING_LOG}" 2>&1\n')
-    creationflags = 0
-    if sys.platform == "win32":
-        creationflags = _hidden_creationflags(subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
-    subprocess.Popen(
-        ["cmd", "/d", "/c", launcher_path],
-        cwd=PROJECT_ROOT,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        startupinfo=_hidden_startupinfo(),
-        creationflags=creationflags,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
+        file.write(f"{command}\n")
+    with open(TRAINING_LOG, "ab") as log_file:
+        _popen_hidden_cmd(launcher_path, stdout=log_file, stderr=subprocess.STDOUT)
     return launcher_path
 
 

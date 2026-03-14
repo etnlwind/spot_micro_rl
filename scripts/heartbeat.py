@@ -50,6 +50,15 @@ def _restore_last_video_milestone(run_dir: str, video_iter_step: int) -> int:
     return last_milestone
 
 
+def _get_resume_checkpoint_iter() -> int:
+    """state.json의 active_checkpoint에서 iter 번호를 추출. 예: model_1800.pt → 1800."""
+    import re
+    state = common.load_state()
+    checkpoint = state.get("active_checkpoint") or ""
+    m = re.search(r"model_(\d+)\.pt", os.path.basename(checkpoint))
+    return int(m.group(1)) if m else 0
+
+
 def _collect_missed_milestones(last_video_milestone: int, current_iter: int, video_iter_step: int) -> list[int]:
     """last_video_milestone 이후 current_iter 이하의 누락된 milestone 목록을 순서대로 반환."""
     milestones = []
@@ -154,6 +163,11 @@ def main() -> None:
                     last_run_name = run_name
                     last_sent_milestone = _restore_last_milestone(run_dir, args.iter_step)
                     last_video_milestone = _restore_last_video_milestone(run_dir, args.video_iter_step)
+                    # 재개 시작 iter 이전 milestone은 이미 완료된 것으로 간주
+                    resume_iter = _get_resume_checkpoint_iter()
+                    if resume_iter > 0:
+                        skip_up_to = (resume_iter // args.video_iter_step) * args.video_iter_step
+                        last_video_milestone = max(last_video_milestone, skip_up_to)
 
                 # 누락된 video milestone 목록 수집 (복수 대응)
                 missed = _collect_missed_milestones(last_video_milestone, current_iter, args.video_iter_step)
