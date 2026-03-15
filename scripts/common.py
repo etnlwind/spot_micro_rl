@@ -94,9 +94,8 @@ TRAINING_CONFIG = {
     },
 }
 
-_LOG_VER = TRAIN_VERSION  # e.g. "V26.1" — full version as-is for filenames
-MASTER_LOG_FILENAME = f"spotmicro_{_LOG_VER}_training_master_log.xlsx"
-CHECKPOINT_REVIEW_FILENAME = f"spotmicro_{_LOG_VER}_checkpoint_review.xlsx"
+# _LOG_VER / MASTER_LOG_FILENAME / CHECKPOINT_REVIEW_FILENAME are defined after
+# _env is loaded (below), so TRAIN_VERSION is available.
 
 
 def _load_env(path: str) -> dict:
@@ -147,6 +146,9 @@ MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
 TRAINING_CONFIG["ppo"]["max_iterations"] = MAX_ITERATIONS
 TRAINING_CONFIG["ppo"]["num_envs"] = TRAIN_ENVS
 TRAINING_CONFIG["description"] = f"{TRAIN_VERSION}: 3층 reward 구조 (Layer A Survival / Layer B Validity Floor / Layer C Target-Band Incentive)"
+_LOG_VER = TRAIN_VERSION  # full version as-is for filenames
+MASTER_LOG_FILENAME = f"spotmicro_{_LOG_VER}_training_master_log.xlsx"
+CHECKPOINT_REVIEW_FILENAME = f"spotmicro_{_LOG_VER}_checkpoint_review.xlsx"
 VIDEO_LENGTH = int(_env.get("VIDEO_LENGTH", "250"))
 VIDEO_FPS = int(_env.get("VIDEO_FPS", "15"))
 VIDEO_CAPTURE_HEADLESS = _parse_env_flag(
