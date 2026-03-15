@@ -68,7 +68,7 @@ TRAINING_CONFIG = {
     },
 }
 
-_LOG_VER = TRAIN_VERSION.split(".")[0].lower()  # e.g. "v26" — major version for filenames
+_LOG_VER = TRAIN_VERSION  # e.g. "V26.1" — full version as-is for filenames
 MASTER_LOG_FILENAME = f"spotmicro_{_LOG_VER}_training_master_log.xlsx"
 CHECKPOINT_REVIEW_FILENAME = f"spotmicro_{_LOG_VER}_checkpoint_review.xlsx"
 
