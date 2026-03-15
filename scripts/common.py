@@ -52,7 +52,7 @@ TRAINING_CONFIG = {
         ("single_limb_validity_penalty", -35.0, -5.0, "floor=0.10, min_vel=0.05", "V27.1b: 4발 최약 다리 패널티 완화 (ramp iter 0→200: -5→-35)"),
         ("per_leg_contact_floor", -20.0, -2.0, "floor=0.15, min_vel=0.05", "V27.1b: 각 다리 contact floor 완화 (ramp iter 0→150: -2→-20)"),
         ("per_leg_propulsion_floor", -15.0, -2.0, "floor=0.10, min_vel=0.05", "V27.1b: 각 다리 propulsion floor 완화 (ramp iter 50→200: -2→-15)"),
-        ("limb_usage_min_penalty", -25.0, -8.0, "min_usage=0.10", "최소 다리 사용률 보장 (ramp iter 0→150: -8→-25)"),
+        ("limb_usage_min_penalty", -25.0, -8.0, "min_usage=0.10", "최소 다리 사용률 보장 (ramp iter 0→150: -8→-25) — V27.1b 의도적 완화 (V27.1a: 0→50)"),
         ("rear_left_right_usage_diff", -10.0, 0.0, "max_diff=0.30", "뒷다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
         ("front_left_right_usage_diff", -8.0, 0.0, "max_diff=0.30", "앞다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
         ("rear_left_right_propulsion_diff", -20.0, 0.0, "max_diff=0.25", "뒷다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),

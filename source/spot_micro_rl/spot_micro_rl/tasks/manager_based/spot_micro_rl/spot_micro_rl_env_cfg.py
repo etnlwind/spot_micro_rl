@@ -161,6 +161,7 @@ class SpotMicroRewardCurriculumCfg:
       single_limb_validity_penalty: -5 → -35 soft ramp (iter 0~200)
       contact floor: -2 → -20 (ramp iter 0~150)
       propulsion floor: -2 → -15 (ramp iter 50~200, contact와 분리)
+      limb_usage_min: ramp 0~50 → 0~150 (의도적 완화 — contact floor와 동일 ramp 공유)
       diagonal gate: min_contact 0.25→0.15, min_propulsion 0.10→0.05
     """
     reward_weights = CurrTerm(
@@ -177,11 +178,12 @@ class SpotMicroRewardCurriculumCfg:
             "validity_limb_usage_final": 0.0,
             "validity_rear_diff_initial": 0.0,
             "validity_rear_diff_final": 0.0,
-            # V27.1b: existence floor ramp — contact 완화 (iter 0~150)
+            # V27.1b: existence floor ramp — contact + limb_usage 완화 (iter 0~150)
+            # limb_usage_min도 동일 ramp 공유: 초기 학습 억제를 줄이기 위해 V27.1a(0~50)보다 천천히 강화
             "floor_ramp_start": 0,
             "floor_ramp_end": 150,
             "floor_limb_usage_initial": -8.0,
-            "floor_limb_usage_final": -25.0,
+            "floor_limb_usage_final": -25.0,         # V27.1b: ramp 0~150 (V27.1a: 0~50) — 의도적 완화
             "floor_per_leg_contact_initial": -2.0,   # V27.1b: -10 → -2 (초반 완화)
             "floor_per_leg_contact_final": -20.0,    # V27.1b: -40 → -20
             "floor_per_leg_propulsion_initial": -2.0,  # V27.1b: -10 → -2
