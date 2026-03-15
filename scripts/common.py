@@ -897,20 +897,23 @@ def _read_run_train_version(run_dir: str) -> str | None:
         except Exception:
             pass
 
-    # 3. Excel Meta 시트 — 기존 workbook (파일명 패턴 glob)
+    # 3. Excel 시트 — 기존 workbook (파일명 패턴 glob)
+    # 신규: TrainingConfig 시트 우선, 구버전 fallback으로 Meta 시트도 확인
     import glob as _glob
     run_id = os.path.basename(run_dir.rstrip("\\/"))
     pattern = os.path.join(run_dir, f"spotmicro_*_run_{run_id}_training_log.xlsx")
     candidates = _glob.glob(pattern)
     if candidates:
         # 파일명 알파벳 정렬 대신 수정시각 기준으로 가장 최근 파일 선택
-        # (대소문자 혼재 시 알파벳 정렬이 올바른 버전을 선택하지 못하는 문제 방지)
         wb_path = max(candidates, key=os.path.getmtime)
         try:
             from openpyxl import load_workbook
             wb = load_workbook(wb_path, read_only=True, data_only=True)
-            if "Meta" in wb.sheetnames:
-                ws = wb["Meta"]
+            # 신규 형식: TrainingConfig 시트 (row[0]=="train_version", row[1]==ver)
+            for sheet_name in ("TrainingConfig", "Meta"):
+                if sheet_name not in wb.sheetnames:
+                    continue
+                ws = wb[sheet_name]
                 for row in ws.iter_rows(values_only=True):
                     if row and str(row[0] or "").strip() == "train_version":
                         ver = str(row[1] or "").strip()
