@@ -369,9 +369,9 @@ def handle_command(command: str, checkpoint_iter: int | None = None, target_vers
         run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
         checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A (fresh)"
         if result["mode"] == "already-running":
-            _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon="▶️")
+            _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nversion: {common.TRAIN_VERSION}", icon="▶️")
         else:
-            _send_notice("TRAINING RESUME", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon="▶️")
+            _send_notice("TRAINING RESUME", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nversion: {common.TRAIN_VERSION}", icon="▶️")
         return
     if command == "stop":
         result = common.stop_training(common.SUPERVISOR_LOG)
@@ -721,6 +721,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                                     common.send_text(
                                         f"🚀 <b>TRAINING START (FRESH)</b>\n"
                                         f"<i>run: {run_name}</i>\n"
+                                        f"<i>version: {common.TRAIN_VERSION}</i>\n"
                                         f"<i>iter 0부터 시작합니다.</i>",
                                         common.SUPERVISOR_LOG,
                                         parse_mode="HTML",
@@ -766,6 +767,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             common.send_text(
                                 f"🚀 <b>TRAINING START (FRESH)</b>\n"
                                 f"<i>run: {run_name}</i>\n"
+                                f"<i>version: {common.TRAIN_VERSION}</i>\n"
                                 f"<i>iter 0부터 시작합니다.</i>",
                                 common.SUPERVISOR_LOG,
                                 parse_mode="HTML",
