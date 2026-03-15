@@ -903,7 +903,9 @@ def _read_run_train_version(run_dir: str) -> str | None:
     pattern = os.path.join(run_dir, f"spotmicro_*_run_{run_id}_training_log.xlsx")
     candidates = _glob.glob(pattern)
     if candidates:
-        wb_path = sorted(candidates)[-1]
+        # 파일명 알파벳 정렬 대신 수정시각 기준으로 가장 최근 파일 선택
+        # (대소문자 혼재 시 알파벳 정렬이 올바른 버전을 선택하지 못하는 문제 방지)
+        wb_path = max(candidates, key=os.path.getmtime)
         try:
             from openpyxl import load_workbook
             wb = load_workbook(wb_path, read_only=True, data_only=True)
