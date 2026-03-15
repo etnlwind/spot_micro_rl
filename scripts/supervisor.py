@@ -745,16 +745,21 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                         continue
                     target_version, checkpoint_iter = _parse_command_args(arg_text)
 
-                    # /start: checkpoint 존재 시 확인 요청 (파일 존재 여부와 무관하게 state.json 기록 기준)
+                    # /start: 버전이 동일한 경우에만 checkpoint 덮어쓰기 확인 요청.
+                    # 버전이 다르면 (예: V27.1b → V28) 확인 없이 바로 fresh start.
                     if command == "start":
-                        state_ckpt = common.load_state().get("active_checkpoint") or ""
+                        _state = common.load_state()
+                        state_version = _state.get("train_version") or ""
+                        version_changed = state_version and state_version != common.TRAIN_VERSION
+                        state_ckpt = _state.get("active_checkpoint") or ""
                         existing_checkpoint = common.resolve_active_checkpoint(common.resolve_active_run_dir()) or state_ckpt
-                        if existing_checkpoint:
+                        if existing_checkpoint and not version_changed:
+                            # 동일 버전에서 기존 진행상황 있음 → 덮어쓰기 확인 필요
                             ckpt_name = os.path.basename(existing_checkpoint)
                             ckpt_iter = common.get_checkpoint_iter(existing_checkpoint)
                             pending_confirm = {"action": "fresh_start", "ckpt_iter": ckpt_iter, "ckpt_name": ckpt_name, "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC}
                             common.send_text(
-                                f"⚠️ <b>확인 필요 — FRESH START</b>\n"
+                                f"⚠️ <b>확인 필요 — FRESH START ({common.TRAIN_VERSION})</b>\n"
                                 f"<i>현재 진행: iter {ckpt_iter:,} ({ckpt_name})</i>\n\n"
                                 f"이 진행상황을 초기화하고 <b>iter 0부터 새로 시작</b>합니다.\n"
                                 f"<i>계속하려면 Y를 입력하세요. (60초 내, 다른 입력은 취소)</i>",
@@ -762,6 +767,14 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                                 parse_mode="HTML",
                             )
                         else:
+                            # 버전 업그레이드이거나 checkpoint 없음 → 확인 없이 바로 시작
+                            if version_changed:
+                                common.send_text(
+                                    f"🆕 <b>VERSION UPGRADE — {state_version} → {common.TRAIN_VERSION}</b>\n"
+                                    f"<i>새 버전이므로 확인 없이 iter 0부터 시작합니다.</i>",
+                                    common.SUPERVISOR_LOG,
+                                    parse_mode="HTML",
+                                )
                             result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
                             run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
                             common.send_text(
