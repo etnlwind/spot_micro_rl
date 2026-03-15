@@ -547,6 +547,143 @@ def single_limb_validity_penalty(
     return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
 
 
+# ============================================================
+# V28: Target-Band Incentive (Layer C)
+# "floor만 넘기면 살아남는 구조" → "정상 범위에 들어와야 이득이 되는 구조"
+# contact band [0.20, 0.45], propulsion band [0.15, 0.38]
+# ============================================================
+
+
+def per_leg_contact_target_band_reward(
+    env: ManagerBasedRLEnv,
+    band_low: float = 0.20,
+    band_high: float = 0.45,
+    band_ramp_start: float = 0.05,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28: 4발 각각의 contact_ratio가 target band에 진입하면 보상.
+
+    Trapezoid shape:
+    - 0 ~ band_ramp_start: reward = 0
+    - band_ramp_start ~ band_low: linear ramp 0 → 1 (gray zone incentive)
+    - band_low 이상: reward = 1.0 plateau
+
+    Layer C 핵심: floor 근처 정체가 아니라 정상 범위 진입을 유도.
+    V26 iter 200 실측 기반 band: low=0.20 (최솟값 0.318의 63%), high=0.45.
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    contact_tensor = torch.stack(
+        [metrics[f"contact_ratio_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    ramp_width = max(float(band_low) - float(band_ramp_start), 1e-6)
+    reward_per_leg = torch.clamp(
+        (contact_tensor - float(band_ramp_start)) / ramp_width, 0.0, 1.0
+    )
+    return reward_per_leg.sum(dim=1) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def per_leg_propulsion_target_band_reward(
+    env: ManagerBasedRLEnv,
+    band_low: float = 0.15,
+    band_high: float = 0.38,
+    band_ramp_start: float = 0.03,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28: 4발 각각의 propulsion이 target band에 진입하면 보상.
+
+    contact가 살아도 propulsion이 없으면 band 보상 없음.
+    V27의 per_leg_propulsion_floor_penalty(Layer B)와 함께 작용 —
+    fake contact(닿기만 하고 추진 없음)를 구조적으로 불리하게 만든다.
+    V26 iter 200 실측 기반 band: low=0.15 (최솟값 0.281의 53%), high=0.38.
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    prop_tensor = torch.stack(
+        [metrics[f"propulsion_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    ramp_width = max(float(band_low) - float(band_ramp_start), 1e-6)
+    reward_per_leg = torch.clamp(
+        (prop_tensor - float(band_ramp_start)) / ramp_width, 0.0, 1.0
+    )
+    return reward_per_leg.sum(dim=1) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def limb_usage_target_band_reward(
+    env: ManagerBasedRLEnv,
+    band_low: float = 0.20,
+    band_high: float = 0.45,
+    band_ramp_start: float = 0.05,
+    contact_target: float = 0.5,
+    propulsion_target: float = 0.30,
+    leg_lift_target: float = 0.18,
+    clearance_target: float = 0.03,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28: 4발 각각의 usage_proxy가 target band에 있으면 보상.
+
+    limb_usage_min_penalty(Layer B)의 "최약 다리 기준 패널티"와 달리,
+    모든 다리의 usage 향상을 고르게 유도.
+    band 수치는 contact band와 동일 비율 적용 (실측치 확보 시 보정).
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    usage_scores = _compute_limb_usage_proxy(
+        metrics, contact_target, propulsion_target, leg_lift_target, clearance_target
+    )
+    usage_tensor = torch.stack(
+        [usage_scores[s] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    ramp_width = max(float(band_low) - float(band_ramp_start), 1e-6)
+    reward_per_leg = torch.clamp(
+        (usage_tensor - float(band_ramp_start)) / ramp_width, 0.0, 1.0
+    )
+    return reward_per_leg.sum(dim=1) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def four_limb_cooperation_reward(
+    env: ManagerBasedRLEnv,
+    contact_band_low: float = 0.20,
+    propulsion_band_low: float = 0.15,
+    trigger_partial: int = 2,
+    trigger_full: int = 3,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28: 4발이 동시에 target band에 들어왔을 때 협동 보상.
+
+    band_hit_count: contact AND propulsion 모두 band_low 이상인 다리 수.
+    - band_hit_count < trigger_partial (2): 보상 없음
+    - trigger_partial (2) ≤ band_hit_count: 0.5x 보상
+    - band_hit_count ≥ trigger_full (3): 추가 0.5x (합계 1.0x)
+
+    초기 랜덤 정책에서는 거의 0 → 학습 억제 없음.
+    4발 기능 참여 형성 이후에야 의미 있는 보상이 됨 (후반 강화형).
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    contact_tensor = torch.stack(
+        [metrics[f"contact_ratio_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    prop_tensor = torch.stack(
+        [metrics[f"propulsion_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    contact_in = contact_tensor >= float(contact_band_low)
+    prop_in = prop_tensor >= float(propulsion_band_low)
+    band_hit = (contact_in & prop_in).float()  # (N, 4)
+    band_hit_count = band_hit.sum(dim=1)  # (N,)
+    partial = (band_hit_count >= float(trigger_partial)).float() * 0.5
+    full_bonus = (band_hit_count >= float(trigger_full)).float() * 0.5
+    return (partial + full_bonus) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
 def front_rear_support_balance_penalty(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -1971,6 +2108,51 @@ def _curriculum_target_alpha(iteration: int, ramp_start: int, ramp_end: int) -> 
     return (iteration - ramp_start) / (ramp_end - ramp_start)
 
 
+def _curriculum_apply_layer_c_weights(
+    env: ManagerBasedRLEnv,
+    band_alpha: float,
+    band_contact_initial: float,
+    band_contact_final: float,
+    band_propulsion_initial: float,
+    band_propulsion_final: float,
+    coop_alpha: float,
+    coop_usage_initial: float,
+    coop_usage_final: float,
+    coop_reward_initial: float,
+    coop_reward_final: float,
+) -> None:
+    """V28 Layer C target-band + cooperation 가중치 ramp 적용 (복잡도 분리)."""
+    band_terms: dict[str, tuple[float, float]] = {
+        "per_leg_contact_target_band": (band_contact_initial, band_contact_final),
+        "per_leg_propulsion_target_band": (band_propulsion_initial, band_propulsion_final),
+    }
+    for term_name, (w_init, w_final) in band_terms.items():
+        if abs(w_init) < 1e-9 and abs(w_final) < 1e-9:
+            continue
+        current = w_init + band_alpha * (w_final - w_init)
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = current
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+    coop_terms: dict[str, tuple[float, float]] = {
+        "limb_usage_target_band": (coop_usage_initial, coop_usage_final),
+        "four_limb_cooperation": (coop_reward_initial, coop_reward_final),
+    }
+    for term_name, (w_init, w_final) in coop_terms.items():
+        if abs(w_init) < 1e-9 and abs(w_final) < 1e-9:
+            continue
+        current = w_init + coop_alpha * (w_final - w_init)
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = current
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+
 def _curriculum_apply_weights(
     env: ManagerBasedRLEnv,
     alpha12: float,
@@ -1999,6 +2181,18 @@ def _curriculum_apply_weights(
     validity_gate_final: float = -60.0,
     # V27.1b: per_leg_propulsion_floor 전용 alpha (contact floor와 분리)
     propulsion_floor_alpha: float = -1.0,
+    # V28: Layer C target-band reward ramp
+    band_alpha: float = 0.0,
+    band_contact_initial: float = 0.0,
+    band_contact_final: float = 0.0,
+    band_propulsion_initial: float = 0.0,
+    band_propulsion_final: float = 0.0,
+    # V28: usage band + cooperation ramp (별도 alpha)
+    coop_alpha: float = 0.0,
+    coop_usage_initial: float = 0.0,
+    coop_usage_final: float = 0.0,
+    coop_reward_initial: float = 0.0,
+    coop_reward_final: float = 0.0,
 ) -> None:
     """alpha 기반으로 Phase 가중치를 보간하여 적용."""
     w = _CURRICULUM_PHASE_WEIGHTS
@@ -2097,6 +2291,21 @@ def _curriculum_apply_weights(
         except Exception:
             pass
 
+    # V28: Layer C target-band + cooperation ramp (별도 헬퍼 — 복잡도 분리)
+    _curriculum_apply_layer_c_weights(
+        env,
+        band_alpha=float(band_alpha),
+        band_contact_initial=float(band_contact_initial),
+        band_contact_final=float(band_contact_final),
+        band_propulsion_initial=float(band_propulsion_initial),
+        band_propulsion_final=float(band_propulsion_final),
+        coop_alpha=float(coop_alpha),
+        coop_usage_initial=float(coop_usage_initial),
+        coop_usage_final=float(coop_usage_final),
+        coop_reward_initial=float(coop_reward_initial),
+        coop_reward_final=float(coop_reward_final),
+    )
+
 
 # ── 로깅 대상 핵심 term 정의 ──
 _LOG_WEIGHT_TERMS = [
@@ -2116,6 +2325,11 @@ _LOG_WEIGHT_TERMS = [
     # V27 신규
     "front_left_right_propulsion_diff_penalty",
     "single_limb_validity_penalty",
+    # V28 Layer C (없으면 skip)
+    "per_leg_contact_target_band",
+    "per_leg_propulsion_target_band",
+    "limb_usage_target_band",
+    "four_limb_cooperation",
 ]
 _LOG_RAW_GAIT_TERMS = ["forward_velocity", "trot_gait", "diagonal_coupling", "leg_lift", "foot_clearance"]
 _LOG_RAW_QUALITY_TERMS = ["joint_vel_l2", "dof_acc_l2", "action_rate_l2"]
@@ -2227,6 +2441,20 @@ def reward_weight_curriculum(
     # V27.1b: per_leg_propulsion_floor 전용 ramp (contact와 분리)
     propulsion_floor_ramp_start: int = -1,
     propulsion_floor_ramp_end: int = -1,
+    # V28: Layer C target-band reward ramp (iter 100~300)
+    band_ramp_start: int = 100,
+    band_ramp_end: int = 300,
+    band_contact_initial: float = 0.0,
+    band_contact_final: float = 0.0,
+    band_propulsion_initial: float = 0.0,
+    band_propulsion_final: float = 0.0,
+    # V28: usage band + cooperation ramp (iter 200~450)
+    coop_ramp_start: int = 200,
+    coop_ramp_end: int = 450,
+    coop_usage_initial: float = 0.0,
+    coop_usage_final: float = 0.0,
+    coop_reward_initial: float = 0.0,
+    coop_reward_final: float = 0.0,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -2268,6 +2496,9 @@ def reward_weight_curriculum(
         _prop_ramp_start = propulsion_floor_ramp_start if propulsion_floor_ramp_start >= 0 else floor_ramp_start
         _prop_ramp_end = propulsion_floor_ramp_end if propulsion_floor_ramp_end >= 0 else floor_ramp_end
         env._crr_propulsion_floor_alpha = _curriculum_target_alpha(iteration, _prop_ramp_start, _prop_ramp_end)
+        # V28: Layer C alphas
+        env._crr_band_alpha = _curriculum_target_alpha(iteration, band_ramp_start, band_ramp_end)
+        env._crr_coop_alpha = _curriculum_target_alpha(iteration, coop_ramp_start, coop_ramp_end)
         env._crr_last_update = iteration
         env._crr_gate_paused = False
         _curriculum_apply_weights(
@@ -2296,6 +2527,16 @@ def reward_weight_curriculum(
             validity_gate_initial=validity_gate_initial,
             validity_gate_final=validity_gate_final,
             propulsion_floor_alpha=env._crr_propulsion_floor_alpha,
+            band_alpha=env._crr_band_alpha,
+            band_contact_initial=band_contact_initial,
+            band_contact_final=band_contact_final,
+            band_propulsion_initial=band_propulsion_initial,
+            band_propulsion_final=band_propulsion_final,
+            coop_alpha=env._crr_coop_alpha,
+            coop_usage_initial=coop_usage_initial,
+            coop_usage_final=coop_usage_final,
+            coop_reward_initial=coop_reward_initial,
+            coop_reward_final=coop_reward_final,
         )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
@@ -2303,9 +2544,11 @@ def reward_weight_curriculum(
         print(f"  alpha12={env._crr_alpha12:.3f}, alpha23={env._crr_alpha23:.3f}, validity_alpha={env._crr_validity_alpha:.3f}")
         print(f"  floor_alpha={env._crr_floor_alpha:.3f}, prop_floor_alpha={env._crr_propulsion_floor_alpha:.3f}, load_alpha={env._crr_load_alpha:.3f}")
         print(f"  validity_gate_alpha={env._crr_validity_gate_alpha:.3f} (weight {validity_gate_initial:.1f}→{validity_gate_final:.1f})")
+        print(f"  band_alpha={env._crr_band_alpha:.3f}, coop_alpha={env._crr_coop_alpha:.3f} (V28 Layer C)")
         print(f"  ramp1=[{ramp1_start}~{ramp1_end}], ramp2=[{ramp2_start}~{ramp2_end}]")
         print(f"  floor_ramp=[{floor_ramp_start}~{floor_ramp_end}], prop_floor_ramp=[{_prop_ramp_start}~{_prop_ramp_end}], load_ramp=[{load_ramp_start}~{load_ramp_end}]")
         print(f"  validity_gate_ramp=[{validity_gate_ramp_start}~{validity_gate_ramp_end}]")
+        print(f"  band_ramp=[{band_ramp_start}~{band_ramp_end}], coop_ramp=[{coop_ramp_start}~{coop_ramp_end}] (V28)")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
         # INIT 시점 key weight 로깅
@@ -2336,6 +2579,9 @@ def reward_weight_curriculum(
     _prop_ramp_start_u = propulsion_floor_ramp_start if propulsion_floor_ramp_start >= 0 else floor_ramp_start
     _prop_ramp_end_u = propulsion_floor_ramp_end if propulsion_floor_ramp_end >= 0 else floor_ramp_end
     target_prop_floor = _curriculum_target_alpha(iteration, _prop_ramp_start_u, _prop_ramp_end_u)
+    # V28: Layer C targets
+    target_band = _curriculum_target_alpha(iteration, band_ramp_start, band_ramp_end)
+    target_coop = _curriculum_target_alpha(iteration, coop_ramp_start, coop_ramp_end)
 
     # 이미 target에 도달 → 스킵
     if (
@@ -2346,6 +2592,8 @@ def reward_weight_curriculum(
         and abs(env._crr_load_alpha - target_load) < 1e-6
         and abs(env._crr_validity_gate_alpha - target_validity_gate) < 1e-6
         and abs(env._crr_propulsion_floor_alpha - target_prop_floor) < 1e-6
+        and abs(env._crr_band_alpha - target_band) < 1e-6
+        and abs(env._crr_coop_alpha - target_coop) < 1e-6
     ):
         return None
 
@@ -2372,6 +2620,8 @@ def reward_weight_curriculum(
     max_step_load = update_interval / max(1, load_ramp_end - load_ramp_start)
     max_step_vgate = update_interval / max(1, validity_gate_ramp_end - validity_gate_ramp_start)
     max_step_prop_floor = update_interval / max(1, _prop_ramp_end_u - _prop_ramp_start_u)
+    max_step_band = update_interval / max(1, band_ramp_end - band_ramp_start)
+    max_step_coop = update_interval / max(1, coop_ramp_end - coop_ramp_start)
     new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
     new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
     new_validity = min(target_validity, env._crr_validity_alpha + max_step_validity)
@@ -2380,6 +2630,9 @@ def reward_weight_curriculum(
     new_load = min(target_load, env._crr_load_alpha + max_step_load)
     new_validity_gate = min(target_validity_gate, env._crr_validity_gate_alpha + max_step_vgate)
     new_prop_floor = min(target_prop_floor, env._crr_propulsion_floor_alpha + max_step_prop_floor)
+    # V28: Layer C ramps (NOT paused by gait gate)
+    new_band = min(target_band, env._crr_band_alpha + max_step_band)
+    new_coop = min(target_coop, env._crr_coop_alpha + max_step_coop)
 
     # 실제 변화 없으면 스킵
     if (
@@ -2390,6 +2643,8 @@ def reward_weight_curriculum(
         and abs(new_load - env._crr_load_alpha) < 1e-6
         and abs(new_validity_gate - env._crr_validity_gate_alpha) < 1e-6
         and abs(new_prop_floor - env._crr_propulsion_floor_alpha) < 1e-6
+        and abs(new_band - env._crr_band_alpha) < 1e-6
+        and abs(new_coop - env._crr_coop_alpha) < 1e-6
     ):
         return None
 
@@ -2403,6 +2658,8 @@ def reward_weight_curriculum(
     env._crr_load_alpha = new_load
     env._crr_validity_gate_alpha = new_validity_gate
     env._crr_propulsion_floor_alpha = new_prop_floor
+    env._crr_band_alpha = new_band
+    env._crr_coop_alpha = new_coop
 
     # ── 가중치 적용 ──
     _curriculum_apply_weights(
@@ -2431,6 +2688,16 @@ def reward_weight_curriculum(
         validity_gate_initial=validity_gate_initial,
         validity_gate_final=validity_gate_final,
         propulsion_floor_alpha=new_prop_floor,
+        band_alpha=new_band,
+        band_contact_initial=band_contact_initial,
+        band_contact_final=band_contact_final,
+        band_propulsion_initial=band_propulsion_initial,
+        band_propulsion_final=band_propulsion_final,
+        coop_alpha=new_coop,
+        coop_usage_initial=coop_usage_initial,
+        coop_usage_final=coop_usage_final,
+        coop_reward_initial=coop_reward_initial,
+        coop_reward_final=coop_reward_final,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──

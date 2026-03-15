@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V27.1b"
+TRAIN_VERSION = "V28"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -145,24 +145,17 @@ class SpotMicroRewardCurriculumCfg:
     Phase 2→3 (WALK→TROT):  iter 5500~8000 선형 보간
     Metric gating: ep_len < 200이면 ramp 일시정지
 
-    V27 변경:
-      floor_ramp: iter 0~50 — 존재 floor 패널티 빠르게 full-strength 도달
-      load_ramp:  iter 50~150 — 하중 분산 패널티 조기 개입
-      weight 대폭 증강: floor initial -10, contact final -40, prop final -30
-      single_limb_validity_penalty: 고정 weight -60 (ramp 없음, env_cfg에서 직접 설정)
-
-    V27.1a 변경:
-      single_limb_validity_penalty: -20 → -60 soft ramp (iter 0~100)
-        초반 탐색 과도한 왜곡 방지
-      rear_left_right_usage_diff_penalty: 복구 (-10, max_diff 0.30)
-      front_left_right_usage_diff_penalty: 복구 (-8, max_diff 0.30)
-
-    V27.1b 변경 (강도 완화 — 학습 억제 해소):
-      single_limb_validity_penalty: -5 → -35 soft ramp (iter 0~200)
-      contact floor: -2 → -20 (ramp iter 0~150)
-      propulsion floor: -2 → -15 (ramp iter 50~200, contact와 분리)
-      limb_usage_min: ramp 0~50 → 0~150 (의도적 완화 — contact floor와 동일 ramp 공유)
-      diagonal gate: min_contact 0.25→0.15, min_propulsion 0.10→0.05
+    V28 변경 ("안 하면 벌점" → "제대로 하면 이득"):
+      Layer B (Validity Floor) — V27.1b 대비 완화:
+        single_limb_validity_penalty: -5 → -25 (iter 0~250, V27.1b -5→-35 0~200보다 약화)
+        contact floor: -1 → -12 (iter 0~200, V27.1b -2→-20보다 약화)
+        propulsion floor: -1 → -10 (iter 50~250, V27.1b -2→-15보다 약화)
+      Layer C (Target-Band Incentive) — 신규:
+        contact target band [0.20~0.45]: 0.5 → 5.0 (iter 100~300, ramp)
+        propulsion target band [0.15~0.38]: 0.5 → 4.0 (iter 100~300)
+        usage target band [0.20~0.45]: 0.0 → 3.0 (iter 200~450)
+        four_limb_cooperation: 0.0 → 8.0 (iter 200~450, trigger band_hit >= 2/3)
+      Layer C/B ramp 설계: iter 250+에서 Layer C 총합 > Layer B 총합
     """
     reward_weights = CurrTerm(
         func=custom_mdp.reward_weight_curriculum,
@@ -178,32 +171,45 @@ class SpotMicroRewardCurriculumCfg:
             "validity_limb_usage_final": 0.0,
             "validity_rear_diff_initial": 0.0,
             "validity_rear_diff_final": 0.0,
-            # V27.1b: existence floor ramp — contact + limb_usage 완화 (iter 0~150)
-            # limb_usage_min도 동일 ramp 공유: 초기 학습 억제를 줄이기 위해 V27.1a(0~50)보다 천천히 강화
+            # V28 Layer B: existence floor ramp — V27.1b보다 완화 (Layer C 공간 확보)
             "floor_ramp_start": 0,
-            "floor_ramp_end": 150,
+            "floor_ramp_end": 200,
             "floor_limb_usage_initial": -8.0,
-            "floor_limb_usage_final": -25.0,         # V27.1b: ramp 0~150 (V27.1a: 0~50) — 의도적 완화
-            "floor_per_leg_contact_initial": -2.0,   # V27.1b: -10 → -2 (초반 완화)
-            "floor_per_leg_contact_final": -20.0,    # V27.1b: -40 → -20
-            "floor_per_leg_propulsion_initial": -2.0,  # V27.1b: -10 → -2
-            "floor_per_leg_propulsion_final": -15.0,   # V27.1b: -30 → -15
-            # V27.1b: propulsion floor 전용 ramp (iter 50~200, contact보다 늦게)
+            "floor_limb_usage_final": -25.0,
+            "floor_per_leg_contact_initial": -1.0,   # V28: -2 → -1 (초반 추가 완화)
+            "floor_per_leg_contact_final": -12.0,    # V28: -20 → -12 (Layer C 공간 확보)
+            "floor_per_leg_propulsion_initial": -1.0,  # V28: -2 → -1
+            "floor_per_leg_propulsion_final": -10.0,   # V28: -15 → -10
+            # V28: propulsion floor 전용 ramp (iter 50~250, V27.1b 50~200보다 늦게)
             "propulsion_floor_ramp_start": 50,
-            "propulsion_floor_ramp_end": 200,
-            # V27: load sharing ramp (iter 50~150, 조기 개입)
+            "propulsion_floor_ramp_end": 250,
+            # Load sharing ramp (V27 동일 유지)
             "load_ramp_start": 50,
             "load_ramp_end": 150,
-            "load_rear_usage_diff_final": -10.0,   # V27.1a: usage diff 복구 (max_diff 0.30)
-            "load_front_usage_diff_final": -8.0,   # V27.1a: front usage diff 복구 (max_diff 0.30)
-            "load_rear_prop_diff_final": -20.0,    # V27: 뒷다리 추진 편중 강화
-            "load_front_rear_balance_final": 0.0,  # V27: 비활성
-            "load_front_prop_diff_final": -20.0,   # V27: 앞다리 추진 편중 신규
-            # V27.1b: single_limb_validity_penalty soft ramp (iter 0~200, 완화)
+            "load_rear_usage_diff_final": -10.0,
+            "load_front_usage_diff_final": -8.0,
+            "load_rear_prop_diff_final": -20.0,
+            "load_front_rear_balance_final": 0.0,
+            "load_front_prop_diff_final": -20.0,
+            # V28 Layer B: single_limb_validity_penalty ramp (iter 0~250, V27.1b 0~200보다 완화)
             "validity_gate_ramp_start": 0,
-            "validity_gate_ramp_end": 200,
-            "validity_gate_initial": -5.0,   # V27.1b: -20 → -5 (초반 대폭 완화)
-            "validity_gate_final": -35.0,    # V27.1b: -60 → -35 (final도 완화)
+            "validity_gate_ramp_end": 250,
+            "validity_gate_initial": -5.0,
+            "validity_gate_final": -25.0,    # V28: -35 → -25 (Layer C에 유리한 공간)
+            # V28 Layer C: contact + propulsion target-band reward ramp (iter 100~300)
+            "band_ramp_start": 100,
+            "band_ramp_end": 300,
+            "band_contact_initial": 0.5,     # iter 100부터 약하게 시작
+            "band_contact_final": 5.0,       # V26 iter200 실측 기반 band [0.20~0.45]
+            "band_propulsion_initial": 0.5,
+            "band_propulsion_final": 4.0,    # band [0.15~0.38]
+            # V28 Layer C: usage band + cooperation ramp (iter 200~450, 후반 강화형)
+            "coop_ramp_start": 200,
+            "coop_ramp_end": 450,
+            "coop_usage_initial": 0.0,
+            "coop_usage_final": 3.0,         # usage band [0.20~0.45]
+            "coop_reward_initial": 0.0,
+            "coop_reward_final": 8.0,        # band_hit_count >= 2/3 trigger
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -593,11 +599,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V27: Symmetric existence floor penalties — V26보다 강한 weight, 빠른 ramp
-        # floor_ramp: iter 0~50 (V26: 0~200). initial weight도 대폭 증강.
+        # V28 Layer B: Symmetric existence floor penalties (V27.1b보다 완화 — Layer C 공간 확보)
         self.rewards.limb_usage_min_penalty = RewTerm(
             func=custom_mdp.limb_usage_min_penalty,
-            weight=-8.0,  # V27: initial -8 (V26: -1.5), curriculum이 -25.0까지 ramp
+            weight=-8.0,  # V28: initial -8, curriculum이 -25.0까지 ramp (V27.1b 동일)
             params={
                 "min_usage": 0.10,
                 "contact_target": 0.5,
@@ -610,18 +615,18 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.per_leg_contact_floor = RewTerm(
             func=custom_mdp.per_leg_contact_floor_penalty,
-            weight=-2.0,  # V27.1b: initial -2 (V27.1a: -10), curriculum이 -20.0까지 ramp (iter 0~150)
+            weight=-1.0,  # V28: initial -1 (V27.1b: -2), curriculum이 -12.0까지 ramp (iter 0~200)
             params={
-                "floor": 0.15,  # V27: 0.15 (V26: 0.10) — 더 엄격한 최소 기준
+                "floor": 0.15,  # V27: 0.15 유지 — 완전 붕괴 방지 기준
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         )
         self.rewards.per_leg_propulsion_floor = RewTerm(
             func=custom_mdp.per_leg_propulsion_floor_penalty,
-            weight=-2.0,  # V27.1b: initial -2 (V27.1a: -10), curriculum이 -15.0까지 ramp (iter 50~200)
+            weight=-1.0,  # V28: initial -1 (V27.1b: -2), curriculum이 -10.0까지 ramp (iter 50~250)
             params={
-                "floor": 0.10,  # V27: 0.10 (V26: 0.05) — fake contact 차단 강화
+                "floor": 0.10,  # V27: 0.10 유지 — fake contact 차단 기준
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
@@ -689,9 +694,61 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.single_limb_validity_penalty = RewTerm(
             func=custom_mdp.single_limb_validity_penalty,
-            weight=-5.0,  # V27.1b: initial weight (curriculum이 -35.0까지 ramp, iter 0~200)
+            weight=-5.0,  # V28: initial weight (curriculum이 -25.0까지 ramp, iter 0~250)
             params={
                 "floor": 0.10,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        # V28 Layer C: Target-Band Incentive — "정상 범위에 들어와야 이득이 되는 구조"
+        # band 수치는 V26 iter 200 실측 기반: contact [0.20~0.45], propulsion [0.15~0.38]
+        self.rewards.per_leg_contact_target_band = RewTerm(
+            func=custom_mdp.per_leg_contact_target_band_reward,
+            weight=0.5,  # V28: initial 0.5, curriculum이 5.0까지 ramp (iter 100~300)
+            params={
+                "band_low": 0.20,
+                "band_high": 0.45,
+                "band_ramp_start": 0.05,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.per_leg_propulsion_target_band = RewTerm(
+            func=custom_mdp.per_leg_propulsion_target_band_reward,
+            weight=0.5,  # V28: initial 0.5, curriculum이 4.0까지 ramp (iter 100~300)
+            params={
+                "band_low": 0.15,
+                "band_high": 0.38,
+                "band_ramp_start": 0.03,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.limb_usage_target_band = RewTerm(
+            func=custom_mdp.limb_usage_target_band_reward,
+            weight=0.0,  # V28: initial 0, curriculum이 3.0까지 ramp (iter 200~450)
+            params={
+                "band_low": 0.20,
+                "band_high": 0.45,
+                "band_ramp_start": 0.05,
+                "contact_target": 0.5,
+                "propulsion_target": 0.30,
+                "leg_lift_target": 0.18,
+                "clearance_target": 0.03,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.four_limb_cooperation = RewTerm(
+            func=custom_mdp.four_limb_cooperation_reward,
+            weight=0.0,  # V28: initial 0, curriculum이 8.0까지 ramp (iter 200~450)
+            params={
+                "contact_band_low": 0.20,
+                "propulsion_band_low": 0.15,
+                "trigger_partial": 2,   # band_hit >= 2 → 0.5x
+                "trigger_full": 3,      # band_hit >= 3 → 1.0x
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
@@ -723,8 +780,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "asset_cfg": SceneEntityCfg("robot"),
                 "vel_deadzone": 0.1,
                 "min_vel": 0.05,
-                "min_contact": 0.15,    # V27.1b: 0.25→0.15 (초반 완화 — locomotion signal 유지)
-                "min_propulsion": 0.05,  # V27.1b: 0.10→0.05 (초반 완화)
+                "min_contact": 0.10,    # V28: 0.15→0.10 (추가 완화 — locomotion signal 보호)
+                "min_propulsion": 0.04,  # V28: 0.05→0.04
             },
         )
 
