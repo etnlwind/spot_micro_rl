@@ -1984,6 +1984,10 @@ def _curriculum_apply_weights(
     load_rear_prop_diff_final: float = 0.0,
     load_front_rear_balance_final: float = 0.0,
     load_front_prop_diff_final: float = 0.0,
+    # V27.1a: single_limb_validity_penalty soft ramp
+    validity_gate_alpha: float = 1.0,
+    validity_gate_initial: float = -60.0,
+    validity_gate_final: float = -60.0,
 ) -> None:
     """alpha 기반으로 Phase 가중치를 보간하여 적용."""
     w = _CURRICULUM_PHASE_WEIGHTS
@@ -2052,6 +2056,19 @@ def _curriculum_apply_weights(
             cfg = env.reward_manager.get_term_cfg(term_name)
             cfg.weight = current
             env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+    # V27.1a: single_limb_validity_penalty soft ramp (iter 0 ~ validity_gate_ramp_end)
+    # initial에서 final까지 선형 보간 — iter 0부터 너무 강하게 왜곡하지 않도록
+    vg_initial = float(validity_gate_initial)
+    vg_final = float(validity_gate_final)
+    if abs(vg_initial - vg_final) > 1e-6 or abs(vg_initial) > 1e-6:
+        vg_current = vg_initial + float(validity_gate_alpha) * (vg_final - vg_initial)
+        try:
+            cfg = env.reward_manager.get_term_cfg("single_limb_validity_penalty")
+            cfg.weight = vg_current
+            env.reward_manager.set_term_cfg("single_limb_validity_penalty", cfg)
         except Exception:
             pass
 
@@ -2177,6 +2194,11 @@ def reward_weight_curriculum(
     load_rear_prop_diff_final: float = 0.0,
     load_front_rear_balance_final: float = 0.0,
     load_front_prop_diff_final: float = 0.0,
+    # V27.1a: single_limb_validity_penalty soft ramp
+    validity_gate_ramp_start: int = 0,
+    validity_gate_ramp_end: int = 1,
+    validity_gate_initial: float = -60.0,
+    validity_gate_final: float = -60.0,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -2213,6 +2235,7 @@ def reward_weight_curriculum(
         env._crr_validity_alpha = _curriculum_target_alpha(iteration, validity_ramp_start, validity_ramp_end)
         env._crr_floor_alpha = _curriculum_target_alpha(iteration, floor_ramp_start, floor_ramp_end)
         env._crr_load_alpha = _curriculum_target_alpha(iteration, load_ramp_start, load_ramp_end)
+        env._crr_validity_gate_alpha = _curriculum_target_alpha(iteration, validity_gate_ramp_start, validity_gate_ramp_end)
         env._crr_last_update = iteration
         env._crr_gate_paused = False
         _curriculum_apply_weights(
@@ -2237,14 +2260,19 @@ def reward_weight_curriculum(
             load_rear_prop_diff_final=load_rear_prop_diff_final,
             load_front_rear_balance_final=load_front_rear_balance_final,
             load_front_prop_diff_final=load_front_prop_diff_final,
+            validity_gate_alpha=env._crr_validity_gate_alpha,
+            validity_gate_initial=validity_gate_initial,
+            validity_gate_final=validity_gate_final,
         )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
         print(f"[Curriculum] INIT @ iter {iteration} | {phase_str}")
         print(f"  alpha12={env._crr_alpha12:.3f}, alpha23={env._crr_alpha23:.3f}, validity_alpha={env._crr_validity_alpha:.3f}")
         print(f"  floor_alpha={env._crr_floor_alpha:.3f}, load_alpha={env._crr_load_alpha:.3f}")
+        print(f"  validity_gate_alpha={env._crr_validity_gate_alpha:.3f} (weight {validity_gate_initial:.1f}→{validity_gate_final:.1f})")
         print(f"  ramp1=[{ramp1_start}~{ramp1_end}], ramp2=[{ramp2_start}~{ramp2_end}]")
         print(f"  floor_ramp=[{floor_ramp_start}~{floor_ramp_end}], load_ramp=[{load_ramp_start}~{load_ramp_end}]")
+        print(f"  validity_gate_ramp=[{validity_gate_ramp_start}~{validity_gate_ramp_end}]")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
         # INIT 시점 key weight 로깅
@@ -2270,6 +2298,7 @@ def reward_weight_curriculum(
     target_validity = _curriculum_target_alpha(iteration, validity_ramp_start, validity_ramp_end)
     target_floor = _curriculum_target_alpha(iteration, floor_ramp_start, floor_ramp_end)
     target_load = _curriculum_target_alpha(iteration, load_ramp_start, load_ramp_end)
+    target_validity_gate = _curriculum_target_alpha(iteration, validity_gate_ramp_start, validity_gate_ramp_end)
 
     # 이미 target에 도달 → 스킵
     if (
@@ -2278,6 +2307,7 @@ def reward_weight_curriculum(
         and abs(env._crr_validity_alpha - target_validity) < 1e-6
         and abs(env._crr_floor_alpha - target_floor) < 1e-6
         and abs(env._crr_load_alpha - target_load) < 1e-6
+        and abs(env._crr_validity_gate_alpha - target_validity_gate) < 1e-6
     ):
         return None
 
@@ -2302,12 +2332,14 @@ def reward_weight_curriculum(
     max_step_validity = update_interval / max(1, validity_ramp_end - validity_ramp_start)
     max_step_floor = update_interval / max(1, floor_ramp_end - floor_ramp_start)
     max_step_load = update_interval / max(1, load_ramp_end - load_ramp_start)
+    max_step_vgate = update_interval / max(1, validity_gate_ramp_end - validity_gate_ramp_start)
     new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
     new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
     new_validity = min(target_validity, env._crr_validity_alpha + max_step_validity)
-    # floor/load ramps are NOT paused by gait gate (existence floor must always progress)
+    # floor/load/validity_gate ramps are NOT paused by gait gate (existence floor must always progress)
     new_floor = min(target_floor, env._crr_floor_alpha + max_step_floor)
     new_load = min(target_load, env._crr_load_alpha + max_step_load)
+    new_validity_gate = min(target_validity_gate, env._crr_validity_gate_alpha + max_step_vgate)
 
     # 실제 변화 없으면 스킵
     if (
@@ -2316,6 +2348,7 @@ def reward_weight_curriculum(
         and abs(new_validity - env._crr_validity_alpha) < 1e-6
         and abs(new_floor - env._crr_floor_alpha) < 1e-6
         and abs(new_load - env._crr_load_alpha) < 1e-6
+        and abs(new_validity_gate - env._crr_validity_gate_alpha) < 1e-6
     ):
         return None
 
@@ -2327,6 +2360,7 @@ def reward_weight_curriculum(
     env._crr_validity_alpha = new_validity
     env._crr_floor_alpha = new_floor
     env._crr_load_alpha = new_load
+    env._crr_validity_gate_alpha = new_validity_gate
 
     # ── 가중치 적용 ──
     _curriculum_apply_weights(
@@ -2350,6 +2384,10 @@ def reward_weight_curriculum(
         load_front_usage_diff_final=load_front_usage_diff_final,
         load_rear_prop_diff_final=load_rear_prop_diff_final,
         load_front_rear_balance_final=load_front_rear_balance_final,
+        load_front_prop_diff_final=load_front_prop_diff_final,
+        validity_gate_alpha=new_validity_gate,
+        validity_gate_initial=validity_gate_initial,
+        validity_gate_final=validity_gate_final,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──

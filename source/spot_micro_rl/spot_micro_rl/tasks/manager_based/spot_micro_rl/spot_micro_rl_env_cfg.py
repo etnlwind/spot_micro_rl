@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V27"
+TRAIN_VERSION = "V27.1a"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -150,6 +150,12 @@ class SpotMicroRewardCurriculumCfg:
       load_ramp:  iter 50~150 — 하중 분산 패널티 조기 개입
       weight 대폭 증강: floor initial -10, contact final -40, prop final -30
       single_limb_validity_penalty: 고정 weight -60 (ramp 없음, env_cfg에서 직접 설정)
+
+    V27.1a 변경:
+      single_limb_validity_penalty: -20 → -60 soft ramp (iter 0~100)
+        초반 탐색 과도한 왜곡 방지
+      rear_left_right_usage_diff_penalty: 복구 (-10, max_diff 0.30)
+      front_left_right_usage_diff_penalty: 복구 (-8, max_diff 0.30)
     """
     reward_weights = CurrTerm(
         func=custom_mdp.reward_weight_curriculum,
@@ -177,11 +183,16 @@ class SpotMicroRewardCurriculumCfg:
             # V27: load sharing ramp (iter 50~150, 조기 개입)
             "load_ramp_start": 50,
             "load_ramp_end": 150,
-            "load_rear_usage_diff_final": 0.0,    # V27: usage diff 비활성 (propulsion으로 대체)
-            "load_front_usage_diff_final": 0.0,   # V27: 비활성
-            "load_rear_prop_diff_final": -20.0,   # V27: 뒷다리 추진 편중 강화
+            "load_rear_usage_diff_final": -10.0,   # V27.1a: usage diff 복구 (max_diff 0.30)
+            "load_front_usage_diff_final": -8.0,   # V27.1a: front usage diff 복구 (max_diff 0.30)
+            "load_rear_prop_diff_final": -20.0,    # V27: 뒷다리 추진 편중 강화
             "load_front_rear_balance_final": 0.0,  # V27: 비활성
-            "load_front_prop_diff_final": -20.0,  # V27: 앞다리 추진 편중 신규
+            "load_front_prop_diff_final": -20.0,   # V27: 앞다리 추진 편중 신규
+            # V27.1a: single_limb_validity_penalty soft ramp (iter 0~100)
+            "validity_gate_ramp_start": 0,
+            "validity_gate_ramp_end": 100,
+            "validity_gate_initial": -20.0,  # 초반 탐색 허용
+            "validity_gate_final": -60.0,    # iter 100부터 full strength
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -609,9 +620,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # usage_diff 비활성, propulsion_diff 강화 (max_diff 0.40 → 0.25)
         self.rewards.rear_left_right_usage_diff_penalty = RewTerm(
             func=custom_mdp.rear_left_right_usage_diff_penalty,
-            weight=0.0,  # V27: 비활성 (propulsion diff으로 대체)
+            weight=0.0,  # V27.1a: load ramp initial — curriculum이 -10.0까지 ramp (iter 50~150)
             params={
-                "max_diff": 0.40,
+                "max_diff": 0.30,  # V27.1a: 0.40→0.30 (더 엄격)
                 "contact_target": 0.5,
                 "propulsion_target": 0.30,
                 "leg_lift_target": 0.18,
@@ -622,9 +633,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.front_left_right_usage_diff_penalty = RewTerm(
             func=custom_mdp.front_left_right_usage_diff_penalty,
-            weight=0.0,  # V27: 비활성
+            weight=0.0,  # V27.1a: load ramp initial — curriculum이 -8.0까지 ramp (iter 50~150)
             params={
-                "max_diff": 0.40,
+                "max_diff": 0.30,  # V27.1a: 0.40→0.30 (더 엄격)
                 "contact_target": 0.5,
                 "propulsion_target": 0.30,
                 "leg_lift_target": 0.18,
@@ -667,7 +678,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.single_limb_validity_penalty = RewTerm(
             func=custom_mdp.single_limb_validity_penalty,
-            weight=-60.0,  # V27: 고정 weight, ramp 없음 (iter 0부터 full strength)
+            weight=-20.0,  # V27.1a: initial weight (curriculum이 -60.0까지 ramp, iter 0~100)
             params={
                 "floor": 0.10,
                 "min_vel": 0.05,

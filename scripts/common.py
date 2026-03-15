@@ -33,12 +33,12 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-TRAIN_VERSION = "V27"
+TRAIN_VERSION = "V27.1a"
 
 # Training configuration for TRAIN_VERSION.
 # Update this dict alongside TRAIN_VERSION whenever reward design changes.
 TRAINING_CONFIG = {
-    "description": "V27: 4발 기능 참여 강제 — single-limb collapse 완전 차단",
+    "description": "V27.1a: 4발 기능 참여 강제 + usage_diff 복구 + validity ramp + collapse 4발 감시",
     "ppo": {
         "gamma": 0.97,
         "clip_param": 0.1,
@@ -49,21 +49,25 @@ TRAINING_CONFIG = {
     },
     # (name, final_weight, initial_weight, key_params, description)
     "reward_terms": [
-        ("single_limb_validity_penalty",        -60.0, -60.0, "floor=0.10, min_vel=0.05",  "V27 핵심: 가장 약한 다리 contact+prop 복합 패널티 (고정 full strength)"),
-        ("per_leg_contact_floor",               -40.0, -10.0, "floor=0.15, min_vel=0.05",  "각 다리 최소 contact 비율 보장 (ramp iter 0→50: -10→-40)"),
-        ("per_leg_propulsion_floor",            -30.0, -10.0, "floor=0.10, min_vel=0.05",  "각 다리 최소 propulsion 보장 (ramp iter 0→50: -10→-30)"),
-        ("limb_usage_min_penalty",              -25.0,  -8.0, "min_usage=0.10",             "최소 다리 사용률 보장 (ramp iter 0→50: -8→-25)"),
-        ("rear_left_right_propulsion_diff",     -20.0,   0.0, "max_diff=0.25",              "뒷다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
-        ("front_left_right_propulsion_diff",    -20.0,   0.0, "max_diff=0.25",              "V27 신규: 앞다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
-        ("diagonal_coupling_soft_gate",         +25.0, +25.0, "min_contact=0.25, min_prop=0.10", "대각선 커플링 — propulsion gate 추가 (V27)"),
+        ("single_limb_validity_penalty", -60.0, -20.0, "floor=0.10, min_vel=0.05", "V27 핵심: 4발 최약 다리 contact+prop 복합 패널티 (ramp iter 0→100: -20→-60)"),
+        ("per_leg_contact_floor", -40.0, -10.0, "floor=0.15, min_vel=0.05", "각 다리 최소 contact 비율 보장 (ramp iter 0→50: -10→-40)"),
+        ("per_leg_propulsion_floor", -30.0, -10.0, "floor=0.10, min_vel=0.05", "각 다리 최소 propulsion 보장 (ramp iter 0→50: -10→-30)"),
+        ("limb_usage_min_penalty", -25.0, -8.0, "min_usage=0.10", "최소 다리 사용률 보장 (ramp iter 0→50: -8→-25)"),
+        ("rear_left_right_usage_diff", -10.0, 0.0, "max_diff=0.30", "V27.1a 복구: 뒷다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
+        ("front_left_right_usage_diff", -8.0, 0.0, "max_diff=0.30", "V27.1a 복구: 앞다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
+        ("rear_left_right_propulsion_diff", -20.0, 0.0, "max_diff=0.25", "뒷다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
+        ("front_left_right_propulsion_diff", -20.0, 0.0, "max_diff=0.25", "V27 신규: 앞다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
+        ("diagonal_coupling_soft_gate", +25.0, +25.0, "min_contact=0.25, min_prop=0.10", "대각선 커플링 — propulsion gate 추가 (V27)"),
     ],
     "collapse_restart": {
         "enabled": True,
         "check_iter_min": 100,
         "check_iter_max": 300,
         "contact_threshold": 0.05,
+        "propulsion_threshold": 0.05,
         "swing_threshold": 0.95,
         "consecutive_required": 3,
+        "monitored_legs": "fl, fr, rl, rr (V27.1a: 4발 전체)",
     },
 }
 
@@ -4670,7 +4674,7 @@ def format_report_summary_html(run_dir: str, checkpoint_path: str, analysis_text
     if any(v is not None for v in [cr_fl2, cr_fr2, cr_rl2, cr_rr2, prop_fl2, prop_fr2, prop_rl2, prop_rr2]):
         lines += [
             "",
-            f"• <b>다리 상태 (4발 전체)</b>",
+            "• <b>다리 상태 (4발 전체)</b>",
             f"  {_limb_icon2(cr_fl2, prop_fl2)} FL: contact={_fv2(cr_fl2)} | prop={_fv2(prop_fl2)} | swing={_fv2(sw_fl2)} | usage={_fv2(us_fl2)}",
             f"  {_limb_icon2(cr_fr2, prop_fr2)} FR: contact={_fv2(cr_fr2)} | prop={_fv2(prop_fr2)} | swing={_fv2(sw_fr2)} | usage={_fv2(us_fr2)}",
             f"  {_limb_icon2(cr_rl2, prop_rl2)} RL: contact={_fv2(cr_rl2)} | prop={_fv2(prop_rl2)} | swing={_fv2(sw_rl2)} | usage={_fv2(us_rl2)}",

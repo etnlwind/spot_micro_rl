@@ -12,20 +12,45 @@ else:
     import common
 
 
-# V25: restart-on-collapse 설정
+# V27.1a: restart-on-collapse 설정 — 4발 전체 감시, propulsion 포함
 _COLLAPSE_CHECK_ITER_MIN = 100   # iter 100 이전은 warming-up — 감지 안 함
 _COLLAPSE_CHECK_ITER_MAX = 300   # iter 300 이후는 이미 늦음 — 재시작 대신 알림만
 _COLLAPSE_CONTACT_THRESHOLD = 0.05
+_COLLAPSE_PROPULSION_THRESHOLD = 0.05   # V27.1a 신규: propulsion도 같이 봄
 _COLLAPSE_SWING_THRESHOLD = 0.95
 _COLLAPSE_CONSECUTIVE_REQUIRED = 3  # 연속 N회 감지 시 실제 collapse로 판정
+_COLLAPSE_LEGS = ("fl", "fr", "rl", "rr")  # V27.1a: 4발 전체 감시
 
 
-def _get_collapse_metrics(data: dict) -> tuple[float | None, float | None]:
-    """tfevents data에서 최신 contact_ratio_rl, swing_time_rl 반환."""
+def _get_collapse_metrics(data: dict) -> tuple[str | None, float | None, float | None, float | None]:
+    """tfevents data에서 4발 중 가장 collapse에 가까운 다리와 수치 반환.
+
+    V27.1a: RL 하나만 보던 V25 방식에서 FL/FR/RL/RR 전체로 확장.
+    contact < threshold AND propulsion < threshold AND swing > threshold 를
+    모두 만족하는 다리가 있으면 해당 다리명과 수치를 반환한다.
+    복수 다리가 해당하는 경우 contact가 가장 낮은 다리를 반환.
+    """
     def _latest(tag):
         vals = data.get(f"Episode_Reward/{tag}", [])
         return float(vals[-1][1]) if vals else None
-    return _latest("contact_ratio_rl"), _latest("swing_time_rl")
+
+    collapsed_legs = []
+    for leg in _COLLAPSE_LEGS:
+        contact = _latest(f"contact_ratio_{leg}")
+        prop = _latest(f"propulsion_{leg}")
+        swing = _latest(f"swing_time_{leg}")
+        if contact is None or prop is None or swing is None:
+            continue
+        if (contact < _COLLAPSE_CONTACT_THRESHOLD
+                and prop < _COLLAPSE_PROPULSION_THRESHOLD
+                and swing > _COLLAPSE_SWING_THRESHOLD):
+            collapsed_legs.append((leg, contact, prop, swing))
+
+    if not collapsed_legs:
+        return None, None, None, None
+    # contact가 가장 낮은 다리를 대표로 반환
+    worst = min(collapsed_legs, key=lambda x: x[1])
+    return worst[0], worst[1], worst[2], worst[3]
 
 
 def _restore_last_milestone(run_dir: str, iter_step: int) -> int:
@@ -189,30 +214,29 @@ def main() -> None:
                     collapse_consecutive_count = 0
                     collapse_restart_done = False
 
-                # V25: restart-on-collapse (iter 100~300 구간)
+                # V27.1a: restart-on-collapse (iter 100~300 구간) — 4발 전체 + propulsion 감시
                 if (not collapse_restart_done
                         and _COLLAPSE_CHECK_ITER_MIN <= current_iter <= _COLLAPSE_CHECK_ITER_MAX):
-                    rl_contact, rl_swing = _get_collapse_metrics(data)
-                    if (rl_contact is not None and rl_swing is not None
-                            and rl_contact < _COLLAPSE_CONTACT_THRESHOLD
-                            and rl_swing > _COLLAPSE_SWING_THRESHOLD):
+                    collapsed_leg, leg_contact, leg_prop, leg_swing = _get_collapse_metrics(data)
+                    if collapsed_leg is not None:
                         collapse_consecutive_count += 1
                         common.write_log(
-                            f"[Collapse] iter={current_iter} contact_rl={rl_contact:.4f} swing_rl={rl_swing:.4f}"
+                            f"[Collapse] iter={current_iter} leg={collapsed_leg}"
+                            f" contact={leg_contact:.4f} prop={leg_prop:.4f} swing={leg_swing:.4f}"
                             f" consecutive={collapse_consecutive_count}/{_COLLAPSE_CONSECUTIVE_REQUIRED}",
                             common.HEARTBEAT_LOG,
                         )
                         if collapse_consecutive_count >= _COLLAPSE_CONSECUTIVE_REQUIRED:
                             collapse_restart_done = True
                             common.write_log(
-                                f"[Collapse] RESTART triggered @ iter {current_iter} — rear-left collapse confirmed",
+                                f"[Collapse] RESTART triggered @ iter {current_iter} — {collapsed_leg} collapse confirmed",
                                 common.HEARTBEAT_LOG,
                             )
                             common.stop_training(common.HEARTBEAT_LOG)
                             common.send_text(
                                 f"🚨 <b>COLLAPSE RESTART — iter {current_iter:,}</b>\n"
-                                f"<i>contact_ratio_rl={rl_contact:.4f}, swing_time_rl={rl_swing:.4f}</i>\n"
-                                f"<i>rear-left collapse 확정 ({_COLLAPSE_CONSECUTIVE_REQUIRED}회 연속) — 훈련 재시작</i>",
+                                f"<i>leg={collapsed_leg}: contact={leg_contact:.4f}, prop={leg_prop:.4f}, swing={leg_swing:.4f}</i>\n"
+                                f"<i>single-limb collapse 확정 ({_COLLAPSE_CONSECUTIVE_REQUIRED}회 연속) — 훈련 재시작</i>",
                                 common.HEARTBEAT_LOG,
                                 parse_mode="HTML",
                             )
