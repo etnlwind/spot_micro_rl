@@ -800,6 +800,19 @@ def get_checkpoint_by_iter(run_dir: str | None, iter_num: int) -> str | None:
     checkpoint_path = os.path.join(run_dir, f"model_{iter_num}.pt")
     if os.path.isfile(checkpoint_path):
         return checkpoint_path
+    # fallback: 같은 버전의 다른 run 디렉토리를 최신순으로 탐색
+    run_version = _read_run_train_version(run_dir)
+    if run_version and os.path.isdir(LOG_BASE):
+        version_norm = run_version.strip().upper()
+        for run_name in sorted(os.listdir(LOG_BASE), reverse=True):
+            sibling = os.path.join(LOG_BASE, run_name)
+            if not os.path.isdir(sibling) or os.path.abspath(sibling) == os.path.abspath(run_dir):
+                continue
+            ver = _read_run_train_version(sibling)
+            if ver and ver.strip().upper() == version_norm:
+                candidate = os.path.join(sibling, f"model_{iter_num}.pt")
+                if os.path.isfile(candidate):
+                    return candidate
     return None
 
 
