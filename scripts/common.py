@@ -1413,8 +1413,8 @@ def launch_training(log_path: str, fresh: bool = False) -> dict:
     write_log(f"Launching training (fresh={fresh}): {command}", log_path)
     launcher_path = _launch_training_command(command, "_launch_training.cmd")
     write_log(f"Training launcher: {launcher_path}", log_path)
-    # Wait up to 30s for a new run directory to appear (Isaac Lab takes >5s to create it)
-    deadline = time.time() + 30
+    # Wait up to 90s for a new run directory to appear (Isaac Lab can take 30-50s to create it)
+    deadline = time.time() + 90
     while time.time() < deadline:
         time.sleep(3)
         candidate = get_latest_run_dir()
