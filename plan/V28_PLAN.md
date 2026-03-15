@@ -19,10 +19,12 @@
 - contact / propulsion이 모두 바닥 수준
 - locomotion bootstrap 자체가 죽음
 
-### V27.1b 실패
+### V27.1b 실패 (공식 판정: FAIL — 2026-03-15, iter 401)
 - 전체 억제는 완화됐지만
 - **RL 약세가 다시 고정**
-- FL/FR는 floor 근처에서 버티는 **tap suspicion**
+- iter 401 실측: FL contact=0.205 / FR=0.188 / **RL=0.071** / RR=0.181
+- RL이 FL 대비 contact 1/3 수준으로 고착 — V26.1과 동일한 패턴
+- usage_min=0.049 (floor=0.30 대비 극히 낮음)
 - 즉 “최소 기준만 넘기고 버티는” 해법이 다시 등장
 
 ### 결론
@@ -161,13 +163,15 @@ V28은 3층 구조로 간다.
 ---
 
 ### 5.4 usage target band
-예시 초기 band:
-- `usage_target_low = 0.12`
-- `usage_target_high = 0.35`
+> 참고: V26 tfevents에 limb_usage 개별 다리 태그 없음 — contact/propulsion 실측치 비례 추정
+
+추정 band:
+- `usage_target_low = 0.20`
+- `usage_target_high = 0.45`
 
 의미:
 - usage도 floor 근처에서 정체하면 보상이 약함
-- 적절한 기능 참여 범위까지 올라와야 이득
+- contact band와 동일 비율 적용 (실측치 확보 시 보정 필요)
 
 ---
 
@@ -356,40 +360,60 @@ V28의 성패는 항목보다 **curriculum**이 결정한다.
 
 ## 12. V28 iter 판정 기준
 
+> 기준값은 V26 iter 200 실측치(contact 최솟값 0.318, propulsion 최솟값 0.281) 및
+> V27.1b iter 401 실측치(RL contact=0.071)를 근거로 설정.
+
 ### iter 100
+
 정상:
-- 4발 평균 contact > `0.03`
-- 4발 평균 propulsion > `0.02`
-- `usage_min > 0.01`
-- all-limb suppression 없음
+
+- 4발 평균 contact > `0.08`
+- 4발 평균 propulsion > `0.05`
+- all-limb suppression 없음 (모든 다리 contact > 0.03)
 
 실패 경고:
-- 4발 전체가 여전히 `0.01` 수준
-- gait raw/gated가 지나치게 낮음
+
+- 4발 전체가 `0.03` 이하 — all-limb suppression 의심
+- 특정 다리 contact `0.01` 미만 — 단일 다리 조기 붕괴
 
 ### iter 200
+
 정상:
-- 4발 평균 contact > `0.05`
-- 4발 평균 propulsion > `0.03`
-- `usage_min > 0.03`
+
+- 4발 평균 contact > `0.15`
+- 4발 평균 propulsion > `0.10`
+- 최약 다리 contact > `0.08` (V27.1b RL=0.071 기준 이상)
 
 경고:
-- 특정 다리 하나가 계속 뒤처짐
-- floor 근처 정체가 뚜렷함
+
+- 특정 다리 contact < `0.08` 지속 — V27.1b 패턴 반복 위험
+- floor 근처 정체 뚜렷 (contact 변화율 < 5%)
 
 ### iter 300
+
 핵심 판정:
-- 4발 중 최소 2~3개는 target band 하한에 접근해야 함
-- `tap_suspicion`이 강하면 경고
+
+- 4발 중 최소 2개가 contact_target_low(`0.20`) 이상
+- 최약 다리 contact > `0.12`
+- `tap_suspicion` 없음
 - single-limb 약세 지속이면 실패 방향
 
 ### iter 500
+
+성공 기준:
+
+- 4발 중 3개 이상이 target band 내 (contact 0.20~0.45)
+- 최약 다리 contact > `0.18`
+- four_limb_cooperation_score 의미 있는 수준
+
 실패 기준:
-- target band 진입이 거의 없음
-- floor 근처 정체
+
+- target band 진입 다리 1개 이하
+- 최약 다리 contact < `0.10` 지속
 - 특정 다리 약세 고정
 
 이 경우:
+
 - **V28 실패**
 - 구조 재검토
 
@@ -509,15 +533,17 @@ V26.1 collapse 구간(200~350), V27.1b RL 약세 고착 구간이 Stage 2(100~25
 
 ---
 
-### 구현 전 체크리스트
+### 구현 전 체크리스트 (2026-03-15 기준)
 
-| 항목 | 현재 상태 | 권장 |
-|---|---|---|
-| band low 수치 근거 | 경험적 제안만 있음 | V26 iter 200 실측치 기준으로 보정 |
-| floor~band_low 회색 지대 처리 | 미정 | 약한 penalty 또는 inverted-U |
-| cooperative reward 트리거 조건 | “Stage 2쯤에” 수준 | `band_hit_count >= N` 명시 |
-| Layer C 가중치 크기 | 미정 | Layer B 합산의 1.5~2배 이상 |
-| tap_suspicion 구조적 억제 | 모니터링만 | reward 구조에서도 명시 |
+| 항목 | 상태 | 확정값 |
+| --- | --- | --- |
+| band low 수치 근거 | ✅ 완료 | contact 0.20 / propulsion 0.15 (V26 iter200 실측 기반) |
+| contact band high | ✅ 완료 | 0.45 (V26 FL 실측 0.475 근방) |
+| propulsion band high | ✅ 완료 | 0.38 (V26 FL 실측 0.420 근방) |
+| floor~band_low 회색 지대 처리 | ✅ 완료 | 약한 penalty 유지 (섹션 6 반영) |
+| cooperative reward 트리거 조건 | ✅ 완료 | `band_hit_count >= 2` on / `>= 3` 강화 |
+| Layer C/B ramp 비율 | ✅ 완료 | iter 250+에서 Layer C > Layer B |
+| tap_suspicion 구조적 억제 | 🔲 V28 시작 후 | reward 구조 반영 또는 모니터링 |
 
 ---
 
@@ -525,9 +551,17 @@ V26.1 collapse 구간(200~350), V27.1b RL 약세 고착 구간이 Stage 2(100~25
 
 V28은 V23~V27의 실패를 가장 잘 소화한 설계다.
 
-다만 **실제 성패는 target band 수치와 curriculum 타이밍이 결정한다.** 구조가 맞아도 수치가 달성 불가능한 범위이거나 cooperative reward 타이밍이 틀리면 다시 실패한다. 이 두 가지가 맞으면 V28이 처음으로 “4발이 동시에 의미있는 기능을 하는” 상태에 도달할 수 있다.
+**실측치 기반 band 수치, cooperative trigger 조건, Layer C/B ramp 비율이 모두 확정됐다. 구현 착수 가능 상태.**
 
-**구현 착수 전 V26 iter 200의 실측 수치 확인을 강력히 권장한다.**
+V26 iter 200 실측치 요약:
+
+| 다리 | contact | propulsion |
+| --- | --- | --- |
+| FL | 0.475 | 0.420 |
+| FR | 0.462 | 0.415 |
+| RL | 0.318 | 0.281 |
+| RR | 0.362 | 0.306 |
+| **최솟값** | **0.318** | **0.281** |
 
 
 
@@ -632,7 +666,7 @@ V27.1b 실패 원인: penalty만으로 특정 다리 참여를 강제하는 구�
 ### 이슈 요약
 
 | # | 이슈 | 상태 |
-|---|---|---|
+| --- | --- | --- |
 | 1 | V26 iter 200 실측치 미추출 | ✅ 완료 (2026-03-15) |
 | 2 | V27.1b 판정 미완 | ✅ FAIL 판정 완료 (2026-03-15) |
 | 3 | V28 원문 수치 미반영 | ✅ 완료 (2026-03-15) |
