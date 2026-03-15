@@ -4432,8 +4432,8 @@ def format_status_html() -> str:
 
 def format_supervisor_error_text(err: Exception) -> str:
     if TELEGRAM_VERBOSE_ERRORS:
-        return f"⚠️ Supervisor Alert\n• detail: {err}"
-    return "⚠️ Supervisor Alert\n• detail: 서버 로그를 확인하세요."
+        return f"⚠️ <b>SUPERVISOR — Alert</b>\n• detail: {err}"
+    return "⚠️ <b>SUPERVISOR — Alert</b>\n• detail: 서버 로그를 확인하세요."
 
 
 def _format_kpi_multiline(kpi_line: str) -> str:

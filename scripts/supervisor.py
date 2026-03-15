@@ -156,7 +156,7 @@ def _is_duplicate_command(chat_id: str | None, user_id: str | None, command_key:
 
 def _send_notice(title: str, body: str, icon: str = "👮") -> None:
     common.send_text(
-        f"{icon} <b>{title}</b>\n<i>{body}</i>",
+        f"{icon} <b>SUPERVISOR — {title}</b>\n<i>{body}</i>",
         common.SUPERVISOR_LOG,
         parse_mode="HTML",
     )
@@ -248,7 +248,7 @@ def _build_command_ack(command: str, checkpoint_iter: int | None = None) -> str:
 def _handle_hb_command(run_dir: str, iteration: int | None = None) -> None:
     data = common.read_tfevents(run_dir)
     if not data or not data.get("Train/mean_reward"):
-        common.send_text("⚠️ <b>HB</b>\n<i>tfevents 데이터를 읽지 못했습니다.</i>", common.SUPERVISOR_LOG, parse_mode="HTML")
+        common.send_text("⚠️ <b>SUPERVISOR — HB</b>\n<i>tfevents 데이터를 읽지 못했습니다.</i>", common.SUPERVISOR_LOG, parse_mode="HTML")
         return
     run_name = os.path.basename(run_dir)
     # iteration 미지정 시 최신 iter 사용
@@ -263,11 +263,11 @@ def _handle_hb_command(run_dir: str, iteration: int | None = None) -> None:
 def _handle_report_command(run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
     if common.is_training_running():
         if checkpoint_iter is not None:
-            common.send_text("⚠️ 특정 iteration 리포트는 훈련이 정지된 상태에서만 생성할 수 있습니다.", common.SUPERVISOR_LOG)
+            common.send_text("⚠️ <b>SUPERVISOR — REPORT</b>\n<i>특정 iteration 리포트는 훈련이 정지된 상태에서만 생성할 수 있습니다.</i>", common.SUPERVISOR_LOG, parse_mode="HTML")
             return
         zip_path = common.find_latest_report_zip(run_dir)
         if not zip_path:
-            common.send_text("⚠️ 현재 훈련 중이며 전송할 최신 ZIP 리포트가 없습니다.", common.SUPERVISOR_LOG)
+            common.send_text("⚠️ <b>SUPERVISOR — REPORT</b>\n<i>현재 훈련 중이며 전송할 최신 ZIP 리포트가 없습니다.</i>", common.SUPERVISOR_LOG, parse_mode="HTML")
             return
         common.send_document(
             zip_path,
@@ -294,11 +294,11 @@ def _handle_report_command(run_dir: str, checkpoint: str, checkpoint_iter: int |
 def _handle_view_command(view_key: str, run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
     if common.is_training_running():
         if checkpoint_iter is not None:
-            common.send_text(f"⚠️ 특정 iteration {view_key} 영상은 훈련이 정지된 상태에서만 생성할 수 있습니다.", common.SUPERVISOR_LOG)
+            common.send_text(f"⚠️ <b>SUPERVISOR — {view_key.upper()}</b>\n<i>특정 iteration 영상은 훈련이 정지된 상태에서만 생성할 수 있습니다.</i>", common.SUPERVISOR_LOG, parse_mode="HTML")
             return
         video_path = common.find_latest_video(view_key, run_dir)
         if not video_path:
-            common.send_text(f"⚠️ 현재 훈련 중이며 최근 {view_key} 영상을 찾지 못했습니다.", common.SUPERVISOR_LOG)
+            common.send_text(f"⚠️ <b>SUPERVISOR — {view_key.upper()}</b>\n<i>현재 훈련 중이며 최근 {view_key} 영상을 찾지 못했습니다.</i>", common.SUPERVISOR_LOG, parse_mode="HTML")
             return
         common.send_video(
             video_path,
