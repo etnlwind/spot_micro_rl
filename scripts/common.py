@@ -34,8 +34,43 @@ if SCRIPT_DIR not in sys.path:
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
 TRAIN_VERSION = "V26.1"
-MASTER_LOG_FILENAME = "spotmicro_v26_training_master_log.xlsx"
-CHECKPOINT_REVIEW_FILENAME = "spotmicro_v26_checkpoint_review.xlsx"
+
+# Training configuration for TRAIN_VERSION.
+# Update this dict alongside TRAIN_VERSION whenever reward design changes.
+TRAINING_CONFIG = {
+    "description": "Symmetric existence floor + load sharing — 모든 다리 대칭 gate",
+    "ppo": {
+        "gamma": 0.97,
+        "clip_param": 0.1,
+        "learning_rate": 1e-4,
+        "max_iterations": 15000,
+        "num_envs": 24576,
+        "network": "[512, 256, 128] ELU",
+    },
+    # (name, final_weight, initial_weight, key_params, description)
+    "reward_terms": [
+        ("per_leg_contact_floor",          -20.0,  -2.0, "floor=0.10, min_vel=0.05",  "각 다리 최소 contact 비율 보장 (curriculum ramp to -20)"),
+        ("per_leg_propulsion_floor",       -15.0,  -1.5, "floor=0.05, min_vel=0.05",  "각 다리 최소 propulsion 보장 (curriculum ramp to -15)"),
+        ("limb_usage_min_penalty",         -15.0,  -1.5, "min_usage=0.10",             "최소 다리 사용률 보장 (curriculum ramp to -15)"),
+        ("rear_left_right_usage_diff",     -10.0,   0.0, "max_diff=0.40",              "뒷다리 좌우 사용률 불균형 패널티 (ramp iter>=200)"),
+        ("front_left_right_usage_diff",     -8.0,   0.0, "max_diff=0.40",              "앞다리 좌우 사용률 불균형 패널티 (ramp iter>=200)"),
+        ("rear_left_right_propulsion_diff", -8.0,   0.0, "max_diff=0.40",              "뒷다리 좌우 propulsion 불균형 패널티 (ramp iter>=200)"),
+        ("front_rear_support_balance",      -5.0,   0.0, "max_diff=0.50",              "앞뒤 지지 균형 패널티 (ramp iter>=200)"),
+        ("diagonal_coupling_soft_gate",    +25.0, +25.0, "",                           "대각선 커플링 소프트 게이트 — 모든 다리 대칭 (V26 핵심)"),
+    ],
+    "collapse_restart": {
+        "enabled": True,
+        "check_iter_min": 100,
+        "check_iter_max": 300,
+        "contact_threshold": 0.05,
+        "swing_threshold": 0.95,
+        "consecutive_required": 3,
+    },
+}
+
+_LOG_VER = TRAIN_VERSION.split(".")[0].lower()  # e.g. "v26" — major version for filenames
+MASTER_LOG_FILENAME = f"spotmicro_{_LOG_VER}_training_master_log.xlsx"
+CHECKPOINT_REVIEW_FILENAME = f"spotmicro_{_LOG_VER}_checkpoint_review.xlsx"
 
 
 def _load_env(path: str) -> dict:
@@ -2192,7 +2227,7 @@ def get_checkpoint_review_path() -> str:
 
 def get_run_log_path(run_dir: str) -> str:
     run_id = os.path.basename(run_dir.rstrip("\\/"))
-    return os.path.join(run_dir, f"spotmicro_v24_run_{run_id}_training_log.xlsx")
+    return os.path.join(run_dir, f"spotmicro_{_LOG_VER}_run_{run_id}_training_log.xlsx")
 
 
 def _scalar_value_at_or_before(data: dict, tag: str, iteration: int):
@@ -2628,7 +2663,7 @@ def _build_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], list[di
         "git_commit": _get_repo_git_commit(),
         "task_name": env_cfg.get("task_name") or TASK,
         "checkpoint_source": f"{agent_cfg.get('load_run') or 'fresh'}:{agent_cfg.get('load_checkpoint') or ''}" if agent_cfg.get("resume") else "fresh",
-        "note": "V26.1 dedicated style/logging workbook",
+        "note": f"{TRAIN_VERSION} dedicated style/logging workbook",
         "resume": agent_cfg.get("resume"),
         "seed": agent_cfg.get("seed") or env_cfg.get("seed"),
         "num_envs": env_cfg.get("scene", {}).get("num_envs") if isinstance(env_cfg.get("scene"), dict) else None,
@@ -2788,6 +2823,64 @@ def _collect_master_rows(current_run_dir: str, current_rows: list[dict], current
     return master_rows, master_review_rows, run_count, skipped_runs
 
 
+def _write_training_config_sheet(ws, meta: dict, rows: list[dict], header_font) -> None:
+    """Excel 첫 번째 시트 — 이 파일이 어떤 버전/설정으로 생성됐는지 한눈에 확인."""
+    ws.title = "TrainingConfig"
+    section_font = header_font
+
+    def _section(title):
+        ws.append([title])
+        for cell in ws[ws.max_row]:
+            cell.font = section_font
+
+    def _row(key, value=""):
+        ws.append([key, value])
+
+    # ── Section 1: Overview ──────────────────────────────────────────
+    _section("=== TRAINING OVERVIEW ===")
+    _row("train_version", TRAIN_VERSION)
+    _row("description", TRAINING_CONFIG.get("description", ""))
+    _row("run_id", meta.get("run_id", ""))
+    _row("generated_at", meta.get("generated_at", ""))
+    _row("git_commit", meta.get("git_commit", ""))
+    _row("task_name", meta.get("task_name", ""))
+    _row("num_envs", meta.get("num_envs", ""))
+    _row("max_iterations", meta.get("max_iterations", ""))
+    _row("checkpoint_source", meta.get("checkpoint_source", ""))
+    if rows:
+        iters = sorted(r.get("iter") for r in rows if r.get("iter") is not None)
+        if iters:
+            _row("iter_range", f"{iters[0]} ~ {iters[-1]}")
+            _row("iter_count", len(iters))
+    ws.append([])
+
+    # ── Section 2: PPO Hyperparameters ───────────────────────────────
+    _section("=== PPO HYPERPARAMETERS ===")
+    for k, v in TRAINING_CONFIG.get("ppo", {}).items():
+        _row(k, str(v))
+    ws.append([])
+
+    # ── Section 3: Reward Terms ───────────────────────────────────────
+    _section("=== REWARD TERMS ===")
+    ws.append(["name", "final_weight", "initial_weight", "key_params", "description"])
+    for cell in ws[ws.max_row]:
+        cell.font = header_font
+    for term in TRAINING_CONFIG.get("reward_terms", []):
+        ws.append(list(term))
+    ws.append([])
+
+    # ── Section 4: Collapse Restart ───────────────────────────────────
+    _section("=== COLLAPSE RESTART CONFIG ===")
+    for k, v in TRAINING_CONFIG.get("collapse_restart", {}).items():
+        _row(k, str(v))
+
+    ws.column_dimensions["A"].width = 36
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 30
+    ws.column_dimensions["E"].width = 52
+
+
 def _write_meta_sheet(ws, meta: dict, header_font) -> None:
     ws.title = "Meta"
     ws.append(["key", "value"])
@@ -2875,9 +2968,9 @@ def export_training_workbook(out_path: str, rows: list[dict], meta: dict, events
         write_log(f"Runlog workbook skipped (openpyxl unavailable): {err}", log_path)
         return None
     wb = Workbook()
-    ws_run = wb.active
-    ws_run.title = "RunLog_100iter"
     header_font = Font(bold=True)
+    _write_training_config_sheet(wb.active, meta, rows, header_font)
+    ws_run = wb.create_sheet("RunLog_100iter")
     ws_run.append(RUNLOG_COLUMNS)
     for cell in ws_run[1]:
         cell.font = header_font
@@ -4162,7 +4255,7 @@ def _report_zip_meets_requirements(zip_path: str) -> bool:
             names = set(archive.namelist())
         return (
             "metrics/heartbeat_history.xlsx" in names
-            and any(name.startswith("metrics/spotmicro_v24_run_") and name.endswith("_training_log.xlsx") for name in names)
+            and any(name.startswith(f"metrics/spotmicro_{_LOG_VER}_run_") and name.endswith("_training_log.xlsx") for name in names)
         )
     except Exception:
         return False
