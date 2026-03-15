@@ -565,10 +565,10 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
         run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
         if result["mode"] == "already-running":
             existing_ckpt = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A"
-            _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {existing_ckpt}\nsource: cli", icon="🚀")
+            _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {existing_ckpt}\nversion: {common.TRAIN_VERSION}\nsource: cli", icon="🚀")
             _print_local(f"training already running\nrun: {run_name}\ncheckpoint: {existing_ckpt}")
         else:
-            _send_notice("TRAINING START (FRESH)", f"run: {run_name}\ncheckpoint: iter 0 (fresh)\nsource: cli", icon="🚀")
+            _send_notice("TRAINING START (FRESH)", f"run: {run_name}\ncheckpoint: iter 0 (fresh)\nversion: {common.TRAIN_VERSION}\nsource: cli", icon="🚀")
             _print_local(f"training started fresh\nrun: {run_name}")
         return 0
     if action == "resume":
@@ -577,10 +577,10 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
         run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
         checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A"
         if result["mode"] == "already-running":
-            _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nsource: cli", icon="▶️")
+            _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nversion: {common.TRAIN_VERSION}\nsource: cli", icon="▶️")
             _print_local(f"training already running\nrun: {run_name}\ncheckpoint: {checkpoint_name}")
         else:
-            _send_notice("TRAINING RESUME", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nsource: cli", icon="▶️")
+            _send_notice("TRAINING RESUME", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nversion: {common.TRAIN_VERSION}\nsource: cli", icon="▶️")
             _print_local(f"training resumed\nrun: {run_name}\ncheckpoint: {checkpoint_name}")
         return 0
     if action == "stop":
