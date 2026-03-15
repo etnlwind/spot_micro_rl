@@ -12,8 +12,10 @@ else:
     import common
 
 
-# V27.1a: restart-on-collapse 설정 — 4발 전체 감시, propulsion 포함
-_COLLAPSE_CHECK_ITER_MIN = 100   # iter 100 이전은 warming-up — 감지 안 함
+# V27.1b: restart-on-collapse 설정 — 4발 전체 감시, propulsion 포함
+# V27.1b: iter 100~200은 warning only (제약 초반 완화 구간), iter 200부터 restart 후보
+_COLLAPSE_CHECK_ITER_MIN = 200   # iter 200 이전은 warning only — 자동 재시작 없음
+_COLLAPSE_CHECK_ITER_MIN_WARN = 100  # iter 100부터 경고만 출력 (재시작은 안 함)
 _COLLAPSE_CHECK_ITER_MAX = 300   # iter 300 이후는 이미 늦음 — 재시작 대신 알림만
 _COLLAPSE_CONTACT_THRESHOLD = 0.05
 _COLLAPSE_PROPULSION_THRESHOLD = 0.05   # V27.1a 신규: propulsion도 같이 봄
@@ -214,7 +216,18 @@ def main() -> None:
                     collapse_consecutive_count = 0
                     collapse_restart_done = False
 
-                # V27.1a: restart-on-collapse (iter 100~300 구간) — 4발 전체 + propulsion 감시
+                # V27.1b: restart-on-collapse (iter 200~300) — iter 100~200은 warning only
+                # V27.1b: iter 100~200 구간 warning only (제약 완화 초반 — 학습 억제 vs collapse 혼동 방지)
+                if (not collapse_restart_done
+                        and _COLLAPSE_CHECK_ITER_MIN_WARN <= current_iter < _COLLAPSE_CHECK_ITER_MIN):
+                    collapsed_leg, leg_contact, leg_prop, leg_swing = _get_collapse_metrics(data)
+                    if collapsed_leg is not None:
+                        common.write_log(
+                            f"[Collapse-WARN] iter={current_iter} leg={collapsed_leg}"
+                            f" contact={leg_contact:.4f} prop={leg_prop:.4f} swing={leg_swing:.4f}"
+                            f" (warning only — restart disabled until iter {_COLLAPSE_CHECK_ITER_MIN})",
+                            common.HEARTBEAT_LOG,
+                        )
                 if (not collapse_restart_done
                         and _COLLAPSE_CHECK_ITER_MIN <= current_iter <= _COLLAPSE_CHECK_ITER_MAX):
                     collapsed_leg, leg_contact, leg_prop, leg_swing = _get_collapse_metrics(data)
@@ -236,7 +249,7 @@ def main() -> None:
                             common.send_text(
                                 f"🚨 <b>COLLAPSE RESTART — iter {current_iter:,}</b>\n"
                                 f"<i>leg={collapsed_leg}: contact={leg_contact:.4f}, prop={leg_prop:.4f}, swing={leg_swing:.4f}</i>\n"
-                                f"<i>single-limb collapse 확정 ({_COLLAPSE_CONSECUTIVE_REQUIRED}회 연속) — 훈련 재시작</i>",
+                                f"<i>single-limb collapse 확정 ({_COLLAPSE_CONSECUTIVE_REQUIRED}회 연속, iter {_COLLAPSE_CHECK_ITER_MIN}+) — 훈련 재시작</i>",
                                 common.HEARTBEAT_LOG,
                                 parse_mode="HTML",
                             )

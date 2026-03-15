@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V27.1a"
+TRAIN_VERSION = "V27.1b"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -156,6 +156,12 @@ class SpotMicroRewardCurriculumCfg:
         초반 탐색 과도한 왜곡 방지
       rear_left_right_usage_diff_penalty: 복구 (-10, max_diff 0.30)
       front_left_right_usage_diff_penalty: 복구 (-8, max_diff 0.30)
+
+    V27.1b 변경 (강도 완화 — 학습 억제 해소):
+      single_limb_validity_penalty: -5 → -35 soft ramp (iter 0~200)
+      contact floor: -2 → -20 (ramp iter 0~150)
+      propulsion floor: -2 → -15 (ramp iter 50~200, contact와 분리)
+      diagonal gate: min_contact 0.25→0.15, min_propulsion 0.10→0.05
     """
     reward_weights = CurrTerm(
         func=custom_mdp.reward_weight_curriculum,
@@ -171,15 +177,18 @@ class SpotMicroRewardCurriculumCfg:
             "validity_limb_usage_final": 0.0,
             "validity_rear_diff_initial": 0.0,
             "validity_rear_diff_final": 0.0,
-            # V27: existence floor ramp (iter 0~50, 빠르게 full-strength)
+            # V27.1b: existence floor ramp — contact 완화 (iter 0~150)
             "floor_ramp_start": 0,
-            "floor_ramp_end": 50,
+            "floor_ramp_end": 150,
             "floor_limb_usage_initial": -8.0,
             "floor_limb_usage_final": -25.0,
-            "floor_per_leg_contact_initial": -10.0,
-            "floor_per_leg_contact_final": -40.0,
-            "floor_per_leg_propulsion_initial": -10.0,
-            "floor_per_leg_propulsion_final": -30.0,
+            "floor_per_leg_contact_initial": -2.0,   # V27.1b: -10 → -2 (초반 완화)
+            "floor_per_leg_contact_final": -20.0,    # V27.1b: -40 → -20
+            "floor_per_leg_propulsion_initial": -2.0,  # V27.1b: -10 → -2
+            "floor_per_leg_propulsion_final": -15.0,   # V27.1b: -30 → -15
+            # V27.1b: propulsion floor 전용 ramp (iter 50~200, contact보다 늦게)
+            "propulsion_floor_ramp_start": 50,
+            "propulsion_floor_ramp_end": 200,
             # V27: load sharing ramp (iter 50~150, 조기 개입)
             "load_ramp_start": 50,
             "load_ramp_end": 150,
@@ -188,11 +197,11 @@ class SpotMicroRewardCurriculumCfg:
             "load_rear_prop_diff_final": -20.0,    # V27: 뒷다리 추진 편중 강화
             "load_front_rear_balance_final": 0.0,  # V27: 비활성
             "load_front_prop_diff_final": -20.0,   # V27: 앞다리 추진 편중 신규
-            # V27.1a: single_limb_validity_penalty soft ramp (iter 0~100)
+            # V27.1b: single_limb_validity_penalty soft ramp (iter 0~200, 완화)
             "validity_gate_ramp_start": 0,
-            "validity_gate_ramp_end": 100,
-            "validity_gate_initial": -20.0,  # 초반 탐색 허용
-            "validity_gate_final": -60.0,    # iter 100부터 full strength
+            "validity_gate_ramp_end": 200,
+            "validity_gate_initial": -5.0,   # V27.1b: -20 → -5 (초반 대폭 완화)
+            "validity_gate_final": -35.0,    # V27.1b: -60 → -35 (final도 완화)
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -599,7 +608,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.per_leg_contact_floor = RewTerm(
             func=custom_mdp.per_leg_contact_floor_penalty,
-            weight=-10.0,  # V27: initial -10 (V26: -2), curriculum이 -40.0까지 ramp
+            weight=-2.0,  # V27.1b: initial -2 (V27.1a: -10), curriculum이 -20.0까지 ramp (iter 0~150)
             params={
                 "floor": 0.15,  # V27: 0.15 (V26: 0.10) — 더 엄격한 최소 기준
                 "min_vel": 0.05,
@@ -608,7 +617,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.per_leg_propulsion_floor = RewTerm(
             func=custom_mdp.per_leg_propulsion_floor_penalty,
-            weight=-10.0,  # V27: initial -10 (V26: -1.5), curriculum이 -30.0까지 ramp
+            weight=-2.0,  # V27.1b: initial -2 (V27.1a: -10), curriculum이 -15.0까지 ramp (iter 50~200)
             params={
                 "floor": 0.10,  # V27: 0.10 (V26: 0.05) — fake contact 차단 강화
                 "min_vel": 0.05,
@@ -678,7 +687,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.single_limb_validity_penalty = RewTerm(
             func=custom_mdp.single_limb_validity_penalty,
-            weight=-20.0,  # V27.1a: initial weight (curriculum이 -60.0까지 ramp, iter 0~100)
+            weight=-5.0,  # V27.1b: initial weight (curriculum이 -35.0까지 ramp, iter 0~200)
             params={
                 "floor": 0.10,
                 "min_vel": 0.05,
@@ -712,8 +721,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "asset_cfg": SceneEntityCfg("robot"),
                 "vel_deadzone": 0.1,
                 "min_vel": 0.05,
-                "min_contact": 0.25,    # V27: 0.25 (V26: 0.15) — 더 엄격한 contact 기준
-                "min_propulsion": 0.10,  # V27: propulsion gate 추가 (fake contact 차단)
+                "min_contact": 0.15,    # V27.1b: 0.25→0.15 (초반 완화 — locomotion signal 유지)
+                "min_propulsion": 0.05,  # V27.1b: 0.10→0.05 (초반 완화)
             },
         )
 

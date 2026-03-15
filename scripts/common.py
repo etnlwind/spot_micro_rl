@@ -33,12 +33,12 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-TRAIN_VERSION = "V27.1a"
+TRAIN_VERSION = "V27.1b"
 
 # Training configuration for TRAIN_VERSION.
 # Update this dict alongside TRAIN_VERSION whenever reward design changes.
 TRAINING_CONFIG = {
-    "description": "V27.1a: 4발 기능 참여 강제 + usage_diff 복구 + validity ramp + collapse 4발 감시",
+    "description": "V27.1b: V27.1a 구조 유지 + 초기 제약 강도 완화 (학습 억제 해소)",
     "ppo": {
         "gamma": 0.97,
         "clip_param": 0.1,
@@ -49,25 +49,26 @@ TRAINING_CONFIG = {
     },
     # (name, final_weight, initial_weight, key_params, description)
     "reward_terms": [
-        ("single_limb_validity_penalty", -60.0, -20.0, "floor=0.10, min_vel=0.05", "V27 핵심: 4발 최약 다리 contact+prop 복합 패널티 (ramp iter 0→100: -20→-60)"),
-        ("per_leg_contact_floor", -40.0, -10.0, "floor=0.15, min_vel=0.05", "각 다리 최소 contact 비율 보장 (ramp iter 0→50: -10→-40)"),
-        ("per_leg_propulsion_floor", -30.0, -10.0, "floor=0.10, min_vel=0.05", "각 다리 최소 propulsion 보장 (ramp iter 0→50: -10→-30)"),
-        ("limb_usage_min_penalty", -25.0, -8.0, "min_usage=0.10", "최소 다리 사용률 보장 (ramp iter 0→50: -8→-25)"),
-        ("rear_left_right_usage_diff", -10.0, 0.0, "max_diff=0.30", "V27.1a 복구: 뒷다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
-        ("front_left_right_usage_diff", -8.0, 0.0, "max_diff=0.30", "V27.1a 복구: 앞다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
+        ("single_limb_validity_penalty", -35.0, -5.0, "floor=0.10, min_vel=0.05", "V27.1b: 4발 최약 다리 패널티 완화 (ramp iter 0→200: -5→-35)"),
+        ("per_leg_contact_floor", -20.0, -2.0, "floor=0.15, min_vel=0.05", "V27.1b: 각 다리 contact floor 완화 (ramp iter 0→150: -2→-20)"),
+        ("per_leg_propulsion_floor", -15.0, -2.0, "floor=0.10, min_vel=0.05", "V27.1b: 각 다리 propulsion floor 완화 (ramp iter 50→200: -2→-15)"),
+        ("limb_usage_min_penalty", -25.0, -8.0, "min_usage=0.10", "최소 다리 사용률 보장 (ramp iter 0→150: -8→-25)"),
+        ("rear_left_right_usage_diff", -10.0, 0.0, "max_diff=0.30", "뒷다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
+        ("front_left_right_usage_diff", -8.0, 0.0, "max_diff=0.30", "앞다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
         ("rear_left_right_propulsion_diff", -20.0, 0.0, "max_diff=0.25", "뒷다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
-        ("front_left_right_propulsion_diff", -20.0, 0.0, "max_diff=0.25", "V27 신규: 앞다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
-        ("diagonal_coupling_soft_gate", +25.0, +25.0, "min_contact=0.25, min_prop=0.10", "대각선 커플링 — propulsion gate 추가 (V27)"),
+        ("front_left_right_propulsion_diff", -20.0, 0.0, "max_diff=0.25", "앞다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
+        ("diagonal_coupling_soft_gate", +25.0, +25.0, "min_contact=0.15, min_prop=0.05", "V27.1b: 대각선 커플링 gate 완화 (min_contact 0.25→0.15, min_prop 0.10→0.05)"),
     ],
     "collapse_restart": {
         "enabled": True,
-        "check_iter_min": 100,
+        "check_iter_warn_min": 100,  # V27.1b: 100~200은 warning only
+        "check_iter_min": 200,       # V27.1b: 200부터 restart 후보
         "check_iter_max": 300,
         "contact_threshold": 0.05,
         "propulsion_threshold": 0.05,
         "swing_threshold": 0.95,
         "consecutive_required": 3,
-        "monitored_legs": "fl, fr, rl, rr (V27.1a: 4발 전체)",
+        "monitored_legs": "fl, fr, rl, rr (4발 전체)",
     },
 }
 
@@ -3605,14 +3606,14 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
     else:
         lines.append("  - ✅ tap 최적화 징후 없음")
 
-    # --- Curriculum weight 예상값 (V27.1a) ---
-    _VG_RAMP_START, _VG_RAMP_END = 0, 100
-    _VG_INITIAL, _VG_FINAL = -20.0, -60.0
+    # --- Curriculum weight 예상값 (V27.1b) ---
+    _VG_RAMP_START, _VG_RAMP_END = 0, 200
+    _VG_INITIAL, _VG_FINAL = -5.0, -35.0
     _vg_alpha = max(0.0, min(1.0, (current_iter - _VG_RAMP_START) / max(1, _VG_RAMP_END - _VG_RAMP_START)))
     _expected_vg_weight = _VG_INITIAL + _vg_alpha * (_VG_FINAL - _VG_INITIAL)
     lines.extend([
         "",
-        "- Curriculum weight 예상값 (V27.1a)",
+        "- Curriculum weight 예상값 (V27.1b)",
         f"  - validity_gate: {_expected_vg_weight:.1f} (initial={_VG_INITIAL:.0f} → final={_VG_FINAL:.0f}, alpha={_vg_alpha:.2f})",
         f"  - ramp: iter {_VG_RAMP_START}~{_VG_RAMP_END}",
     ])

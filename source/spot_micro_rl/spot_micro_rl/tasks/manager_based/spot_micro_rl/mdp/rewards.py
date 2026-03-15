@@ -1997,6 +1997,8 @@ def _curriculum_apply_weights(
     validity_gate_alpha: float = 1.0,
     validity_gate_initial: float = -60.0,
     validity_gate_final: float = -60.0,
+    # V27.1b: per_leg_propulsion_floor 전용 alpha (contact floor와 분리)
+    propulsion_floor_alpha: float = -1.0,
 ) -> None:
     """alpha 기반으로 Phase 가중치를 보간하여 적용."""
     w = _CURRICULUM_PHASE_WEIGHTS
@@ -2033,10 +2035,10 @@ def _curriculum_apply_weights(
             pass
 
     # V26: Existence floor ramp (iter 0 ~ floor_ramp_end)
+    # V27.1b: per_leg_propulsion_floor는 propulsion_floor_alpha로 별도 처리
     floor_terms: dict[str, tuple[float, float]] = {
         "limb_usage_min_penalty": (float(floor_limb_usage_initial), float(floor_limb_usage_final)),
         "per_leg_contact_floor": (float(floor_per_leg_contact_initial), float(floor_per_leg_contact_final)),
-        "per_leg_propulsion_floor": (float(floor_per_leg_propulsion_initial), float(floor_per_leg_propulsion_final)),
     }
     for term_name, (w_init, w_final) in floor_terms.items():
         if abs(w_init) < 1e-9 and abs(w_final) < 1e-9:
@@ -2046,6 +2048,20 @@ def _curriculum_apply_weights(
             cfg = env.reward_manager.get_term_cfg(term_name)
             cfg.weight = current
             env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+    # V27.1b: per_leg_propulsion_floor 전용 ramp (propulsion_floor_alpha)
+    # propulsion_floor_alpha < 0 이면 contact와 동일한 floor_alpha 사용 (하위호환)
+    _prop_alpha = floor_alpha if propulsion_floor_alpha < 0.0 else propulsion_floor_alpha
+    _prop_w_init = float(floor_per_leg_propulsion_initial)
+    _prop_w_final = float(floor_per_leg_propulsion_final)
+    if abs(_prop_w_init) > 1e-9 or abs(_prop_w_final) > 1e-9:
+        _prop_current = _prop_w_init + _prop_alpha * (_prop_w_final - _prop_w_init)
+        try:
+            cfg = env.reward_manager.get_term_cfg("per_leg_propulsion_floor")
+            cfg.weight = _prop_current
+            env.reward_manager.set_term_cfg("per_leg_propulsion_floor", cfg)
         except Exception:
             pass
 
@@ -2208,6 +2224,9 @@ def reward_weight_curriculum(
     validity_gate_ramp_end: int = 1,
     validity_gate_initial: float = -60.0,
     validity_gate_final: float = -60.0,
+    # V27.1b: per_leg_propulsion_floor 전용 ramp (contact와 분리)
+    propulsion_floor_ramp_start: int = -1,
+    propulsion_floor_ramp_end: int = -1,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -2245,6 +2264,10 @@ def reward_weight_curriculum(
         env._crr_floor_alpha = _curriculum_target_alpha(iteration, floor_ramp_start, floor_ramp_end)
         env._crr_load_alpha = _curriculum_target_alpha(iteration, load_ramp_start, load_ramp_end)
         env._crr_validity_gate_alpha = _curriculum_target_alpha(iteration, validity_gate_ramp_start, validity_gate_ramp_end)
+        # V27.1b: propulsion floor 전용 alpha (-1이면 contact와 동일한 floor_alpha 사용)
+        _prop_ramp_start = propulsion_floor_ramp_start if propulsion_floor_ramp_start >= 0 else floor_ramp_start
+        _prop_ramp_end = propulsion_floor_ramp_end if propulsion_floor_ramp_end >= 0 else floor_ramp_end
+        env._crr_propulsion_floor_alpha = _curriculum_target_alpha(iteration, _prop_ramp_start, _prop_ramp_end)
         env._crr_last_update = iteration
         env._crr_gate_paused = False
         _curriculum_apply_weights(
@@ -2272,15 +2295,16 @@ def reward_weight_curriculum(
             validity_gate_alpha=env._crr_validity_gate_alpha,
             validity_gate_initial=validity_gate_initial,
             validity_gate_final=validity_gate_final,
+            propulsion_floor_alpha=env._crr_propulsion_floor_alpha,
         )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
         print(f"[Curriculum] INIT @ iter {iteration} | {phase_str}")
         print(f"  alpha12={env._crr_alpha12:.3f}, alpha23={env._crr_alpha23:.3f}, validity_alpha={env._crr_validity_alpha:.3f}")
-        print(f"  floor_alpha={env._crr_floor_alpha:.3f}, load_alpha={env._crr_load_alpha:.3f}")
+        print(f"  floor_alpha={env._crr_floor_alpha:.3f}, prop_floor_alpha={env._crr_propulsion_floor_alpha:.3f}, load_alpha={env._crr_load_alpha:.3f}")
         print(f"  validity_gate_alpha={env._crr_validity_gate_alpha:.3f} (weight {validity_gate_initial:.1f}→{validity_gate_final:.1f})")
         print(f"  ramp1=[{ramp1_start}~{ramp1_end}], ramp2=[{ramp2_start}~{ramp2_end}]")
-        print(f"  floor_ramp=[{floor_ramp_start}~{floor_ramp_end}], load_ramp=[{load_ramp_start}~{load_ramp_end}]")
+        print(f"  floor_ramp=[{floor_ramp_start}~{floor_ramp_end}], prop_floor_ramp=[{_prop_ramp_start}~{_prop_ramp_end}], load_ramp=[{load_ramp_start}~{load_ramp_end}]")
         print(f"  validity_gate_ramp=[{validity_gate_ramp_start}~{validity_gate_ramp_end}]")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
@@ -2308,6 +2332,10 @@ def reward_weight_curriculum(
     target_floor = _curriculum_target_alpha(iteration, floor_ramp_start, floor_ramp_end)
     target_load = _curriculum_target_alpha(iteration, load_ramp_start, load_ramp_end)
     target_validity_gate = _curriculum_target_alpha(iteration, validity_gate_ramp_start, validity_gate_ramp_end)
+    # V27.1b: propulsion floor 전용 target
+    _prop_ramp_start_u = propulsion_floor_ramp_start if propulsion_floor_ramp_start >= 0 else floor_ramp_start
+    _prop_ramp_end_u = propulsion_floor_ramp_end if propulsion_floor_ramp_end >= 0 else floor_ramp_end
+    target_prop_floor = _curriculum_target_alpha(iteration, _prop_ramp_start_u, _prop_ramp_end_u)
 
     # 이미 target에 도달 → 스킵
     if (
@@ -2317,6 +2345,7 @@ def reward_weight_curriculum(
         and abs(env._crr_floor_alpha - target_floor) < 1e-6
         and abs(env._crr_load_alpha - target_load) < 1e-6
         and abs(env._crr_validity_gate_alpha - target_validity_gate) < 1e-6
+        and abs(env._crr_propulsion_floor_alpha - target_prop_floor) < 1e-6
     ):
         return None
 
@@ -2342,6 +2371,7 @@ def reward_weight_curriculum(
     max_step_floor = update_interval / max(1, floor_ramp_end - floor_ramp_start)
     max_step_load = update_interval / max(1, load_ramp_end - load_ramp_start)
     max_step_vgate = update_interval / max(1, validity_gate_ramp_end - validity_gate_ramp_start)
+    max_step_prop_floor = update_interval / max(1, _prop_ramp_end_u - _prop_ramp_start_u)
     new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
     new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
     new_validity = min(target_validity, env._crr_validity_alpha + max_step_validity)
@@ -2349,6 +2379,7 @@ def reward_weight_curriculum(
     new_floor = min(target_floor, env._crr_floor_alpha + max_step_floor)
     new_load = min(target_load, env._crr_load_alpha + max_step_load)
     new_validity_gate = min(target_validity_gate, env._crr_validity_gate_alpha + max_step_vgate)
+    new_prop_floor = min(target_prop_floor, env._crr_propulsion_floor_alpha + max_step_prop_floor)
 
     # 실제 변화 없으면 스킵
     if (
@@ -2358,6 +2389,7 @@ def reward_weight_curriculum(
         and abs(new_floor - env._crr_floor_alpha) < 1e-6
         and abs(new_load - env._crr_load_alpha) < 1e-6
         and abs(new_validity_gate - env._crr_validity_gate_alpha) < 1e-6
+        and abs(new_prop_floor - env._crr_propulsion_floor_alpha) < 1e-6
     ):
         return None
 
@@ -2370,6 +2402,7 @@ def reward_weight_curriculum(
     env._crr_floor_alpha = new_floor
     env._crr_load_alpha = new_load
     env._crr_validity_gate_alpha = new_validity_gate
+    env._crr_propulsion_floor_alpha = new_prop_floor
 
     # ── 가중치 적용 ──
     _curriculum_apply_weights(
@@ -2397,6 +2430,7 @@ def reward_weight_curriculum(
         validity_gate_alpha=new_validity_gate,
         validity_gate_initial=validity_gate_initial,
         validity_gate_final=validity_gate_final,
+        propulsion_floor_alpha=new_prop_floor,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──
