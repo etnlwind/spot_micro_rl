@@ -867,10 +867,64 @@ def resolve_active_run_dir() -> str | None:
     return get_latest_run_dir()
 
 
+def _read_run_train_version(run_dir: str) -> str | None:
+    """run_dir의 훈련 버전을 읽음. 소스 우선순위:
+    1. train_version.txt  (append_report_record 시 자동 생성)
+    2. heartbeat_reports.jsonl 의 train_version 필드
+    3. 해당 run의 Excel Meta 시트 train_version 행
+    """
+    # 1. train_version.txt
+    txt_path = os.path.join(run_dir, "train_version.txt")
+    if os.path.isfile(txt_path):
+        try:
+            return open(txt_path, encoding="utf-8").read().strip()
+        except Exception:
+            pass
+
+    # 2. JSONL train_version 필드
+    jsonl_path = get_heartbeat_history_path(run_dir)
+    if os.path.isfile(jsonl_path):
+        try:
+            with open(jsonl_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    ver = (record.get("train_version") or "").strip()
+                    if ver:
+                        return ver
+        except Exception:
+            pass
+
+    # 3. Excel Meta 시트 — 기존 workbook (파일명 패턴 glob)
+    import glob as _glob
+    run_id = os.path.basename(run_dir.rstrip("\\/"))
+    pattern = os.path.join(run_dir, f"spotmicro_*_run_{run_id}_training_log.xlsx")
+    candidates = _glob.glob(pattern)
+    if candidates:
+        wb_path = sorted(candidates)[-1]
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(wb_path, read_only=True, data_only=True)
+            if "Meta" in wb.sheetnames:
+                ws = wb["Meta"]
+                for row in ws.iter_rows(values_only=True):
+                    if row and str(row[0] or "").strip() == "train_version":
+                        ver = str(row[1] or "").strip()
+                        if ver:
+                            wb.close()
+                            return ver
+            wb.close()
+        except Exception:
+            pass
+
+    return None
+
+
 def resolve_run_dir_for_version(version: str) -> str | None:
     """버전 문자열에 해당하는 가장 최근 run_dir을 반환.
 
-    heartbeat_reports.jsonl의 train_version 필드를 기준으로 매칭.
     대소문자 무관 (예: 'v26.1' == 'V26.1').
     매칭되는 run이 없으면 None 반환.
     """
@@ -882,25 +936,12 @@ def resolve_run_dir_for_version(version: str) -> str | None:
         run_dir = os.path.join(LOG_BASE, run_name)
         if not os.path.isdir(run_dir):
             continue
-        jsonl_path = get_heartbeat_history_path(run_dir)
-        if not os.path.isfile(jsonl_path):
-            continue
-        try:
-            with open(jsonl_path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    record = json.loads(line)
-                    rec_ver = (record.get("train_version") or "").strip().upper()
-                    if rec_ver == version_norm:
-                        matched.append(run_name)
-                        break
-        except Exception:
-            continue
+        ver = _read_run_train_version(run_dir)
+        if ver and ver.strip().upper() == version_norm:
+            matched.append(run_name)
     if not matched:
         return None
-    # 가장 최근 run (이름이 타임스탬프 기반이므로 정렬 후 마지막)
+    # 가장 최근 run (타임스탬프 기반 이름이므로 정렬 후 마지막)
     return os.path.join(LOG_BASE, sorted(matched)[-1])
 
 
@@ -2146,6 +2187,14 @@ def append_report_record(run_dir: str, record: dict | None) -> None:
     try:
         with open(history_path, "a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # train_version.txt — 버전 조회 fallback용 마커 파일
+    try:
+        ver_path = os.path.join(run_dir, "train_version.txt")
+        if not os.path.isfile(ver_path):
+            with open(ver_path, "w", encoding="utf-8") as f:
+                f.write(TRAIN_VERSION)
     except Exception:
         pass
     try:
