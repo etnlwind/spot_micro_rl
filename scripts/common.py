@@ -33,12 +33,12 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-TRAIN_VERSION = "V27.1b"
+TRAIN_VERSION = "V28"
 
 # Training configuration for TRAIN_VERSION.
 # Update this dict alongside TRAIN_VERSION whenever reward design changes.
 TRAINING_CONFIG = {
-    "description": "V27.1b: V27.1a 구조 유지 + 초기 제약 강도 완화 (학습 억제 해소)",
+    "description": "V28: 3층 reward 구조 (Layer A Survival / Layer B Validity Floor / Layer C Target-Band Incentive)",
     "ppo": {
         "gamma": 0.97,
         "clip_param": 0.1,
@@ -49,26 +49,48 @@ TRAINING_CONFIG = {
     },
     # (name, final_weight, initial_weight, key_params, description)
     "reward_terms": [
-        ("single_limb_validity_penalty", -35.0, -5.0, "floor=0.10, min_vel=0.05", "V27.1b: 4발 최약 다리 패널티 완화 (ramp iter 0→200: -5→-35)"),
-        ("per_leg_contact_floor", -20.0, -2.0, "floor=0.15, min_vel=0.05", "V27.1b: 각 다리 contact floor 완화 (ramp iter 0→150: -2→-20)"),
-        ("per_leg_propulsion_floor", -15.0, -2.0, "floor=0.10, min_vel=0.05", "V27.1b: 각 다리 propulsion floor 완화 (ramp iter 50→200: -2→-15)"),
-        ("limb_usage_min_penalty", -25.0, -8.0, "min_usage=0.10", "최소 다리 사용률 보장 (ramp iter 0→150: -8→-25) — V27.1b 의도적 완화 (V27.1a: 0→50)"),
+        # Layer B: Validity Floor (완화됨)
+        ("single_limb_validity_penalty", -25.0, -5.0, "floor=0.10, min_vel=0.05", "V28: 4발 최약 다리 패널티 (ramp iter 0→250: -5→-25, V27.1b -35→-25)"),
+        ("per_leg_contact_floor", -12.0, -1.0, "floor=0.15, min_vel=0.05", "V28: 각 다리 contact floor 완화 (ramp iter 0→150: -1→-12, V27.1b -2→-20)"),
+        ("per_leg_propulsion_floor", -10.0, -1.0, "floor=0.10, min_vel=0.05", "V28: 각 다리 propulsion floor 완화 (ramp iter 50→250: -1→-10, V27.1b -2→-15)"),
+        ("limb_usage_min_penalty", -25.0, -8.0, "min_usage=0.10", "최소 다리 사용률 보장 (ramp iter 0→150: -8→-25)"),
         ("rear_left_right_usage_diff", -10.0, 0.0, "max_diff=0.30", "뒷다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
         ("front_left_right_usage_diff", -8.0, 0.0, "max_diff=0.30", "앞다리 좌우 사용률 비대칭 패널티 (ramp iter 50→150)"),
         ("rear_left_right_propulsion_diff", -20.0, 0.0, "max_diff=0.25", "뒷다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
         ("front_left_right_propulsion_diff", -20.0, 0.0, "max_diff=0.25", "앞다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
-        ("diagonal_coupling_soft_gate", +25.0, +25.0, "min_contact=0.15, min_prop=0.05", "V27.1b: 대각선 커플링 gate 완화 (min_contact 0.25→0.15, min_prop 0.10→0.05)"),
+        ("diagonal_coupling_soft_gate", +25.0, +25.0, "min_contact=0.10, min_prop=0.04", "V28: 대각선 커플링 gate 추가 완화 (min_contact 0.15→0.10, min_prop 0.05→0.04)"),
+        # Layer C: Target-Band Incentive (신규)
+        ("per_leg_contact_target_band", +5.0, +0.5, "band=[0.20~0.45], ramp iter 100→300", "V28 신규: 각 다리 contact 목표 구간 보상"),
+        ("per_leg_propulsion_target_band", +4.0, +0.5, "band=[0.15~0.38], ramp iter 100→300", "V28 신규: 각 다리 propulsion 목표 구간 보상"),
+        ("limb_usage_target_band", +3.0, +0.5, "band=[0.20~0.45], ramp iter 100→300", "V28 신규: 다리 사용률 목표 구간 보상"),
+        ("four_limb_cooperation", +8.0, +0.5, "trigger_partial=2, trigger_full=3, ramp iter 200→450", "V28 신규: 4발 협조 보상 (band_hit>=2: 0.5x, >=3: 1.0x)"),
     ],
     "collapse_restart": {
         "enabled": True,
-        "check_iter_warn_min": 100,  # V27.1b: 100~200은 warning only
-        "check_iter_min": 200,       # V27.1b: 200부터 restart 후보
+        "check_iter_warn_min": 100,
+        "check_iter_min": 200,
         "check_iter_max": 300,
         "contact_threshold": 0.05,
         "propulsion_threshold": 0.05,
         "swing_threshold": 0.95,
         "consecutive_required": 3,
         "monitored_legs": "fl, fr, rl, rr (4발 전체)",
+    },
+    # Curriculum ramp parameters — heartbeat analysis reads from here (no hardcoding in analysis code)
+    "curriculum_params": {
+        "validity_gate_ramp_start": 0,
+        "validity_gate_ramp_end": 250,
+        "validity_gate_initial": -5.0,
+        "validity_gate_final": -25.0,
+        "band_ramp_start": 100,
+        "band_ramp_end": 300,
+        "coop_ramp_start": 200,
+        "coop_ramp_end": 450,
+        # iter 판정 구간
+        "warmup_end": 100,
+        "layer_b_warn_end": 200,
+        "layer_c_start": 300,
+        "layer_c_mature": 450,
     },
 }
 
@@ -3518,7 +3540,7 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
     if foot_jitter_score is not None:
         lines.append(f"  - foot_jitter: {float(foot_jitter_score):.1f}/100")
 
-    # V27: 다리 상태 (FL/FR/RL/RR 전체 4발)
+    # 다리 상태 (FL/FR/RL/RR 전체 4발)
     cr_fl = rewards.get("contact_ratio_fl")
     cr_fr = rewards.get("contact_ratio_fr")
     cr_rl = rewards.get("contact_ratio_rl")
@@ -3559,7 +3581,7 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
         f"  - validity: {html.escape(str(lv_reason))}",
     ])
 
-    # --- 편하중/비대칭 요약 (V27.1a) ---
+    # --- 편하중/비대칭 요약 ---
     lv_usage_min = kpi.get("limb_usage_min")
     rear_usage_diff = kpi.get("rear_left_right_usage_diff")
     front_usage_diff = kpi.get("front_left_right_usage_diff")
@@ -3593,7 +3615,7 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
         bias_lines.append(f"  - {bal_icon} front_rear_balance: {front_rear_bal:.4f}")
     lines.extend(bias_lines)
 
-    # --- Tap 최적화 감지 (V27.1a) ---
+    # --- Tap 최적화 감지 ---
     _TAP_LO, _TAP_HI = 0.08, 0.18
     tap_legs = []
     for _leg, _cr, _pr in [("FL", cr_fl, prop_fl), ("FR", cr_fr, prop_fr), ("RL", cr_rl, prop_rl), ("RR", cr_rr, prop_rr)]:
@@ -3608,19 +3630,22 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
     else:
         lines.append("  - ✅ tap 최적화 징후 없음")
 
-    # --- Curriculum weight 예상값 (V27.1b) ---
-    _VG_RAMP_START, _VG_RAMP_END = 0, 200
-    _VG_INITIAL, _VG_FINAL = -5.0, -35.0
+    # --- Curriculum weight 예상값 ---
+    _cp = TRAINING_CONFIG.get("curriculum_params", {})
+    _VG_RAMP_START = _cp.get("validity_gate_ramp_start", 0)
+    _VG_RAMP_END = _cp.get("validity_gate_ramp_end", 250)
+    _VG_INITIAL = _cp.get("validity_gate_initial", -5.0)
+    _VG_FINAL = _cp.get("validity_gate_final", -25.0)
     _vg_alpha = max(0.0, min(1.0, (current_iter - _VG_RAMP_START) / max(1, _VG_RAMP_END - _VG_RAMP_START)))
     _expected_vg_weight = _VG_INITIAL + _vg_alpha * (_VG_FINAL - _VG_INITIAL)
     lines.extend([
         "",
-        "- Curriculum weight 예상값 (V27.1b)",
+        f"- Curriculum weight 예상값 ({TRAIN_VERSION})",
         f"  - validity_gate: {_expected_vg_weight:.1f} (initial={_VG_INITIAL:.0f} → final={_VG_FINAL:.0f}, alpha={_vg_alpha:.2f})",
         f"  - ramp: iter {_VG_RAMP_START}~{_VG_RAMP_END}",
     ])
 
-    # --- Collapse 감지 디버그 (V27.1a) ---
+    # --- Collapse 감지 디버그 ---
     _COL_C, _COL_P, _COL_S = 0.05, 0.05, 0.95
     lines.extend(["", "- Collapse 감지 디버그 (iter 100~300 감시 대상)"])
     for _leg, _cr, _pr, _sw in [("FL", cr_fl, prop_fl, sw_fl), ("FR", cr_fr, prop_fr, sw_fr), ("RL", cr_rl, prop_rl, sw_rl), ("RR", cr_rr, prop_rr, sw_rr)]:
@@ -3643,33 +3668,37 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
             _detail = ", ".join(_parts) if _parts else "pass"
             lines.append(f"  - ✅ {_leg}: ok ({_detail})" if not _parts else f"  - 🟡 {_leg}: 부분({_detail})")
 
-    # --- iter 100/200/300/400 판정 블록 (V27) ---
+    # --- iter 판정 블록 ---
     _lv_pass = kpi.get("limb_validity_pass", False)
-    lines.extend(["", "- V27 iter 판정"])
-    if current_iter < 100:
-        lines.append(f"  - ⏳ iter {current_iter} < 100: 워밍업 (판정 보류)")
-    elif current_iter < 200:
+    _warmup_end = _cp.get("warmup_end", 100)
+    _layer_b_warn_end = _cp.get("layer_b_warn_end", 200)
+    _layer_c_start = _cp.get("layer_c_start", 300)
+    _layer_c_mature = _cp.get("layer_c_mature", 450)
+    lines.extend(["", f"- {TRAIN_VERSION} iter 판정"])
+    if current_iter < _warmup_end:
+        lines.append(f"  - ⏳ iter {current_iter} < {_warmup_end}: 워밍업 (판정 보류)")
+    elif current_iter < _layer_b_warn_end:
         if _lv_pass:
-            lines.append(f"  - 🟢 iter {current_iter} (100~200): 4발 참여 OK — 지속 관찰")
+            lines.append(f"  - 🟢 iter {current_iter} ({_warmup_end}~{_layer_b_warn_end}): 4발 참여 OK — 지속 관찰")
         else:
-            lines.append(f"  - 🟡 iter {current_iter} (100~200): 조짐 관찰 — {html.escape(str(lv_reason))}")
-    elif current_iter < 300:
+            lines.append(f"  - 🟡 iter {current_iter} ({_warmup_end}~{_layer_b_warn_end}): 조짐 관찰 — {html.escape(str(lv_reason))}")
+    elif current_iter < _layer_c_start:
         if _lv_pass:
-            lines.append(f"  - 🟢 iter {current_iter} (200~300): 양호 — 지속 모니터링")
+            lines.append(f"  - 🟢 iter {current_iter} ({_layer_b_warn_end}~{_layer_c_start}): 양호 — 지속 모니터링")
         else:
-            lines.append(f"  - 🔴 iter {current_iter} (200~300): 강한 실패 경고 — {html.escape(str(lv_reason))}")
-    elif current_iter < 400:
+            lines.append(f"  - 🔴 iter {current_iter} ({_layer_b_warn_end}~{_layer_c_start}): 강한 실패 경고 — {html.escape(str(lv_reason))}")
+    elif current_iter < _layer_c_mature:
         if _lv_pass:
-            lines.append(f"  - 🟢 iter {current_iter} (300~400): 통과")
+            lines.append(f"  - 🟢 iter {current_iter} ({_layer_c_start}~{_layer_c_mature}): Layer C 진입 — 밴드 참여 확인")
         else:
-            lines.append(f"  - 🔴 iter {current_iter} (300~400): V27-A 실패 판정 — 중단 검토")
+            lines.append(f"  - 🔴 iter {current_iter} ({_layer_c_start}~{_layer_c_mature}): 실패 판정 — 중단 검토")
     else:
         if _lv_pass:
-            lines.append(f"  - 🟢 iter {current_iter} (400+): 4발 참여 유지")
+            lines.append(f"  - 🟢 iter {current_iter} ({_layer_c_mature}+): 4발 참여 유지")
         else:
-            lines.append(f"  - 🔴 iter {current_iter} (400+): 즉시 중단 권고 — {html.escape(str(lv_reason))}")
+            lines.append(f"  - 🔴 iter {current_iter} ({_layer_c_mature}+): 즉시 중단 권고 — {html.escape(str(lv_reason))}")
 
-    # --- Diagonal coupling gated vs raw (V27.1a) ---
+    # --- Diagonal coupling gated vs raw ---
     diag_gated = rewards.get("diagonal_coupling")
     diag_raw = kpi.get("diagonal_coupling_raw")
     lines.extend(["", "- Diagonal coupling (gated vs raw)"])
@@ -4781,7 +4810,7 @@ def format_report_summary_html(run_dir: str, checkpoint_path: str, analysis_text
         f"• trend: <code>{html.escape(str(grade['Trend']))}</code>",
     ]
 
-    # V26: 다리 상태 (RL/RR)
+    # 다리 상태 (4발 전체)
     def _fv2(v):
         return f"{v:.3f}" if v is not None else "N/A"
 
