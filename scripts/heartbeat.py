@@ -118,7 +118,7 @@ def _run_video_report(run_dir: str, milestone: int, current_iter: int, total_mis
     try:
         report_data = common.stop_and_report(run_dir, checkpoint, common.HEARTBEAT_LOG, force=True)
         common.send_text(
-            common.format_report_summary_html(run_dir, checkpoint, report_data["analysis_text"], report_data["kpi_snapshot"]),
+            common.format_report_summary_html(run_dir, checkpoint, report_data["analysis_text"], report_data["kpi_snapshot"], metrics_run_dir=report_data.get("metrics_run_dir")),
             common.HEARTBEAT_LOG,
             parse_mode="HTML",
         )

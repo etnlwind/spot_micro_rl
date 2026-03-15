@@ -931,6 +931,8 @@ def resolve_run_dir_for_version(version: str) -> str | None:
     """버전 문자열에 해당하는 가장 최근 run_dir을 반환.
 
     대소문자 무관 (예: 'v26.1' == 'V26.1').
+    self-contained 런(run_dir == metrics_source_run)을 우선 선택하고,
+    없을 경우에만 resume-derived 런을 반환.
     매칭되는 run이 없으면 None 반환.
     """
     if not os.path.isdir(LOG_BASE):
@@ -946,8 +948,26 @@ def resolve_run_dir_for_version(version: str) -> str | None:
             matched.append(run_name)
     if not matched:
         return None
-    # 가장 최근 run (타임스탬프 기반 이름이므로 정렬 후 마지막)
-    return os.path.join(LOG_BASE, sorted(matched)[-1])
+    # self-contained 런 우선: run_dir == metrics_source_run
+    self_contained: list[str] = []
+    resume_derived: list[str] = []
+    for run_name in matched:
+        run_dir = os.path.join(LOG_BASE, run_name)
+        latest_ckpt = get_latest_checkpoint(run_dir)
+        if latest_ckpt:
+            iter_num = get_checkpoint_iter(latest_ckpt)
+            try:
+                metrics_src = resolve_metrics_source_run_dir(run_dir, iter_num)
+                if os.path.abspath(metrics_src) == os.path.abspath(run_dir):
+                    self_contained.append(run_name)
+                else:
+                    resume_derived.append(run_name)
+            except Exception:
+                resume_derived.append(run_name)
+        else:
+            resume_derived.append(run_name)
+    candidates = self_contained if self_contained else resume_derived
+    return os.path.join(LOG_BASE, sorted(candidates)[-1])
 
 
 def resolve_active_checkpoint(run_dir: str | None = None) -> str | None:
@@ -2525,7 +2545,7 @@ def _build_runlog_row(record: dict, run_dir: str, data: dict, reward_window: lis
     row.update(
         {
             "run_id": run_id,
-            "train_version": TRAIN_VERSION,
+            "train_version": _read_run_train_version(run_dir) or TRAIN_VERSION,
             "iter": iteration,
             "global_step": iteration,
             "timestamp": timestamp_text,
@@ -2674,7 +2694,7 @@ def build_clip_metrics_row(run_dir: str, checkpoint_path: str) -> tuple[dict | N
 def export_clip_metrics_row_workbook(out_path: str, row: dict, metrics_run_dir: str, checkpoint_path: str, log_path: str) -> str | None:
     meta = {
         "run_id": os.path.basename(metrics_run_dir),
-        "train_version": TRAIN_VERSION,
+        "train_version": _read_run_train_version(metrics_run_dir) or TRAIN_VERSION,
         "generated_at": _now(),
         "report_kind": "clip_report",
         "checkpoint": os.path.basename(checkpoint_path),
@@ -2749,13 +2769,14 @@ def _build_run_rows(run_dir: str) -> tuple[list[dict], dict, list[dict], list[di
         if style_rows:
             best_style_row = max(style_rows, key=lambda item: item.get("posture_style_score") if item.get("posture_style_score") is not None else float("-inf"))
             best_style_row["best_style_candidate"] = True
+    _run_ver = _read_run_train_version(run_dir) or TRAIN_VERSION
     meta = {
         "run_id": run_id,
-        "train_version": TRAIN_VERSION,
+        "train_version": _run_ver,
         "git_commit": _get_repo_git_commit(),
         "task_name": env_cfg.get("task_name") or TASK,
         "checkpoint_source": f"{agent_cfg.get('load_run') or 'fresh'}:{agent_cfg.get('load_checkpoint') or ''}" if agent_cfg.get("resume") else "fresh",
-        "note": f"{TRAIN_VERSION} dedicated style/logging workbook",
+        "note": f"{_run_ver} dedicated style/logging workbook",
         "resume": agent_cfg.get("resume"),
         "seed": agent_cfg.get("seed") or env_cfg.get("seed"),
         "num_envs": env_cfg.get("scene", {}).get("num_envs") if isinstance(env_cfg.get("scene"), dict) else None,
@@ -2930,7 +2951,7 @@ def _write_training_config_sheet(ws, meta: dict, rows: list[dict], header_font) 
 
     # ── Section 1: Overview ──────────────────────────────────────────
     _section("=== TRAINING OVERVIEW ===")
-    _row("train_version", TRAIN_VERSION)
+    _row("train_version", meta.get("train_version") or TRAIN_VERSION)
     _row("description", TRAINING_CONFIG.get("description", ""))
     _row("run_id", meta.get("run_id", ""))
     _row("generated_at", meta.get("generated_at", ""))
@@ -4145,7 +4166,8 @@ def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int, log_p
             continue
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        new_name = f"clip_{clip_num}_iter{iter_num}_{spec['key']}_{ts}.mp4"
+        _ver = _read_run_train_version(run_dir) or TRAIN_VERSION
+        new_name = f"Report_{_ver}_iter{iter_num}_{spec['key']}_{ts}.mp4"
         dest_path = os.path.join(run_dir, "videos", new_name)
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         shutil.copy2(latest_video, dest_path)
@@ -4237,12 +4259,13 @@ def create_clip_artifact_zip(run_dir: str, checkpoint_path: str, clip_num: int, 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     artifact_dir = os.path.join(run_dir, "artifacts")
     os.makedirs(artifact_dir, exist_ok=True)
-    artifact_root = os.path.join(artifact_dir, f"clip_{clip_num}_iter{iter_num}_{timestamp}")
+    _ver = _read_run_train_version(run_dir) or TRAIN_VERSION
+    artifact_root = os.path.join(artifact_dir, f"Report_{_ver}_iter{iter_num}_{timestamp}")
     metrics_root = os.path.join(artifact_root, "metrics")
     frames_root = os.path.join(artifact_root, "frames")
     os.makedirs(metrics_root, exist_ok=True)
     os.makedirs(frames_root, exist_ok=True)
-    zip_path = os.path.join(artifact_dir, f"clip_{clip_num}_iter{iter_num}_{timestamp}.zip")
+    zip_path = os.path.join(artifact_dir, f"Report_{_ver}_iter{iter_num}_{timestamp}.zip")
     heartbeat_xlsx_path = export_heartbeat_history_xlsx(
         run_dir,
         os.path.join(metrics_root, "heartbeat_history.xlsx"),
@@ -4537,13 +4560,33 @@ def _format_kpi_multiline(kpi_line: str) -> str:
     return text
 
 
-def format_report_summary(run_dir: str, checkpoint_path: str, analysis_text: str, kpi_snapshot: dict) -> str:
+def _build_run_context_lines(run_dir: str, checkpoint_path: str, metrics_run_dir: str | None = None) -> list[str]:
+    """run_dir, metrics_source_run, load_run, load_checkpoint 컨텍스트 라인 생성."""
+    run_name = os.path.basename(run_dir)
+    metrics_name = os.path.basename(metrics_run_dir) if metrics_run_dir else run_name
+    is_resume_derived = metrics_run_dir and os.path.abspath(metrics_run_dir) != os.path.abspath(run_dir)
+    agent_cfg = _load_yaml_config(os.path.join(run_dir, "params", "agent.yaml"))
+    load_run = str(agent_cfg.get("load_run") or "—")
+    load_checkpoint = str(agent_cfg.get("load_checkpoint") or "—")
+    lines = [
+        f"• run_dir: {run_name}",
+        f"• metrics_source_run: {metrics_name}",
+        f"• load_run: {load_run}",
+        f"• load_checkpoint: {load_checkpoint}",
+    ]
+    if is_resume_derived:
+        lines.insert(0, "⚠️ resume-derived report — metrics from different run")
+    return lines
+
+
+def format_report_summary(run_dir: str, checkpoint_path: str, analysis_text: str, kpi_snapshot: dict, metrics_run_dir: str | None = None) -> str:
     grade = parse_analysis_grade(analysis_text)
     iter_num = get_checkpoint_iter(checkpoint_path)
     kpi_text = _format_kpi_multiline(kpi_snapshot["kpi_line"])
+    ctx = "\n".join(_build_run_context_lines(run_dir, checkpoint_path, metrics_run_dir))
     return (
         "📦 Report Ready\n"
-        f"• run: {os.path.basename(run_dir)}\n"
+        f"{ctx}\n"
         f"• checkpoint: {os.path.basename(checkpoint_path)}\n"
         f"• iter: {iter_num:,}\n"
         f"• verdict: {kpi_snapshot['verdict']}\n"
@@ -4555,13 +4598,18 @@ def format_report_summary(run_dir: str, checkpoint_path: str, analysis_text: str
     )
 
 
-def format_report_summary_html(run_dir: str, checkpoint_path: str, analysis_text: str, kpi_snapshot: dict) -> str:
+def format_report_summary_html(run_dir: str, checkpoint_path: str, analysis_text: str, kpi_snapshot: dict, metrics_run_dir: str | None = None) -> str:
     grade = parse_analysis_grade(analysis_text)
     iter_num = get_checkpoint_iter(checkpoint_path)
     kpi_text = html.escape(_format_kpi_multiline(kpi_snapshot["kpi_line"]))
+    ctx_lines = _build_run_context_lines(run_dir, checkpoint_path, metrics_run_dir)
+    ctx_html = "\n".join(
+        f"<b>{html.escape(ln)}</b>" if ln.startswith("⚠️") else f"• <code>{html.escape(ln[2:])}</code>" if ln.startswith("• ") else html.escape(ln)
+        for ln in ctx_lines
+    )
     lines = [
         "📦 <b>REPORT READY</b>",
-        f"• run: <code>{html.escape(os.path.basename(run_dir))}</code>",
+        ctx_html,
         f"• checkpoint: <code>{html.escape(os.path.basename(checkpoint_path))}</code>",
         f"• iter: <code>{iter_num:,}</code>",
         f"• verdict: <b>{html.escape(str(kpi_snapshot['verdict']))}</b>",

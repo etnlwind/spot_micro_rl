@@ -218,8 +218,8 @@ def _resolve_requested_checkpoint(run_dir: str | None, checkpoint_iter: int | No
     raise RuntimeError(f"checkpoint model_{checkpoint_iter}.pt not found in run {os.path.basename(run_dir) if run_dir else 'N/A'}")
 
 
-def _build_command_ack(command: str, checkpoint_iter: int | None = None) -> str:
-    run_dir = common.resolve_active_run_dir()
+def _build_command_ack(command: str, checkpoint_iter: int | None = None, target_version: str | None = None) -> str:
+    run_dir = common.resolve_run_dir_for_version(target_version) if target_version else common.resolve_active_run_dir()
     checkpoint = _resolve_requested_checkpoint(run_dir, checkpoint_iter)
     run_name = os.path.basename(run_dir) if run_dir else "N/A"
     checkpoint_name = os.path.basename(checkpoint) if checkpoint else "N/A"
@@ -305,7 +305,7 @@ def _handle_report_command(run_dir: str, checkpoint: str, checkpoint_iter: int |
         common.update_state(mode="reporting", last_command="report", last_error="")
         report_data = common.stop_and_report(run_dir, checkpoint, common.SUPERVISOR_LOG, force=True)
         common.send_text(
-            common.format_report_summary_html(run_dir, checkpoint, report_data["analysis_text"], report_data["kpi_snapshot"]),
+            common.format_report_summary_html(run_dir, checkpoint, report_data["analysis_text"], report_data["kpi_snapshot"], metrics_run_dir=report_data.get("metrics_run_dir")),
             common.SUPERVISOR_LOG,
             parse_mode="HTML",
         )
@@ -673,8 +673,10 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
     common.prime_update_offset(common.SUPERVISOR_LOG)
     common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
     common.update_state(mode="training" if common.is_training_running() else "idle", last_command="startup", last_error="")
+    import datetime as _dt
+    _sv_ver = _dt.datetime.fromtimestamp(os.path.getmtime(__file__)).strftime("%Y-%m-%d %H:%M")
     common.send_text(
-        "👮 <b>SUPERVISOR ACTIVE — ready for commands</b>\n\n"
+        f"👮 <b>SUPERVISOR ACTIVE</b>  version: <code>{_sv_ver}</code>\n\n"
         + common.help_text(),
         common.SUPERVISOR_LOG,
         parse_mode="HTML",
@@ -770,7 +772,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             )
                         continue
 
-                    common.send_text(_build_command_ack(command, checkpoint_iter=checkpoint_iter), common.SUPERVISOR_LOG, parse_mode="HTML")
+                    common.send_text(_build_command_ack(command, checkpoint_iter=checkpoint_iter, target_version=target_version), common.SUPERVISOR_LOG, parse_mode="HTML")
                     handle_command(command, checkpoint_iter=checkpoint_iter, target_version=target_version)
                 shutdown_source = common.consume_supervisor_shutdown_request()
                 if shutdown_source:
