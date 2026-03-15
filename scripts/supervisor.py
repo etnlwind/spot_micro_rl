@@ -355,6 +355,11 @@ def handle_command(command: str, checkpoint_iter: int | None = None, target_vers
     else:
         run_dir = common.resolve_active_run_dir()
     checkpoint = _resolve_requested_checkpoint(run_dir, checkpoint_iter)
+    # checkpoint가 다른 run에서 찾아진 경우 run_dir을 실제 위치로 교정
+    if checkpoint and run_dir:
+        checkpoint_run = os.path.dirname(os.path.abspath(checkpoint))
+        if os.path.abspath(run_dir) != checkpoint_run:
+            run_dir = checkpoint_run
     if command == "help":
         _send_notice("COMMAND MENU", common.help_text().replace("\n", "\n"), icon="❔")
         return
