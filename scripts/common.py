@@ -33,12 +33,12 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-TRAIN_VERSION = "V28"
+_TRAIN_VERSION_FALLBACK = "V28"
 
 # Training configuration for TRAIN_VERSION.
 # Update this dict alongside TRAIN_VERSION whenever reward design changes.
 TRAINING_CONFIG = {
-    "description": "V28: 3층 reward 구조 (Layer A Survival / Layer B Validity Floor / Layer C Target-Band Incentive)",
+    "description": f"{_TRAIN_VERSION_FALLBACK}: 3층 reward 구조 (Layer A Survival / Layer B Validity Floor / Layer C Target-Band Incentive)",
     "ppo": {
         "gamma": 0.97,
         "clip_param": 0.1,
@@ -139,9 +139,14 @@ TASK = _env.get("TASK", "Isaac-Velocity-Flat-SpotMicro-v0")
 LOG_SUBDIR = _env.get("LOG_SUBDIR", "spot_micro_flat")
 ISAAC_LAB = _env.get("ISAAC_LAB_PATH", r"C:\IsaacLab\isaaclab.bat")
 CONDA_ENV_NAME = _env.get("CONDA_ENV_NAME") or os.environ.get("CONDA_DEFAULT_ENV", "env_isaaclab")
+TRAIN_VERSION = _env.get("TRAIN_VERSION") or os.environ.get("TRAIN_VERSION") or _TRAIN_VERSION_FALLBACK
 TRAIN_ENVS = int(_env.get("TRAIN_ENVS", "24576"))
 PLAY_ENVS = int(_env.get("PLAY_ENVS", "50"))
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
+# Sync TRAINING_CONFIG ppo fields with .env values (override defaults set before _env was loaded)
+TRAINING_CONFIG["ppo"]["max_iterations"] = MAX_ITERATIONS
+TRAINING_CONFIG["ppo"]["num_envs"] = TRAIN_ENVS
+TRAINING_CONFIG["description"] = f"{TRAIN_VERSION}: 3층 reward 구조 (Layer A Survival / Layer B Validity Floor / Layer C Target-Band Incentive)"
 VIDEO_LENGTH = int(_env.get("VIDEO_LENGTH", "250"))
 VIDEO_FPS = int(_env.get("VIDEO_FPS", "15"))
 VIDEO_CAPTURE_HEADLESS = _parse_env_flag(
