@@ -1866,6 +1866,7 @@ def compute_limb_validity_metrics(rewards: dict) -> dict:
     rear_usage_diff = round(abs(usage_scores.get("rl", 0.0) - usage_scores.get("rr", 0.0)), 6)
     front_usage_diff = round(abs(usage_scores.get("fl", 0.0) - usage_scores.get("fr", 0.0)), 6)
     rear_propulsion_diff = round(abs(propulsion_scores.get("rl", 0.0) - propulsion_scores.get("rr", 0.0)), 6)
+    front_propulsion_diff = round(abs(propulsion_scores.get("fl", 0.0) - propulsion_scores.get("fr", 0.0)), 6)
 
     reasons: list[str] = []
     collapse_reasons: list[str] = []
@@ -1907,6 +1908,7 @@ def compute_limb_validity_metrics(rewards: dict) -> dict:
         "rear_left_right_usage_diff": rear_usage_diff,
         "front_left_right_usage_diff": front_usage_diff,
         "rear_left_right_propulsion_diff": rear_propulsion_diff,
+        "front_left_right_propulsion_diff": front_propulsion_diff,
         "limb_validity_gate_pass": not all_reasons,
         "limb_validity_reason": "pass" if not all_reasons else "; ".join(all_reasons[:4]),
         "limb_validity_reasons": all_reasons,
@@ -2166,6 +2168,11 @@ def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | N
             "limb_validity_reason": limb_metrics["limb_validity_reason"],
             "limb_usage_min": limb_metrics["limb_usage_min"],
             "rear_left_right_usage_diff": limb_metrics["rear_left_right_usage_diff"],
+            "front_left_right_usage_diff": limb_metrics.get("front_left_right_usage_diff"),
+            "rear_left_right_propulsion_diff": limb_metrics.get("rear_left_right_propulsion_diff"),
+            "front_left_right_propulsion_diff": limb_metrics.get("front_left_right_propulsion_diff"),
+            "front_rear_propulsion_balance": rewards.get("front_rear_propulsion_diff_raw"),
+            "diagonal_coupling_raw": rewards.get("diagonal_coupling_raw"),
             "contact_ratio_fl": limb_metrics["contact_ratios"].get("fl"),
             "contact_ratio_fr": limb_metrics["contact_ratios"].get("fr"),
             "contact_ratio_rl": limb_metrics["contact_ratios"].get("rl"),
@@ -3549,6 +3556,134 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
         f"  - validity: {html.escape(str(lv_reason))}",
     ])
 
+    # --- 편하중/비대칭 요약 (V27.1a) ---
+    lv_usage_min = kpi.get("limb_usage_min")
+    rear_usage_diff = kpi.get("rear_left_right_usage_diff")
+    front_usage_diff = kpi.get("front_left_right_usage_diff")
+    rear_prop_diff = kpi.get("rear_left_right_propulsion_diff")
+    front_prop_diff = kpi.get("front_left_right_propulsion_diff")
+    front_rear_bal = kpi.get("front_rear_propulsion_balance")
+
+    def _bias_icon(val, thr):
+        if val is None:
+            return "❓"
+        if val > thr * 1.5:
+            return "🔴"
+        if val > thr:
+            return "🟡"
+        return "🟢"
+
+    bias_lines = ["", "- 편하중/비대칭 요약"]
+    if lv_usage_min is not None:
+        u_icon = "🔴" if lv_usage_min < 0.10 else ("🟡" if lv_usage_min < 0.30 else "🟢")
+        bias_lines.append(f"  - {u_icon} usage_min: {lv_usage_min:.3f} (floor=0.30)")
+    if rear_usage_diff is not None:
+        bias_lines.append(f"  - {_bias_icon(rear_usage_diff, 0.18)} rear_usage_diff: {rear_usage_diff:.3f}")
+    if front_usage_diff is not None:
+        bias_lines.append(f"  - {_bias_icon(front_usage_diff, 0.22)} front_usage_diff: {front_usage_diff:.3f}")
+    if rear_prop_diff is not None:
+        bias_lines.append(f"  - {_bias_icon(rear_prop_diff, 0.20)} rear_prop_diff: {rear_prop_diff:.3f}")
+    if front_prop_diff is not None:
+        bias_lines.append(f"  - {_bias_icon(front_prop_diff, 0.20)} front_prop_diff: {front_prop_diff:.3f}")
+    if front_rear_bal is not None:
+        bal_icon = "🔴" if abs(front_rear_bal) > 0.25 else ("🟡" if abs(front_rear_bal) > 0.10 else "🟢")
+        bias_lines.append(f"  - {bal_icon} front_rear_balance: {front_rear_bal:.4f}")
+    lines.extend(bias_lines)
+
+    # --- Tap 최적화 감지 (V27.1a) ---
+    _TAP_LO, _TAP_HI = 0.08, 0.18
+    tap_legs = []
+    for _leg, _cr, _pr in [("FL", cr_fl, prop_fl), ("FR", cr_fr, prop_fr), ("RL", cr_rl, prop_rl), ("RR", cr_rr, prop_rr)]:
+        if _cr is not None and _pr is not None:
+            if _TAP_LO <= _cr <= _TAP_HI and _TAP_LO <= _pr <= _TAP_HI:
+                tap_legs.append(f"{_leg}(c={_cr:.2f},p={_pr:.2f})")
+    lines.append("")
+    lines.append("- TAP 최적화 감지")
+    if tap_legs:
+        lines.append(f"  - ⚠️ TAP SUSPICION: {', '.join(tap_legs)}")
+        lines.append("  - (contact+prop 0.08~0.18 정체 — floor 겨우 회피 중)")
+    else:
+        lines.append("  - ✅ tap 최적화 징후 없음")
+
+    # --- Curriculum weight 예상값 (V27.1a) ---
+    _VG_RAMP_START, _VG_RAMP_END = 0, 100
+    _VG_INITIAL, _VG_FINAL = -20.0, -60.0
+    _vg_alpha = max(0.0, min(1.0, (current_iter - _VG_RAMP_START) / max(1, _VG_RAMP_END - _VG_RAMP_START)))
+    _expected_vg_weight = _VG_INITIAL + _vg_alpha * (_VG_FINAL - _VG_INITIAL)
+    lines.extend([
+        "",
+        "- Curriculum weight 예상값 (V27.1a)",
+        f"  - validity_gate: {_expected_vg_weight:.1f} (initial={_VG_INITIAL:.0f} → final={_VG_FINAL:.0f}, alpha={_vg_alpha:.2f})",
+        f"  - ramp: iter {_VG_RAMP_START}~{_VG_RAMP_END}",
+    ])
+
+    # --- Collapse 감지 디버그 (V27.1a) ---
+    _COL_C, _COL_P, _COL_S = 0.05, 0.05, 0.95
+    lines.extend(["", "- Collapse 감지 디버그 (iter 100~300 감시 대상)"])
+    for _leg, _cr, _pr, _sw in [("FL", cr_fl, prop_fl, sw_fl), ("FR", cr_fr, prop_fr, sw_fr), ("RL", cr_rl, prop_rl, sw_rl), ("RR", cr_rr, prop_rr, sw_rr)]:
+        if _cr is None:
+            lines.append(f"  - ❓ {_leg}: data unavailable")
+            continue
+        _c_fail = _cr < _COL_C
+        _p_fail = _pr is not None and _pr < _COL_P
+        _s_fail = _sw is not None and _sw > _COL_S
+        if _c_fail and _p_fail and _s_fail:
+            lines.append(f"  - 🔴 {_leg}: COLLAPSE (c={_cr:.3f}<{_COL_C}, p={_pr:.3f}<{_COL_P}, s={_sw:.3f}>{_COL_S})")
+        else:
+            _parts = []
+            if _c_fail:
+                _parts.append(f"c={_cr:.3f}✗")
+            if _p_fail:
+                _parts.append(f"p={_pr:.3f}✗")
+            if _s_fail:
+                _parts.append(f"s={_sw:.3f}✗")
+            _detail = ", ".join(_parts) if _parts else "pass"
+            lines.append(f"  - ✅ {_leg}: ok ({_detail})" if not _parts else f"  - 🟡 {_leg}: 부분({_detail})")
+
+    # --- iter 100/200/300/400 판정 블록 (V27) ---
+    _lv_pass = kpi.get("limb_validity_pass", False)
+    lines.extend(["", "- V27 iter 판정"])
+    if current_iter < 100:
+        lines.append(f"  - ⏳ iter {current_iter} < 100: 워밍업 (판정 보류)")
+    elif current_iter < 200:
+        if _lv_pass:
+            lines.append(f"  - 🟢 iter {current_iter} (100~200): 4발 참여 OK — 지속 관찰")
+        else:
+            lines.append(f"  - 🟡 iter {current_iter} (100~200): 조짐 관찰 — {html.escape(str(lv_reason))}")
+    elif current_iter < 300:
+        if _lv_pass:
+            lines.append(f"  - 🟢 iter {current_iter} (200~300): 양호 — 지속 모니터링")
+        else:
+            lines.append(f"  - 🔴 iter {current_iter} (200~300): 강한 실패 경고 — {html.escape(str(lv_reason))}")
+    elif current_iter < 400:
+        if _lv_pass:
+            lines.append(f"  - 🟢 iter {current_iter} (300~400): 통과")
+        else:
+            lines.append(f"  - 🔴 iter {current_iter} (300~400): V27-A 실패 판정 — 중단 검토")
+    else:
+        if _lv_pass:
+            lines.append(f"  - 🟢 iter {current_iter} (400+): 4발 참여 유지")
+        else:
+            lines.append(f"  - 🔴 iter {current_iter} (400+): 즉시 중단 권고 — {html.escape(str(lv_reason))}")
+
+    # --- Diagonal coupling gated vs raw (V27.1a) ---
+    diag_gated = rewards.get("diagonal_coupling")
+    diag_raw = kpi.get("diagonal_coupling_raw")
+    lines.extend(["", "- Diagonal coupling (gated vs raw)"])
+    if diag_gated is not None and diag_raw is not None and abs(float(diag_raw)) > 1e-6:
+        _gate_ratio = float(diag_gated) / float(diag_raw)
+        lines.append(f"  - gated: {float(diag_gated):.4f} | raw: {float(diag_raw):.4f} | ratio: {_gate_ratio:.2f}")
+        if _gate_ratio < 0.5:
+            lines.append("  - ⚠️ gate 강하게 작동 중 (collapse gate 효과)")
+        elif _gate_ratio < 0.8:
+            lines.append("  - 🟡 gate 일부 작동 중")
+        else:
+            lines.append("  - ✅ gate 거의 투명 (limb 상태 양호)")
+    elif diag_gated is not None:
+        lines.append(f"  - gated: {float(diag_gated):.4f} | raw: N/A")
+    else:
+        lines.append("  - N/A")
+
     lines.extend(
         [
             "",
@@ -3626,6 +3761,8 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
             "- 참고",
             "  - contact stride/cycle 계열은 참고 지표로만 취급",
             f"  - next report: iter {((current_iter // HEARTBEAT_ITER_STEP) + 1) * HEARTBEAT_ITER_STEP:,}",
+            f"  - run_dir: {html.escape(str(run_dir))}",
+            f"  - metrics_source_run: {html.escape(str(run_dir))}",
         ]
     )
     display_lines = []

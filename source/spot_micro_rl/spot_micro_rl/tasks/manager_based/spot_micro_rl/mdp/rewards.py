@@ -80,6 +80,7 @@ V23_RAW_EXPORT_TERMS = [
     "clearance_fr",
     "clearance_rl",
     "clearance_rr",
+    "diagonal_coupling_raw",
 ]
 
 _V23_SHOULDER_JOINT_NAMES = [
@@ -620,6 +621,9 @@ def diagonal_coupling_soft_gate_reward(
 
     pair_a_reward = torch.clamp(pair_a_corr, 0.0, 1.0).mean(dim=1)
     pair_b_reward = torch.clamp(pair_b_corr, 0.0, 1.0).mean(dim=1)
+    # Save pre-gate raw values for monitoring (diagonal_coupling_raw)
+    pair_a_raw = pair_a_reward.clone()
+    pair_b_raw = pair_b_reward.clone()
 
     # General collapse gate: attenuation이 필요한 다리가 포함된 pair의 보상을 감소
     metrics = compute_v23_raw_metrics(env)
@@ -646,6 +650,11 @@ def diagonal_coupling_soft_gate_reward(
     robot = env.scene[asset_cfg.name]
     vel_x = robot.data.root_lin_vel_b[:, 0]
     vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    # Push raw (pre-gate) coupling to episode sums for gated vs raw comparison
+    raw_coupling = (pair_a_raw + pair_b_raw) / 2.0 * vel_gate
+    if hasattr(env, "_v23_raw_metric_episode_sums") and "diagonal_coupling_raw" in env._v23_raw_metric_episode_sums:
+        env._v23_raw_metric_episode_sums["diagonal_coupling_raw"] += raw_coupling * env.step_dt
 
     return reward * vel_gate
 
