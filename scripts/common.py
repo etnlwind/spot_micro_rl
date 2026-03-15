@@ -33,12 +33,12 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-TRAIN_VERSION = "V26.1"
+TRAIN_VERSION = "V27"
 
 # Training configuration for TRAIN_VERSION.
 # Update this dict alongside TRAIN_VERSION whenever reward design changes.
 TRAINING_CONFIG = {
-    "description": "Symmetric existence floor + load sharing — 모든 다리 대칭 gate",
+    "description": "V27: 4발 기능 참여 강제 — single-limb collapse 완전 차단",
     "ppo": {
         "gamma": 0.97,
         "clip_param": 0.1,
@@ -49,14 +49,13 @@ TRAINING_CONFIG = {
     },
     # (name, final_weight, initial_weight, key_params, description)
     "reward_terms": [
-        ("per_leg_contact_floor",          -20.0,  -2.0, "floor=0.10, min_vel=0.05",  "각 다리 최소 contact 비율 보장 (curriculum ramp to -20)"),
-        ("per_leg_propulsion_floor",       -15.0,  -1.5, "floor=0.05, min_vel=0.05",  "각 다리 최소 propulsion 보장 (curriculum ramp to -15)"),
-        ("limb_usage_min_penalty",         -15.0,  -1.5, "min_usage=0.10",             "최소 다리 사용률 보장 (curriculum ramp to -15)"),
-        ("rear_left_right_usage_diff",     -10.0,   0.0, "max_diff=0.40",              "뒷다리 좌우 사용률 불균형 패널티 (ramp iter>=200)"),
-        ("front_left_right_usage_diff",     -8.0,   0.0, "max_diff=0.40",              "앞다리 좌우 사용률 불균형 패널티 (ramp iter>=200)"),
-        ("rear_left_right_propulsion_diff", -8.0,   0.0, "max_diff=0.40",              "뒷다리 좌우 propulsion 불균형 패널티 (ramp iter>=200)"),
-        ("front_rear_support_balance",      -5.0,   0.0, "max_diff=0.50",              "앞뒤 지지 균형 패널티 (ramp iter>=200)"),
-        ("diagonal_coupling_soft_gate",    +25.0, +25.0, "",                           "대각선 커플링 소프트 게이트 — 모든 다리 대칭 (V26 핵심)"),
+        ("single_limb_validity_penalty",        -60.0, -60.0, "floor=0.10, min_vel=0.05",  "V27 핵심: 가장 약한 다리 contact+prop 복합 패널티 (고정 full strength)"),
+        ("per_leg_contact_floor",               -40.0, -10.0, "floor=0.15, min_vel=0.05",  "각 다리 최소 contact 비율 보장 (ramp iter 0→50: -10→-40)"),
+        ("per_leg_propulsion_floor",            -30.0, -10.0, "floor=0.10, min_vel=0.05",  "각 다리 최소 propulsion 보장 (ramp iter 0→50: -10→-30)"),
+        ("limb_usage_min_penalty",              -25.0,  -8.0, "min_usage=0.10",             "최소 다리 사용률 보장 (ramp iter 0→50: -8→-25)"),
+        ("rear_left_right_propulsion_diff",     -20.0,   0.0, "max_diff=0.25",              "뒷다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
+        ("front_left_right_propulsion_diff",    -20.0,   0.0, "max_diff=0.25",              "V27 신규: 앞다리 좌우 propulsion 편중 패널티 (ramp iter 50→150)"),
+        ("diagonal_coupling_soft_gate",         +25.0, +25.0, "min_contact=0.25, min_prop=0.10", "대각선 커플링 — propulsion gate 추가 (V27)"),
     ],
     "collapse_restart": {
         "enabled": True,
@@ -2163,12 +2162,20 @@ def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | N
             "limb_validity_reason": limb_metrics["limb_validity_reason"],
             "limb_usage_min": limb_metrics["limb_usage_min"],
             "rear_left_right_usage_diff": limb_metrics["rear_left_right_usage_diff"],
+            "contact_ratio_fl": limb_metrics["contact_ratios"].get("fl"),
+            "contact_ratio_fr": limb_metrics["contact_ratios"].get("fr"),
             "contact_ratio_rl": limb_metrics["contact_ratios"].get("rl"),
             "contact_ratio_rr": limb_metrics["contact_ratios"].get("rr"),
+            "propulsion_fl": limb_metrics["propulsion_scores"].get("fl"),
+            "propulsion_fr": limb_metrics["propulsion_scores"].get("fr"),
             "propulsion_rl": limb_metrics["propulsion_scores"].get("rl"),
             "propulsion_rr": limb_metrics["propulsion_scores"].get("rr"),
+            "swing_time_fl": limb_metrics["swing_times"].get("fl"),
+            "swing_time_fr": limb_metrics["swing_times"].get("fr"),
             "swing_time_rl": limb_metrics["swing_times"].get("rl"),
             "swing_time_rr": limb_metrics["swing_times"].get("rr"),
+            "limb_usage_fl": limb_metrics["limb_usage_scores"].get("fl"),
+            "limb_usage_fr": limb_metrics["limb_usage_scores"].get("fr"),
             "limb_usage_rl": limb_metrics["limb_usage_scores"].get("rl"),
             "limb_usage_rr": limb_metrics["limb_usage_scores"].get("rr"),
             "validity_stage": validity_state["validity_stage"],
@@ -3497,13 +3504,21 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
     if foot_jitter_score is not None:
         lines.append(f"  - foot_jitter: {float(foot_jitter_score):.1f}/100")
 
-    # V26: 다리 상태 (RL/RR)
+    # V27: 다리 상태 (FL/FR/RL/RR 전체 4발)
+    cr_fl = rewards.get("contact_ratio_fl")
+    cr_fr = rewards.get("contact_ratio_fr")
     cr_rl = rewards.get("contact_ratio_rl")
     cr_rr = rewards.get("contact_ratio_rr")
+    prop_fl = rewards.get("propulsion_fl")
+    prop_fr = rewards.get("propulsion_fr")
     prop_rl = rewards.get("propulsion_rl")
     prop_rr = rewards.get("propulsion_rr")
+    sw_fl = rewards.get("swing_time_fl")
+    sw_fr = rewards.get("swing_time_fr")
     sw_rl = rewards.get("swing_time_rl")
     sw_rr = rewards.get("swing_time_rr")
+    us_fl = rewards.get("limb_usage_fl")
+    us_fr = rewards.get("limb_usage_fr")
     us_rl = rewards.get("limb_usage_rl")
     us_rr = rewards.get("limb_usage_rr")
     lv_reason = kpi.get("limb_validity_reason") or "N/A"
@@ -3522,7 +3537,9 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
 
     lines.extend([
         "",
-        "- 다리 상태 (RL/RR)",
+        "- 다리 상태 (4발 전체)",
+        f"  - {_limb_icon(cr_fl, prop_fl)} FL: contact={_fv(cr_fl)} | prop={_fv(prop_fl)} | swing={_fv(sw_fl)} | usage={_fv(us_fl)}",
+        f"  - {_limb_icon(cr_fr, prop_fr)} FR: contact={_fv(cr_fr)} | prop={_fv(prop_fr)} | swing={_fv(sw_fr)} | usage={_fv(us_fr)}",
         f"  - {_limb_icon(cr_rl, prop_rl)} RL: contact={_fv(cr_rl)} | prop={_fv(prop_rl)} | swing={_fv(sw_rl)} | usage={_fv(us_rl)}",
         f"  - {_limb_icon(cr_rr, prop_rr)} RR: contact={_fv(cr_rr)} | prop={_fv(prop_rr)} | swing={_fv(sw_rr)} | usage={_fv(us_rr)}",
         f"  - validity: {html.escape(str(lv_reason))}",
@@ -4633,19 +4650,29 @@ def format_report_summary_html(run_dir: str, checkpoint_path: str, analysis_text
             return "🟡"
         return "🟢"
 
+    cr_fl2 = kpi_snapshot.get("contact_ratio_fl")
+    cr_fr2 = kpi_snapshot.get("contact_ratio_fr")
     cr_rl2 = kpi_snapshot.get("contact_ratio_rl")
     cr_rr2 = kpi_snapshot.get("contact_ratio_rr")
+    prop_fl2 = kpi_snapshot.get("propulsion_fl")
+    prop_fr2 = kpi_snapshot.get("propulsion_fr")
     prop_rl2 = kpi_snapshot.get("propulsion_rl")
     prop_rr2 = kpi_snapshot.get("propulsion_rr")
+    sw_fl2 = kpi_snapshot.get("swing_time_fl")
+    sw_fr2 = kpi_snapshot.get("swing_time_fr")
     sw_rl2 = kpi_snapshot.get("swing_time_rl")
     sw_rr2 = kpi_snapshot.get("swing_time_rr")
+    us_fl2 = kpi_snapshot.get("limb_usage_fl")
+    us_fr2 = kpi_snapshot.get("limb_usage_fr")
     us_rl2 = kpi_snapshot.get("limb_usage_rl")
     us_rr2 = kpi_snapshot.get("limb_usage_rr")
     lv_reason2 = kpi_snapshot.get("limb_validity_reason") or "N/A"
-    if any(v is not None for v in [cr_rl2, cr_rr2, prop_rl2, prop_rr2]):
+    if any(v is not None for v in [cr_fl2, cr_fr2, cr_rl2, cr_rr2, prop_fl2, prop_fr2, prop_rl2, prop_rr2]):
         lines += [
             "",
-            f"• <b>다리 상태 (RL/RR)</b>",
+            f"• <b>다리 상태 (4발 전체)</b>",
+            f"  {_limb_icon2(cr_fl2, prop_fl2)} FL: contact={_fv2(cr_fl2)} | prop={_fv2(prop_fl2)} | swing={_fv2(sw_fl2)} | usage={_fv2(us_fl2)}",
+            f"  {_limb_icon2(cr_fr2, prop_fr2)} FR: contact={_fv2(cr_fr2)} | prop={_fv2(prop_fr2)} | swing={_fv2(sw_fr2)} | usage={_fv2(us_fr2)}",
             f"  {_limb_icon2(cr_rl2, prop_rl2)} RL: contact={_fv2(cr_rl2)} | prop={_fv2(prop_rl2)} | swing={_fv2(sw_rl2)} | usage={_fv2(us_rl2)}",
             f"  {_limb_icon2(cr_rr2, prop_rr2)} RR: contact={_fv2(cr_rr2)} | prop={_fv2(prop_rr2)} | swing={_fv2(sw_rr2)} | usage={_fv2(us_rr2)}",
             f"  validity: {html.escape(str(lv_reason2))}",

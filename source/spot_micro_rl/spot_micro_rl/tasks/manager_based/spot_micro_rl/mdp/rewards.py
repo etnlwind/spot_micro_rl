@@ -497,6 +497,55 @@ def rear_left_right_propulsion_diff_penalty(
     return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
 
 
+def front_left_right_propulsion_diff_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_diff: float = 0.25,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """V27: 앞다리 좌우(FL vs FR) 추진 편중 억제.
+
+    rear_left_right_propulsion_diff_penalty의 앞다리 버전.
+    max_diff=0.25: 25% 이상 편중 시 penalty (V26 0.40보다 엄격).
+    contact만 살아도 propulsion이 편중되면 패널티 부과.
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    prop_diff = torch.abs(metrics["propulsion_fl"] - metrics["propulsion_fr"])
+    gap = torch.clamp(prop_diff - float(max_diff), min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def single_limb_validity_penalty(
+    env: ManagerBasedRLEnv,
+    floor: float = 0.10,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V27: 가장 약한 다리의 contact+propulsion 복합 점수가 floor 미달 시 강한 패널티.
+
+    contact와 propulsion 둘 다 봄 — contact만 살아도 fake recovery로 통과 안 됨.
+    모든 4다리 중 가장 약한 다리를 기준으로 패널티 부과.
+    weight는 고정 (iter 0부터 full strength, ramp 없음).
+
+    V27 원칙: "0.000x 수준은 절대 살아 있음으로 인정하지 않는다."
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    validity_per_leg = []
+    for s in _V23_LEG_SUFFIXES:
+        contact = metrics[f"contact_ratio_{s}"]
+        prop = metrics[f"propulsion_{s}"]
+        # 두 신호 평균: 둘 다 살아야 gap이 작음 (하나만 살아도 일부 완화되지 않음)
+        validity = (contact + prop) * 0.5
+        validity_per_leg.append(validity)
+    worst = torch.stack(validity_per_leg, dim=1).min(dim=1).values  # (N,)
+    gap = torch.clamp(float(floor) - worst, min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
 def front_rear_support_balance_penalty(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -542,8 +591,9 @@ def diagonal_coupling_soft_gate_reward(
     vel_deadzone: float = 0.1,
     min_vel: float = 0.05,
     min_contact: float = 0.15,
+    min_propulsion: float = 0.0,
 ) -> torch.Tensor:
-    """V26: diagonal coupling with general per-limb collapse soft gate.
+    """V26/V27: diagonal coupling with general per-limb collapse soft gate.
 
     Pair A (FL↔RR): 두 다리 중 하나라도 collapse면 보상 attenuation.
     Pair B (FR↔RL): 두 다리 중 하나라도 collapse면 보상 attenuation.
@@ -553,6 +603,9 @@ def diagonal_coupling_soft_gate_reward(
     collapse 상태면 그 다리가 포함된 diagonal pair 보상이 감소.
 
     min_contact=0.15: contact_ratio 15% 이상이면 gate=1 (정상 참여).
+    min_propulsion>0 (V27): propulsion도 gate에 포함 → 더 강한 차단.
+      gate = (contact_gate) * (propulsion_gate)
+      fake contact(접지하되 추진 0)도 gate 통과 불가.
     """
     asset: Articulation = env.scene[pair_a_front_cfg.name]
 
@@ -576,6 +629,13 @@ def diagonal_coupling_soft_gate_reward(
         rr_gate = torch.clamp(metrics["contact_ratio_rr"] / mc, 0.0, 1.0)
         fr_gate = torch.clamp(metrics["contact_ratio_fr"] / mc, 0.0, 1.0)
         rl_gate = torch.clamp(metrics["contact_ratio_rl"] / mc, 0.0, 1.0)
+        # V27: propulsion gate 추가 (min_propulsion>0일 때만 활성)
+        if float(min_propulsion) > 0.0:
+            mp = max(float(min_propulsion), 1.0e-6)
+            fl_gate = fl_gate * torch.clamp(metrics["propulsion_fl"] / mp, 0.0, 1.0)
+            rr_gate = rr_gate * torch.clamp(metrics["propulsion_rr"] / mp, 0.0, 1.0)
+            fr_gate = fr_gate * torch.clamp(metrics["propulsion_fr"] / mp, 0.0, 1.0)
+            rl_gate = rl_gate * torch.clamp(metrics["propulsion_rl"] / mp, 0.0, 1.0)
         # pair A: FL과 RR이 모두 정상이어야 보상 (둘 다 살아야 진짜 trot)
         pair_a_reward = pair_a_reward * fl_gate * rr_gate
         # pair B: FR과 RL이 모두 정상이어야 보상
@@ -1923,6 +1983,7 @@ def _curriculum_apply_weights(
     load_front_usage_diff_final: float = 0.0,
     load_rear_prop_diff_final: float = 0.0,
     load_front_rear_balance_final: float = 0.0,
+    load_front_prop_diff_final: float = 0.0,
 ) -> None:
     """alpha 기반으로 Phase 가중치를 보간하여 적용."""
     w = _CURRICULUM_PHASE_WEIGHTS
@@ -1975,12 +2036,13 @@ def _curriculum_apply_weights(
         except Exception:
             pass
 
-    # V26: Load sharing ramp (load_ramp_start ~ load_ramp_end), starts from 0
+    # V26/V27: Load sharing ramp (load_ramp_start ~ load_ramp_end), starts from 0
     load_terms: dict[str, float] = {
         "rear_left_right_usage_diff_penalty": float(load_rear_usage_diff_final),
         "front_left_right_usage_diff_penalty": float(load_front_usage_diff_final),
         "rear_left_right_propulsion_diff_penalty": float(load_rear_prop_diff_final),
         "front_rear_support_balance_penalty": float(load_front_rear_balance_final),
+        "front_left_right_propulsion_diff_penalty": float(load_front_prop_diff_final),
     }
     for term_name, w_final in load_terms.items():
         if abs(w_final) < 1e-9:
@@ -2009,6 +2071,9 @@ _LOG_WEIGHT_TERMS = [
     "front_left_right_usage_diff_penalty",
     "rear_left_right_propulsion_diff_penalty",
     "front_rear_support_balance_penalty",
+    # V27 신규
+    "front_left_right_propulsion_diff_penalty",
+    "single_limb_validity_penalty",
 ]
 _LOG_RAW_GAIT_TERMS = ["forward_velocity", "trot_gait", "diagonal_coupling", "leg_lift", "foot_clearance"]
 _LOG_RAW_QUALITY_TERMS = ["joint_vel_l2", "dof_acc_l2", "action_rate_l2"]
@@ -2111,6 +2176,7 @@ def reward_weight_curriculum(
     load_front_usage_diff_final: float = 0.0,
     load_rear_prop_diff_final: float = 0.0,
     load_front_rear_balance_final: float = 0.0,
+    load_front_prop_diff_final: float = 0.0,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -2170,6 +2236,7 @@ def reward_weight_curriculum(
             load_front_usage_diff_final=load_front_usage_diff_final,
             load_rear_prop_diff_final=load_rear_prop_diff_final,
             load_front_rear_balance_final=load_front_rear_balance_final,
+            load_front_prop_diff_final=load_front_prop_diff_final,
         )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
