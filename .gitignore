@@ -76,3 +76,4 @@ tests/
 # Docker history
 .isaac-lab-docker-history
 desktop.ini
+plan/*_논의.md
