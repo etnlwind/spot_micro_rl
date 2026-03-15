@@ -172,15 +172,41 @@ def _parse_command_request(text: str) -> tuple[str, str]:
     return command, arg_text
 
 
-def _parse_checkpoint_iter(arg_text: str) -> int | None:
+def _parse_command_args(arg_text: str) -> tuple[str | None, int | None]:
+    """인자 문자열을 (version, iter) 로 파싱.
+
+    형식:
+      ""            → (None, None)       현재 버전 최신
+      "1000"        → (None, 1000)       현재 버전 iter 1000
+      "V26.1"       → ("V26.1", None)    V26.1 최신
+      "V26.1 1000"  → ("V26.1", 1000)   V26.1 iter 1000
+      "v26.1 1000"  → ("V26.1", 1000)   대소문자 무관
+    """
+    import re
+    arg_text = (arg_text or "").strip()
     if not arg_text:
-        return None
+        return None, None
+    # 버전 접두사 감지: V/v 로 시작하고 숫자가 이어지는 토큰
+    version_pattern = re.compile(r'^[Vv]\d+', re.IGNORECASE)
+    parts = arg_text.split(maxsplit=1)
+    if version_pattern.match(parts[0]):
+        version = parts[0].upper()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if not rest:
+            return version, None
+        if not rest.isdigit():
+            raise ValueError(f"iter는 양의 정수여야 합니다: '{rest}'")
+        iter_num = int(rest)
+        if iter_num <= 0:
+            raise ValueError("iter는 0보다 커야 합니다")
+        return version, iter_num
+    # 버전 없이 iter만
     if not arg_text.isdigit():
-        raise ValueError("checkpoint iteration must be a positive integer, e.g. /report 1000")
+        raise ValueError(f"iter는 양의 정수여야 합니다: '{arg_text}'")
     iter_num = int(arg_text)
     if iter_num <= 0:
-        raise ValueError("checkpoint iteration must be greater than zero")
-    return iter_num
+        raise ValueError("iter는 0보다 커야 합니다")
+    return None, iter_num
 
 
 def _resolve_requested_checkpoint(run_dir: str | None, checkpoint_iter: int | None) -> str | None:
@@ -320,8 +346,14 @@ def _handle_view_command(view_key: str, run_dir: str, checkpoint: str, checkpoin
         common.update_state(mode="stopped", last_command=view_key, last_error="")
 
 
-def handle_command(command: str, checkpoint_iter: int | None = None) -> None:
-    run_dir = common.resolve_active_run_dir()
+def handle_command(command: str, checkpoint_iter: int | None = None, target_version: str | None = None) -> None:
+    if target_version:
+        run_dir = common.resolve_run_dir_for_version(target_version)
+        if not run_dir:
+            _send_notice("VERSION NOT FOUND", f"'{target_version}' 버전의 훈련 데이터를 찾지 못했습니다.", icon="⚠️")
+            return
+    else:
+        run_dir = common.resolve_active_run_dir()
     checkpoint = _resolve_requested_checkpoint(run_dir, checkpoint_iter)
     if command == "help":
         _send_notice("COMMAND MENU", common.help_text().replace("\n", "\n"), icon="❔")
@@ -708,7 +740,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             common.SUPERVISOR_LOG,
                         )
                         continue
-                    checkpoint_iter = _parse_checkpoint_iter(arg_text)
+                    target_version, checkpoint_iter = _parse_command_args(arg_text)
 
                     # /start: checkpoint 존재 시 확인 요청 (파일 존재 여부와 무관하게 state.json 기록 기준)
                     if command == "start":
@@ -739,7 +771,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                         continue
 
                     common.send_text(_build_command_ack(command, checkpoint_iter=checkpoint_iter), common.SUPERVISOR_LOG, parse_mode="HTML")
-                    handle_command(command, checkpoint_iter=checkpoint_iter)
+                    handle_command(command, checkpoint_iter=checkpoint_iter, target_version=target_version)
                 shutdown_source = common.consume_supervisor_shutdown_request()
                 if shutdown_source:
                     exit_reason = f"shutdown-request:{shutdown_source}"

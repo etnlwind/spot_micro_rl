@@ -867,6 +867,43 @@ def resolve_active_run_dir() -> str | None:
     return get_latest_run_dir()
 
 
+def resolve_run_dir_for_version(version: str) -> str | None:
+    """버전 문자열에 해당하는 가장 최근 run_dir을 반환.
+
+    heartbeat_reports.jsonl의 train_version 필드를 기준으로 매칭.
+    대소문자 무관 (예: 'v26.1' == 'V26.1').
+    매칭되는 run이 없으면 None 반환.
+    """
+    if not os.path.isdir(LOG_BASE):
+        return None
+    version_norm = version.strip().upper()
+    matched: list[str] = []
+    for run_name in sorted(os.listdir(LOG_BASE)):
+        run_dir = os.path.join(LOG_BASE, run_name)
+        if not os.path.isdir(run_dir):
+            continue
+        jsonl_path = get_heartbeat_history_path(run_dir)
+        if not os.path.isfile(jsonl_path):
+            continue
+        try:
+            with open(jsonl_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    rec_ver = (record.get("train_version") or "").strip().upper()
+                    if rec_ver == version_norm:
+                        matched.append(run_name)
+                        break
+        except Exception:
+            continue
+    if not matched:
+        return None
+    # 가장 최근 run (이름이 타임스탬프 기반이므로 정렬 후 마지막)
+    return os.path.join(LOG_BASE, sorted(matched)[-1])
+
+
 def resolve_active_checkpoint(run_dir: str | None = None) -> str | None:
     live_run_dir, live_checkpoint = resolve_live_training_context()
     if live_checkpoint:
@@ -2091,6 +2128,7 @@ def build_report_record(data: dict, run_name: str, cycle_num: int, report_kind: 
     current_iter = int(reward_vals[-1][0])
     return {
         "run_name": run_name,
+        "train_version": TRAIN_VERSION,
         "report_kind": report_kind,
         "cycle_num": int(cycle_num),
         "iteration": current_iter,
@@ -4532,9 +4570,9 @@ def help_text() -> str:
         "/stop : 현재 훈련만 중단\n"
         "/status : 현재 상태 조회\n"
         "/selfcheck : run/checkpoint/context 해석 우선순위 점검\n"
-        "/hb [iter] : 지정 iter (생략 시 최신) 기준 텍스트 heartbeat 전송\n"
-        "/report [iter] : training 중이면 최신 zip, stopped면 지정 iter 또는 최신 checkpoint 기준 새 zip 생성\n"
-        "/front [iter], /rear [iter], /top [iter], /side [iter] : training 중이면 최신 영상, stopped면 지정 iter 또는 최신 checkpoint 기준 새 영상 생성\n"
+        "/hb [V버전] [iter] : heartbeat 전송. 버전 생략=현재, iter 생략=최신. 예) /hb V26.1 1000\n"
+        "/report [V버전] [iter] : training 중이면 최신 zip, stopped면 지정 iter 기준 새 zip 생성\n"
+        "/front [V버전] [iter], /rear, /top, /side : training 중이면 최신 영상, stopped면 지정 iter 기준 새 영상\n"
         "/shutdown : supervisor 종료\n"
         "/help : 명령 목록"
     )
