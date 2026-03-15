@@ -215,12 +215,16 @@ def _resolve_requested_checkpoint(run_dir: str | None, checkpoint_iter: int | No
     checkpoint = common.get_checkpoint_by_iter(run_dir, checkpoint_iter)
     if checkpoint:
         return checkpoint
-    raise RuntimeError(f"checkpoint model_{checkpoint_iter}.pt not found in run {os.path.basename(run_dir) if run_dir else 'N/A'}")
+    raise RuntimeError(f"checkpoint model_{checkpoint_iter}.pt not found in any {common._read_run_train_version(run_dir) or 'V?'} run")
 
 
 def _build_command_ack(command: str, checkpoint_iter: int | None = None, target_version: str | None = None) -> str:
     run_dir = common.resolve_run_dir_for_version(target_version) if target_version else common.resolve_active_run_dir()
     checkpoint = _resolve_requested_checkpoint(run_dir, checkpoint_iter)
+    if checkpoint and run_dir:
+        checkpoint_run = os.path.dirname(os.path.abspath(checkpoint))
+        if os.path.abspath(run_dir) != checkpoint_run:
+            run_dir = checkpoint_run
     run_name = os.path.basename(run_dir) if run_dir else "N/A"
     checkpoint_name = os.path.basename(checkpoint) if checkpoint else "N/A"
     training_running = common.is_training_running()
