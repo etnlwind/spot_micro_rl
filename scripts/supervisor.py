@@ -172,41 +172,40 @@ def _parse_command_request(text: str) -> tuple[str, str]:
     return command, arg_text
 
 
-def _parse_command_args(arg_text: str) -> tuple[str | None, int | None]:
-    """인자 문자열을 (version, iter) 로 파싱.
+def _parse_command_args(arg_text: str) -> tuple[str | None, list[int]]:
+    """인자 문자열을 (version, iters) 로 파싱.
 
     형식:
-      ""            → (None, None)       현재 버전 최신
-      "1000"        → (None, 1000)       현재 버전 iter 1000
-      "V26.1"       → ("V26.1", None)    V26.1 최신
-      "V26.1 1000"  → ("V26.1", 1000)   V26.1 iter 1000
-      "v26.1 1000"  → ("V26.1", 1000)   대소문자 무관
+      ""                → (None, [])              현재 버전 최신
+      "1000"            → (None, [1000])           현재 버전 iter 1000
+      "800 600 400"     → (None, [800, 600, 400])  다중 iter 순차 처리
+      "V26.1"           → ("V26.1", [])            V26.1 최신
+      "V26.1 1000"      → ("V26.1", [1000])        V26.1 iter 1000
+      "V26.1 800 600"   → ("V26.1", [800, 600])    V26.1 다중 iter
+      "v26.1 1000"      → ("V26.1", [1000])        대소문자 무관
     """
     import re
     arg_text = (arg_text or "").strip()
     if not arg_text:
-        return None, None
-    # 버전 접두사 감지: V/v 로 시작하고 숫자가 이어지는 토큰
+        return None, []
     version_pattern = re.compile(r'^[Vv]\d+', re.IGNORECASE)
-    parts = arg_text.split(maxsplit=1)
+    parts = arg_text.split()
+    version = None
+    iter_tokens = parts
     if version_pattern.match(parts[0]):
         version = parts[0].upper()
-        rest = parts[1].strip() if len(parts) > 1 else ""
-        if not rest:
-            return version, None
-        if not rest.isdigit():
-            raise ValueError(f"iter는 양의 정수여야 합니다: '{rest}'")
-        iter_num = int(rest)
-        if iter_num <= 0:
-            raise ValueError("iter는 0보다 커야 합니다")
-        return version, iter_num
-    # 버전 없이 iter만
-    if not arg_text.isdigit():
-        raise ValueError(f"iter는 양의 정수여야 합니다: '{arg_text}'")
-    iter_num = int(arg_text)
-    if iter_num <= 0:
-        raise ValueError("iter는 0보다 커야 합니다")
-    return None, iter_num
+        iter_tokens = parts[1:]
+    if not iter_tokens:
+        return version, []
+    iters = []
+    for token in iter_tokens:
+        if not token.isdigit():
+            raise ValueError(f"iter는 양의 정수여야 합니다: '{token}'")
+        n = int(token)
+        if n <= 0:
+            raise ValueError(f"iter는 0보다 커야 합니다: {n}")
+        iters.append(n)
+    return version, iters
 
 
 def _resolve_requested_checkpoint(run_dir: str | None, checkpoint_iter: int | None) -> str | None:
@@ -218,9 +217,11 @@ def _resolve_requested_checkpoint(run_dir: str | None, checkpoint_iter: int | No
     raise RuntimeError(f"checkpoint model_{checkpoint_iter}.pt not found in any {common._read_run_train_version(run_dir) or 'V?'} run")
 
 
-def _build_command_ack(command: str, checkpoint_iter: int | None = None, target_version: str | None = None) -> str:
+def _build_command_ack(command: str, checkpoint_iters: list[int] | None = None, target_version: str | None = None) -> str:
+    checkpoint_iters = checkpoint_iters or []
+    first_iter = checkpoint_iters[0] if checkpoint_iters else None
     run_dir = common.resolve_run_dir_for_version(target_version) if target_version else common.resolve_active_run_dir()
-    checkpoint = _resolve_requested_checkpoint(run_dir, checkpoint_iter)
+    checkpoint = _resolve_requested_checkpoint(run_dir, first_iter)
     if checkpoint and run_dir:
         checkpoint_run = os.path.dirname(os.path.abspath(checkpoint))
         if os.path.abspath(run_dir) != checkpoint_run:
@@ -228,7 +229,13 @@ def _build_command_ack(command: str, checkpoint_iter: int | None = None, target_
     run_name = os.path.basename(run_dir) if run_dir else "N/A"
     checkpoint_name = os.path.basename(checkpoint) if checkpoint else "N/A"
     training_running = common.is_training_running()
-    checkpoint_hint = f"\n<i>requested checkpoint: model_{checkpoint_iter}.pt</i>" if checkpoint_iter is not None else ""
+    if len(checkpoint_iters) > 1:
+        iter_seq = " → ".join(str(i) for i in checkpoint_iters)
+        checkpoint_hint = f"\n<i>{len(checkpoint_iters)}건 순차 처리: {iter_seq}</i>"
+    elif first_iter is not None:
+        checkpoint_hint = f"\n<i>requested checkpoint: model_{first_iter}.pt</i>"
+    else:
+        checkpoint_hint = ""
     if command == "start":
         return (
             f"🚀 <b>TRAINING START (FRESH) — {run_name}</b>\n"
@@ -350,20 +357,20 @@ def _handle_view_command(view_key: str, run_dir: str, checkpoint: str, checkpoin
         common.update_state(mode="stopped", last_command=view_key, last_error="")
 
 
-def handle_command(command: str, checkpoint_iter: int | None = None, target_version: str | None = None) -> None:
+def handle_command(command: str, checkpoint_iters: list[int] | None = None, target_version: str | None = None) -> None:
+    checkpoint_iters = checkpoint_iters or []
+    base_run_dir = None
     if target_version:
-        run_dir = common.resolve_run_dir_for_version(target_version)
-        if not run_dir:
+        base_run_dir = common.resolve_run_dir_for_version(target_version)
+        if not base_run_dir:
             _send_notice("VERSION NOT FOUND", f"'{target_version}' 버전의 훈련 데이터를 찾지 못했습니다.", icon="⚠️")
             return
     else:
-        run_dir = common.resolve_active_run_dir()
-    checkpoint = _resolve_requested_checkpoint(run_dir, checkpoint_iter)
-    # checkpoint가 다른 run에서 찾아진 경우 run_dir을 실제 위치로 교정
-    if checkpoint and run_dir:
-        checkpoint_run = os.path.dirname(os.path.abspath(checkpoint))
-        if os.path.abspath(run_dir) != checkpoint_run:
-            run_dir = checkpoint_run
+        base_run_dir = common.resolve_active_run_dir()
+
+    # single-iter 명령(hb 등)을 위해 첫 번째 iter 또는 None
+    first_iter = checkpoint_iters[0] if checkpoint_iters else None
+
     if command == "help":
         _send_notice("COMMAND MENU", common.help_text().replace("\n", "\n"), icon="❔")
         return
@@ -392,20 +399,32 @@ def handle_command(command: str, checkpoint_iter: int | None = None, target_vers
         _send_notice("SUPERVISOR SHUTDOWN QUEUED", "Supervisor 종료 요청을 기록했습니다.", icon="👮")
         return
     if command == "hb":
-        if not run_dir:
+        if not base_run_dir:
             _send_notice("CONTEXT NOT FOUND", "active run을 찾지 못했습니다.", icon="⚠️")
             return
-        _handle_hb_command(run_dir, iteration=checkpoint_iter)
+        _handle_hb_command(base_run_dir, iteration=first_iter)
         return
-    if not run_dir or not checkpoint:
-        _send_notice("CONTEXT NOT FOUND", "active run/checkpoint를 찾지 못했습니다.", icon="⚠️")
+
+    # report / view: iter 리스트 순차 처리
+    if command in {"report", "front", "rear", "top", "side"}:
+        iter_list = checkpoint_iters if checkpoint_iters else [None]
+        for iter_num in iter_list:
+            run_dir = base_run_dir
+            checkpoint = _resolve_requested_checkpoint(run_dir, iter_num)
+            if checkpoint and run_dir:
+                checkpoint_run = os.path.dirname(os.path.abspath(checkpoint))
+                if os.path.abspath(run_dir) != checkpoint_run:
+                    run_dir = checkpoint_run
+            if not run_dir or not checkpoint:
+                label = f"model_{iter_num}.pt" if iter_num else "latest checkpoint"
+                _send_notice("NOT FOUND", f"{label}를 찾지 못했습니다.", icon="⚠️")
+                continue
+            if command == "report":
+                _handle_report_command(run_dir, checkpoint, checkpoint_iter=iter_num)
+            else:
+                _handle_view_command(command, run_dir, checkpoint, checkpoint_iter=iter_num)
         return
-    if command == "report":
-        _handle_report_command(run_dir, checkpoint, checkpoint_iter=checkpoint_iter)
-        return
-    if command in {"front", "rear", "top", "side"}:
-        _handle_view_command(command, run_dir, checkpoint, checkpoint_iter=checkpoint_iter)
-        return
+
     _send_notice("UNKNOWN COMMAND", f"{command}\n\n{common.help_text()}", icon="⚠️")
 
 
@@ -752,7 +771,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             common.SUPERVISOR_LOG,
                         )
                         continue
-                    target_version, checkpoint_iter = _parse_command_args(arg_text)
+                    target_version, checkpoint_iters = _parse_command_args(arg_text)
 
                     # /start: 버전이 동일한 경우에만 checkpoint 덮어쓰기 확인 요청.
                     # 버전이 다르면 (예: V27.1b → V28) 확인 없이 바로 fresh start.
@@ -796,8 +815,8 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             )
                         continue
 
-                    common.send_text(_build_command_ack(command, checkpoint_iter=checkpoint_iter, target_version=target_version), common.SUPERVISOR_LOG, parse_mode="HTML")
-                    handle_command(command, checkpoint_iter=checkpoint_iter, target_version=target_version)
+                    common.send_text(_build_command_ack(command, checkpoint_iters=checkpoint_iters, target_version=target_version), common.SUPERVISOR_LOG, parse_mode="HTML")
+                    handle_command(command, checkpoint_iters=checkpoint_iters, target_version=target_version)
                 shutdown_source = common.consume_supervisor_shutdown_request()
                 if shutdown_source:
                     exit_reason = f"shutdown-request:{shutdown_source}"
