@@ -144,6 +144,21 @@ if not TRAIN_VERSION:
         f"  .env 파일({ENV_FILE})에 TRAIN_VERSION=V28.1 형식으로 추가하거나\n"
         "  환경변수 TRAIN_VERSION을 설정한 후 다시 실행하세요."
     )
+def reload_train_version() -> str:
+    """최신 .env / 환경변수에서 TRAIN_VERSION을 다시 읽어 common.TRAIN_VERSION을 갱신."""
+    import common as _self
+    fresh = _load_env(ENV_FILE)
+    ver = fresh.get("TRAIN_VERSION") or os.environ.get("TRAIN_VERSION") or ""
+    if not ver:
+        raise EnvironmentError(
+            "[common.py] TRAIN_VERSION이 설정되지 않았습니다.\n"
+            f"  .env 파일({ENV_FILE})에 TRAIN_VERSION=V28.1 형식으로 추가하거나\n"
+            "  환경변수 TRAIN_VERSION을 설정한 후 다시 실행하세요."
+        )
+    _self.TRAIN_VERSION = ver
+    return ver
+
+
 TRAIN_ENVS = int(_env.get("TRAIN_ENVS", "24576"))
 PLAY_ENVS = int(_env.get("PLAY_ENVS", "50"))
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
