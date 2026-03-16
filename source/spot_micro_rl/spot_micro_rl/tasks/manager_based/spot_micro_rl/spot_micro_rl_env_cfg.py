@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V28"
+TRAIN_VERSION = "V28.1"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -210,6 +210,28 @@ class SpotMicroRewardCurriculumCfg:
             "coop_usage_final": 3.0,         # usage band [0.20~0.45]
             "coop_reward_initial": 0.0,
             "coop_reward_final": 8.0,        # band_hit_count >= 2/3 trigger
+            # V28.1: residency relay ramp (early triangle 600→800→1000, late ramp 800→1000→유지)
+            "residency_relay_up_start": 600,
+            "residency_relay_up_end": 800,
+            "residency_relay_down_end": 1000,
+            "contact_residency_early_max": 3.0,   # early 최대 weight (600→800 peak)
+            "contact_residency_late_max": 4.0,    # late 최대 weight (1000+ 유지)
+            "prop_residency_early_max": 2.0,
+            "prop_residency_late_max": 3.0,
+            "usage_residency_early_max": 1.0,
+            "usage_residency_late_max": 2.0,
+            # V28.1: rear pair residency symmetry penalty (iter 600~1000)
+            "rear_symmetry_ramp_start": 600,
+            "rear_symmetry_ramp_end": 1000,
+            "rear_symmetry_max": -8.0,            # 최대 패널티 (음수)
+            # V28.1: late-phase band exit penalty (iter 800~1200)
+            "exit_penalty_ramp_start": 800,
+            "exit_penalty_ramp_end": 1200,
+            "exit_penalty_max": -6.0,             # 최대 패널티 (음수)
+            # V28.1: cooperation min-leg factor ramp (iter 800~1000, 1.0 → 0.2)
+            "coop_min_leg_ramp_start": 800,
+            "coop_min_leg_ramp_end": 1000,
+            "coop_min_leg_factor_target": 0.2,    # 최약 다리 band 밖 시 80% 감쇠
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -749,6 +771,65 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "propulsion_band_low": 0.15,
                 "trigger_partial": 2,   # band_hit >= 2 → 0.5x
                 "trigger_full": 3,      # band_hit >= 3 → 1.0x
+                "min_vel": 0.05,
+                "min_leg_factor_low": 1.0,  # V28.1: curriculum이 0.2까지 ramp (iter 800~1000)
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        # V28.1: Band residency rewards (relay: early 600→800→1000, late 800→1000→유지)
+        self.rewards.contact_residency = RewTerm(
+            func=custom_mdp.per_leg_contact_band_residency_reward,
+            weight=0.0,  # curriculum relay ramp으로 제어
+            params={
+                "band_low": 0.20,
+                "ema_alpha": 0.05,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.prop_residency = RewTerm(
+            func=custom_mdp.per_leg_propulsion_band_residency_reward,
+            weight=0.0,
+            params={
+                "band_low": 0.15,
+                "ema_alpha": 0.05,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.usage_residency = RewTerm(
+            func=custom_mdp.limb_usage_band_residency_reward,
+            weight=0.0,
+            params={
+                "band_low": 0.20,
+                "ema_alpha": 0.05,
+                "contact_target": 0.5,
+                "propulsion_target": 0.30,
+                "leg_lift_target": 0.18,
+                "clearance_target": 0.03,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        # V28.1: Rear pair residency symmetry penalty (iter 600~1000 ramp)
+        self.rewards.rear_pair_residency_symmetry = RewTerm(
+            func=custom_mdp.rear_pair_residency_symmetry_penalty,
+            weight=0.0,  # curriculum이 -8.0까지 ramp (iter 600~1000)
+            params={
+                "min_diff": 0.05,
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        # V28.1: Late-phase band exit penalty (iter 800~1200 ramp)
+        self.rewards.late_phase_band_exit = RewTerm(
+            func=custom_mdp.late_phase_band_exit_penalty,
+            weight=0.0,  # curriculum이 -6.0까지 ramp (iter 800~1200)
+            params={
+                "residency_floor": 0.50,  # 600~800 분석 기반 최소 기대 residency
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
             },

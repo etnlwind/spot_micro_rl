@@ -103,6 +103,30 @@ _V23_CONTACT_BODY_NAMES = [
 ]
 _V23_LEG_SUFFIXES = ("fl", "fr", "rl", "rr")
 
+# V28.1: per-leg EMA residency state keys (contact / propulsion / usage × 4 legs = 12)
+_V281_RESIDENCY_EMA_KEYS = (
+    [f"contact_{s}" for s in _V23_LEG_SUFFIXES]
+    + [f"prop_{s}" for s in _V23_LEG_SUFFIXES]
+    + [f"usage_{s}" for s in _V23_LEG_SUFFIXES]
+)
+
+
+def _ensure_v281_residency_state(env: "ManagerBasedRLEnv") -> None:
+    """V28.1: per-leg EMA residency tensor 초기화 (없을 때만).
+
+    episode 단위 리셋은 reset_v23_raw_metric_extras()에서 처리.
+    """
+    if not hasattr(env, "_v281_residency_ema"):
+        env._v281_residency_ema = {
+            key: torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+            for key in _V281_RESIDENCY_EMA_KEYS
+        }
+    else:
+        # 혹시 신규 key가 없으면 보완 (resume 대응)
+        for key in _V281_RESIDENCY_EMA_KEYS:
+            if key not in env._v281_residency_ema:
+                env._v281_residency_ema[key] = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+
 
 def _compute_heading_xy(quat_w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     w, x, y, z = quat_w[:, 0], quat_w[:, 1], quat_w[:, 2], quat_w[:, 3]
@@ -303,6 +327,10 @@ def reset_v23_raw_metric_extras(env: ManagerBasedRLEnv, env_ids) -> dict[str, to
     for name, buffer in env._v23_raw_metric_episode_sums.items():
         extras[f"Episode_Reward/{name}"] = torch.mean(buffer[env_ids]) / env.max_episode_length_s
         buffer[env_ids] = 0.0
+    # V28.1: per-leg EMA residency 리셋 (episode 경계에서 초기화)
+    if hasattr(env, "_v281_residency_ema"):
+        for buf in env._v281_residency_ema.values():
+            buf[env_ids] = 0.0
     return extras
 
 
@@ -654,6 +682,7 @@ def four_limb_cooperation_reward(
     trigger_partial: int = 2,
     trigger_full: int = 3,
     min_vel: float = 0.05,
+    min_leg_factor_low: float = 1.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """V28: 4발이 동시에 target band에 들어왔을 때 협동 보상.
@@ -665,6 +694,11 @@ def four_limb_cooperation_reward(
 
     초기 랜덤 정책에서는 거의 0 → 학습 억제 없음.
     4발 기능 참여 형성 이후에야 의미 있는 보상이 됨 (후반 강화형).
+
+    V28.1 min_leg_factor_low: 최약 다리의 band 참여 여부를 soft factor로 곱함.
+    - 기본값 1.0이면 V28 동작과 동일 (factor 없음).
+    - <1.0이면 최약 다리가 band 밖일 때 보상 감쇠: factor = min_leg_factor_low + (1 - min_leg_factor_low) * min_leg_score
+    - 평균 기반 cooperation reward가 "3 good + 1 bad" 상태에 속지 않도록 방지.
     """
     metrics = compute_v23_raw_metrics(env)
     if not metrics:
@@ -677,11 +711,202 @@ def four_limb_cooperation_reward(
     )  # (N, 4)
     contact_in = contact_tensor >= float(contact_band_low)
     prop_in = prop_tensor >= float(propulsion_band_low)
-    band_hit = (contact_in & prop_in).float()  # (N, 4)
+    band_hit = (contact_in & prop_in).float()  # (N, 4): per-leg 0/1
     band_hit_count = band_hit.sum(dim=1)  # (N,)
     partial = (band_hit_count >= float(trigger_partial)).float() * 0.5
     full_bonus = (band_hit_count >= float(trigger_full)).float() * 0.5
-    return (partial + full_bonus) * _heading_velocity_gate(env, asset_cfg, min_vel)
+    base_reward = partial + full_bonus
+    # V28.1: min-leg soft factor (기본값 1.0이면 no-op)
+    fac_low = float(min_leg_factor_low)
+    if fac_low < 1.0 - 1e-6:
+        min_leg_score = band_hit.min(dim=1)[0]  # (N,) — 0이면 최약 다리 band 밖
+        factor = fac_low + (1.0 - fac_low) * min_leg_score
+        base_reward = base_reward * factor
+    return base_reward * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+# ============================================================
+# V28.1: Band Residency Rewards + Rear Pair Symmetry + Late-phase Exit Penalty
+# "band entry"에서 "band residency"로 — 후반 유지 강화판
+# ============================================================
+
+
+def _update_v281_contact_ema(
+    env: "ManagerBasedRLEnv",
+    metrics: dict,
+    band_low: float,
+    ema_alpha: float,
+) -> None:
+    """contact EMA를 이 step에서 아직 업데이트하지 않은 경우에만 갱신."""
+    current_step = env.common_step_counter
+    if getattr(env, "_v281_contact_ema_step", -1) == current_step:
+        return
+    env._v281_contact_ema_step = current_step
+    contact_tensor = torch.stack(
+        [metrics[f"contact_ratio_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    in_band = (contact_tensor >= band_low).float()
+    for i, s in enumerate(_V23_LEG_SUFFIXES):
+        key = f"contact_{s}"
+        env._v281_residency_ema[key].mul_(1.0 - ema_alpha).add_(in_band[:, i] * ema_alpha)
+
+
+def _update_v281_prop_ema(
+    env: "ManagerBasedRLEnv",
+    metrics: dict,
+    band_low: float,
+    ema_alpha: float,
+) -> None:
+    """propulsion EMA를 이 step에서 아직 업데이트하지 않은 경우에만 갱신."""
+    current_step = env.common_step_counter
+    if getattr(env, "_v281_prop_ema_step", -1) == current_step:
+        return
+    env._v281_prop_ema_step = current_step
+    prop_tensor = torch.stack(
+        [metrics[f"propulsion_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    in_band = (prop_tensor >= band_low).float()
+    for i, s in enumerate(_V23_LEG_SUFFIXES):
+        key = f"prop_{s}"
+        env._v281_residency_ema[key].mul_(1.0 - ema_alpha).add_(in_band[:, i] * ema_alpha)
+
+
+def _update_v281_usage_ema(
+    env: "ManagerBasedRLEnv",
+    metrics: dict,
+    band_low: float,
+    ema_alpha: float,
+    contact_target: float,
+    propulsion_target: float,
+    leg_lift_target: float,
+    clearance_target: float,
+) -> None:
+    """usage EMA를 이 step에서 아직 업데이트하지 않은 경우에만 갱신."""
+    current_step = env.common_step_counter
+    if getattr(env, "_v281_usage_ema_step", -1) == current_step:
+        return
+    env._v281_usage_ema_step = current_step
+    usage_scores = _compute_limb_usage_proxy(
+        metrics, contact_target, propulsion_target, leg_lift_target, clearance_target
+    )
+    in_band = torch.stack(
+        [(usage_scores[s] >= band_low).float() for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    for i, s in enumerate(_V23_LEG_SUFFIXES):
+        key = f"usage_{s}"
+        env._v281_residency_ema[key].mul_(1.0 - ema_alpha).add_(in_band[:, i] * ema_alpha)
+
+
+def per_leg_contact_band_residency_reward(
+    env: ManagerBasedRLEnv,
+    band_low: float = 0.20,
+    ema_alpha: float = 0.05,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28.1: 각 다리의 contact_ratio가 band 안에 지속 체류한 비율(EMA)을 보상.
+
+    순간 진입이 아니라 episode 내 장기 체류를 유도.
+    EMA는 per-env, per-episode 상태로 관리 (reset 시 초기화).
+    relay: early(600→800→1000) + late(800→1000→유지) curriculum으로 제어.
+    """
+    _ensure_v281_residency_state(env)
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    _update_v281_contact_ema(env, metrics, band_low, ema_alpha)
+    ema_tensor = torch.stack(
+        [env._v281_residency_ema[f"contact_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    return ema_tensor.sum(dim=1) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def per_leg_propulsion_band_residency_reward(
+    env: ManagerBasedRLEnv,
+    band_low: float = 0.15,
+    ema_alpha: float = 0.05,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28.1: 각 다리의 propulsion이 band 안에 지속 체류한 비율(EMA)을 보상.
+
+    contact residency와 함께 작동하여 "접지+추진 동시 유지"를 장기 유도.
+    """
+    _ensure_v281_residency_state(env)
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    _update_v281_prop_ema(env, metrics, band_low, ema_alpha)
+    ema_tensor = torch.stack(
+        [env._v281_residency_ema[f"prop_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    return ema_tensor.sum(dim=1) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def limb_usage_band_residency_reward(
+    env: ManagerBasedRLEnv,
+    band_low: float = 0.20,
+    ema_alpha: float = 0.05,
+    contact_target: float = 0.5,
+    propulsion_target: float = 0.30,
+    leg_lift_target: float = 0.18,
+    clearance_target: float = 0.03,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28.1: 각 다리의 usage_proxy가 band 안에 지속 체류한 비율(EMA)을 보상."""
+    _ensure_v281_residency_state(env)
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    _update_v281_usage_ema(
+        env, metrics, band_low, ema_alpha, contact_target, propulsion_target, leg_lift_target, clearance_target
+    )
+    ema_tensor = torch.stack(
+        [env._v281_residency_ema[f"usage_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
+    )  # (N, 4)
+    return ema_tensor.sum(dim=1) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def rear_pair_residency_symmetry_penalty(
+    env: ManagerBasedRLEnv,
+    min_diff: float = 0.05,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28.1: RL과 RR의 contact residency 차이를 패널티.
+
+    residency 자체가 EMA이므로 이중 EMA 없이 abs diff 직접 사용.
+    작은 차이(min_diff 이하)는 무시하여 정상 범위 변동은 패널티 없음.
+    RL이 천천히 빠지는 시간누적형 붕괴 패턴을 조기 차단.
+    """
+    _ensure_v281_residency_state(env)
+    rl_ema = env._v281_residency_ema["contact_rl"]
+    rr_ema = env._v281_residency_ema["contact_rr"]
+    diff = torch.abs(rl_ema - rr_ema)
+    gap = torch.clamp(diff - float(min_diff), min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def late_phase_band_exit_penalty(
+    env: ManagerBasedRLEnv,
+    residency_floor: float = 0.50,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28.1: late phase에서 per-leg contact residency가 floor 미달 시 패널티.
+
+    iter 800 고정 snapshot 기반이 아니라,
+    late-phase에서 기대되는 최소 residency(residency_floor) 미달을 패널티로 정의.
+    curriculum ramp(iter 800→1200)로 late phase에서만 점진적으로 활성화.
+    """
+    _ensure_v281_residency_state(env)
+    penalty = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    for s in _V23_LEG_SUFFIXES:
+        ema = env._v281_residency_ema[f"contact_{s}"]
+        gap = torch.clamp(float(residency_floor) - ema, min=0.0)
+        penalty += gap
+    return penalty * _heading_velocity_gate(env, asset_cfg, min_vel)
 
 
 def front_rear_support_balance_penalty(
@@ -2108,6 +2333,100 @@ def _curriculum_target_alpha(iteration: int, ramp_start: int, ramp_end: int) -> 
     return (iteration - ramp_start) / (ramp_end - ramp_start)
 
 
+def _curriculum_alpha_relay_early(
+    iteration: int,
+    up_start: int,
+    up_end: int,
+    down_end: int,
+) -> float:
+    """V28.1 relay early alpha: up_start→up_end ramp up, up_end→down_end ramp down.
+
+    triangle 형태 (up_end에서 1.0, down_end 이후 0.0).
+    예: early residency, iter 600→800→1000
+    """
+    if iteration <= up_start:
+        return 0.0
+    if iteration < up_end:
+        return (iteration - up_start) / max(up_end - up_start, 1)
+    if iteration < down_end:
+        return 1.0 - (iteration - up_end) / max(down_end - up_end, 1)
+    return 0.0
+
+
+def _curriculum_apply_v281_weights(
+    env: ManagerBasedRLEnv,
+    # relay early alpha (triangle 600→800→1000)
+    residency_early_alpha: float,
+    # relay late alpha (ramp up 800→1000, hold 1000+)
+    residency_late_alpha: float,
+    # per-metric early/late max weight
+    contact_residency_early_max: float,
+    contact_residency_late_max: float,
+    prop_residency_early_max: float,
+    prop_residency_late_max: float,
+    usage_residency_early_max: float,
+    usage_residency_late_max: float,
+    # rear pair symmetry alpha + max
+    rear_symmetry_alpha: float,
+    rear_symmetry_max: float,
+    # late-phase exit penalty alpha + max
+    exit_penalty_alpha: float,
+    exit_penalty_max: float,
+    # cooperation min-leg factor (ramp 0→target)
+    coop_min_leg_alpha: float,
+    coop_min_leg_factor_target: float,
+) -> None:
+    """V28.1 신규 term들의 가중치를 relay/ramp alpha 기반으로 적용."""
+    # 1. Residency rewards (relay: early + late 합산 → 단일 term weight)
+    residency_terms: dict[str, tuple[float, float]] = {
+        "contact_residency": (contact_residency_early_max, contact_residency_late_max),
+        "prop_residency": (prop_residency_early_max, prop_residency_late_max),
+        "usage_residency": (usage_residency_early_max, usage_residency_late_max),
+    }
+    for term_name, (early_max, late_max) in residency_terms.items():
+        if abs(early_max) < 1e-9 and abs(late_max) < 1e-9:
+            continue
+        total_w = residency_early_alpha * early_max + residency_late_alpha * late_max
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = total_w
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+    # 2. Rear pair symmetry penalty (simple ramp)
+    if abs(rear_symmetry_max) > 1e-9:
+        rear_sym_w = rear_symmetry_alpha * rear_symmetry_max
+        try:
+            cfg = env.reward_manager.get_term_cfg("rear_pair_residency_symmetry")
+            cfg.weight = rear_sym_w
+            env.reward_manager.set_term_cfg("rear_pair_residency_symmetry", cfg)
+        except Exception:
+            pass
+
+    # 3. Late-phase band exit penalty (simple ramp)
+    if abs(exit_penalty_max) > 1e-9:
+        exit_w = exit_penalty_alpha * exit_penalty_max
+        try:
+            cfg = env.reward_manager.get_term_cfg("late_phase_band_exit")
+            cfg.weight = exit_w
+            env.reward_manager.set_term_cfg("late_phase_band_exit", cfg)
+        except Exception:
+            pass
+
+    # 4. Cooperation min-leg factor: four_limb_cooperation term의 params 업데이트
+    if abs(coop_min_leg_factor_target - 1.0) > 1e-6 and abs(coop_min_leg_alpha) > 1e-9:
+        # factor_low: 1.0 (V28 기본) → coop_min_leg_factor_target (V28.1 목표)
+        # alpha 0→1 ramp으로 부드럽게 전환
+        current_factor = 1.0 - coop_min_leg_alpha * (1.0 - coop_min_leg_factor_target)
+        try:
+            cfg = env.reward_manager.get_term_cfg("four_limb_cooperation")
+            cfg.params["min_leg_factor_low"] = current_factor
+            env.reward_manager.set_term_cfg("four_limb_cooperation", cfg)
+        except Exception:
+            pass
+
+
 def _curriculum_apply_layer_c_weights(
     env: ManagerBasedRLEnv,
     band_alpha: float,
@@ -2330,6 +2649,12 @@ _LOG_WEIGHT_TERMS = [
     "per_leg_propulsion_target_band",
     "limb_usage_target_band",
     "four_limb_cooperation",
+    # V28.1 residency / symmetry / exit (없으면 skip)
+    "contact_residency",
+    "prop_residency",
+    "usage_residency",
+    "rear_pair_residency_symmetry",
+    "late_phase_band_exit",
 ]
 _LOG_RAW_GAIT_TERMS = ["forward_velocity", "trot_gait", "diagonal_coupling", "leg_lift", "foot_clearance"]
 _LOG_RAW_QUALITY_TERMS = ["joint_vel_l2", "dof_acc_l2", "action_rate_l2"]
@@ -2455,6 +2780,28 @@ def reward_weight_curriculum(
     coop_usage_final: float = 0.0,
     coop_reward_initial: float = 0.0,
     coop_reward_final: float = 0.0,
+    # V28.1: residency relay ramp (early triangle: up_start→up_end→down_end)
+    residency_relay_up_start: int = 600,   # early ramp up 시작
+    residency_relay_up_end: int = 800,     # early ramp up 완료 / late ramp up 시작
+    residency_relay_down_end: int = 1000,  # early ramp down 완료 / late ramp up 완료
+    contact_residency_early_max: float = 0.0,
+    contact_residency_late_max: float = 0.0,
+    prop_residency_early_max: float = 0.0,
+    prop_residency_late_max: float = 0.0,
+    usage_residency_early_max: float = 0.0,
+    usage_residency_late_max: float = 0.0,
+    # V28.1: rear pair symmetry penalty ramp
+    rear_symmetry_ramp_start: int = 600,
+    rear_symmetry_ramp_end: int = 1000,
+    rear_symmetry_max: float = 0.0,
+    # V28.1: late-phase band exit penalty ramp
+    exit_penalty_ramp_start: int = 800,
+    exit_penalty_ramp_end: int = 1200,
+    exit_penalty_max: float = 0.0,
+    # V28.1: cooperation min-leg factor ramp (1.0 → target)
+    coop_min_leg_ramp_start: int = 800,
+    coop_min_leg_ramp_end: int = 1000,
+    coop_min_leg_factor_target: float = 1.0,  # 1.0이면 V28 동작 유지
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -2499,6 +2846,22 @@ def reward_weight_curriculum(
         # V28: Layer C alphas
         env._crr_band_alpha = _curriculum_target_alpha(iteration, band_ramp_start, band_ramp_end)
         env._crr_coop_alpha = _curriculum_target_alpha(iteration, coop_ramp_start, coop_ramp_end)
+        # V28.1: residency relay alphas
+        env._crr_residency_early_alpha = _curriculum_alpha_relay_early(
+            iteration, residency_relay_up_start, residency_relay_up_end, residency_relay_down_end
+        )
+        env._crr_residency_late_alpha = _curriculum_target_alpha(
+            iteration, residency_relay_up_end, residency_relay_down_end
+        )
+        env._crr_rear_symmetry_alpha = _curriculum_target_alpha(
+            iteration, rear_symmetry_ramp_start, rear_symmetry_ramp_end
+        )
+        env._crr_exit_penalty_alpha = _curriculum_target_alpha(
+            iteration, exit_penalty_ramp_start, exit_penalty_ramp_end
+        )
+        env._crr_coop_min_leg_alpha = _curriculum_target_alpha(
+            iteration, coop_min_leg_ramp_start, coop_min_leg_ramp_end
+        )
         env._crr_last_update = iteration
         env._crr_gate_paused = False
         _curriculum_apply_weights(
@@ -2538,6 +2901,24 @@ def reward_weight_curriculum(
             coop_reward_initial=coop_reward_initial,
             coop_reward_final=coop_reward_final,
         )
+        # V28.1: residency relay + symmetry + exit + min-leg factor 초기 적용
+        _curriculum_apply_v281_weights(
+            env,
+            residency_early_alpha=env._crr_residency_early_alpha,
+            residency_late_alpha=env._crr_residency_late_alpha,
+            contact_residency_early_max=contact_residency_early_max,
+            contact_residency_late_max=contact_residency_late_max,
+            prop_residency_early_max=prop_residency_early_max,
+            prop_residency_late_max=prop_residency_late_max,
+            usage_residency_early_max=usage_residency_early_max,
+            usage_residency_late_max=usage_residency_late_max,
+            rear_symmetry_alpha=env._crr_rear_symmetry_alpha,
+            rear_symmetry_max=rear_symmetry_max,
+            exit_penalty_alpha=env._crr_exit_penalty_alpha,
+            exit_penalty_max=exit_penalty_max,
+            coop_min_leg_alpha=env._crr_coop_min_leg_alpha,
+            coop_min_leg_factor_target=coop_min_leg_factor_target,
+        )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
         print(f"[Curriculum] INIT @ iter {iteration} | {phase_str}")
@@ -2549,6 +2930,9 @@ def reward_weight_curriculum(
         print(f"  floor_ramp=[{floor_ramp_start}~{floor_ramp_end}], prop_floor_ramp=[{_prop_ramp_start}~{_prop_ramp_end}], load_ramp=[{load_ramp_start}~{load_ramp_end}]")
         print(f"  validity_gate_ramp=[{validity_gate_ramp_start}~{validity_gate_ramp_end}]")
         print(f"  band_ramp=[{band_ramp_start}~{band_ramp_end}], coop_ramp=[{coop_ramp_start}~{coop_ramp_end}] (V28)")
+        print(f"  residency_relay=[{residency_relay_up_start}→{residency_relay_up_end}→{residency_relay_down_end}] (V28.1)")
+        print(f"  rear_sym_ramp=[{rear_symmetry_ramp_start}~{rear_symmetry_ramp_end}], exit_ramp=[{exit_penalty_ramp_start}~{exit_penalty_ramp_end}] (V28.1)")
+        print(f"  coop_min_leg_ramp=[{coop_min_leg_ramp_start}~{coop_min_leg_ramp_end}] target={coop_min_leg_factor_target:.2f} (V28.1)")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
         # INIT 시점 key weight 로깅
@@ -2582,6 +2966,16 @@ def reward_weight_curriculum(
     # V28: Layer C targets
     target_band = _curriculum_target_alpha(iteration, band_ramp_start, band_ramp_end)
     target_coop = _curriculum_target_alpha(iteration, coop_ramp_start, coop_ramp_end)
+    # V28.1: residency relay + symmetry + exit + min-leg targets
+    target_residency_early = _curriculum_alpha_relay_early(
+        iteration, residency_relay_up_start, residency_relay_up_end, residency_relay_down_end
+    )
+    target_residency_late = _curriculum_target_alpha(
+        iteration, residency_relay_up_end, residency_relay_down_end
+    )
+    target_rear_symmetry = _curriculum_target_alpha(iteration, rear_symmetry_ramp_start, rear_symmetry_ramp_end)
+    target_exit_penalty = _curriculum_target_alpha(iteration, exit_penalty_ramp_start, exit_penalty_ramp_end)
+    target_coop_min_leg = _curriculum_target_alpha(iteration, coop_min_leg_ramp_start, coop_min_leg_ramp_end)
 
     # 이미 target에 도달 → 스킵
     if (
@@ -2594,6 +2988,11 @@ def reward_weight_curriculum(
         and abs(env._crr_propulsion_floor_alpha - target_prop_floor) < 1e-6
         and abs(env._crr_band_alpha - target_band) < 1e-6
         and abs(env._crr_coop_alpha - target_coop) < 1e-6
+        and abs(env._crr_residency_early_alpha - target_residency_early) < 1e-6
+        and abs(env._crr_residency_late_alpha - target_residency_late) < 1e-6
+        and abs(env._crr_rear_symmetry_alpha - target_rear_symmetry) < 1e-6
+        and abs(env._crr_exit_penalty_alpha - target_exit_penalty) < 1e-6
+        and abs(env._crr_coop_min_leg_alpha - target_coop_min_leg) < 1e-6
     ):
         return None
 
@@ -2622,6 +3021,11 @@ def reward_weight_curriculum(
     max_step_prop_floor = update_interval / max(1, _prop_ramp_end_u - _prop_ramp_start_u)
     max_step_band = update_interval / max(1, band_ramp_end - band_ramp_start)
     max_step_coop = update_interval / max(1, coop_ramp_end - coop_ramp_start)
+    # V28.1: relay 는 triangle 이므로 증가/감소 모두 허용 — target으로 직접 설정
+    max_step_rear_sym = update_interval / max(1, rear_symmetry_ramp_end - rear_symmetry_ramp_start)
+    max_step_exit = update_interval / max(1, exit_penalty_ramp_end - exit_penalty_ramp_start)
+    max_step_coop_min_leg = update_interval / max(1, coop_min_leg_ramp_end - coop_min_leg_ramp_start)
+
     new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
     new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
     new_validity = min(target_validity, env._crr_validity_alpha + max_step_validity)
@@ -2633,6 +3037,12 @@ def reward_weight_curriculum(
     # V28: Layer C ramps (NOT paused by gait gate)
     new_band = min(target_band, env._crr_band_alpha + max_step_band)
     new_coop = min(target_coop, env._crr_coop_alpha + max_step_coop)
+    # V28.1: residency relay — triangle이므로 target으로 직접 수렴 (단순 할당)
+    new_residency_early = target_residency_early
+    new_residency_late = target_residency_late
+    new_rear_symmetry = min(target_rear_symmetry, env._crr_rear_symmetry_alpha + max_step_rear_sym)
+    new_exit_penalty = min(target_exit_penalty, env._crr_exit_penalty_alpha + max_step_exit)
+    new_coop_min_leg = min(target_coop_min_leg, env._crr_coop_min_leg_alpha + max_step_coop_min_leg)
 
     # 실제 변화 없으면 스킵
     if (
@@ -2645,6 +3055,11 @@ def reward_weight_curriculum(
         and abs(new_prop_floor - env._crr_propulsion_floor_alpha) < 1e-6
         and abs(new_band - env._crr_band_alpha) < 1e-6
         and abs(new_coop - env._crr_coop_alpha) < 1e-6
+        and abs(new_residency_early - env._crr_residency_early_alpha) < 1e-6
+        and abs(new_residency_late - env._crr_residency_late_alpha) < 1e-6
+        and abs(new_rear_symmetry - env._crr_rear_symmetry_alpha) < 1e-6
+        and abs(new_exit_penalty - env._crr_exit_penalty_alpha) < 1e-6
+        and abs(new_coop_min_leg - env._crr_coop_min_leg_alpha) < 1e-6
     ):
         return None
 
@@ -2660,6 +3075,11 @@ def reward_weight_curriculum(
     env._crr_propulsion_floor_alpha = new_prop_floor
     env._crr_band_alpha = new_band
     env._crr_coop_alpha = new_coop
+    env._crr_residency_early_alpha = new_residency_early
+    env._crr_residency_late_alpha = new_residency_late
+    env._crr_rear_symmetry_alpha = new_rear_symmetry
+    env._crr_exit_penalty_alpha = new_exit_penalty
+    env._crr_coop_min_leg_alpha = new_coop_min_leg
 
     # ── 가중치 적용 ──
     _curriculum_apply_weights(
@@ -2698,6 +3118,24 @@ def reward_weight_curriculum(
         coop_usage_final=coop_usage_final,
         coop_reward_initial=coop_reward_initial,
         coop_reward_final=coop_reward_final,
+    )
+    # V28.1: residency relay + symmetry + exit + min-leg factor 적용
+    _curriculum_apply_v281_weights(
+        env,
+        residency_early_alpha=new_residency_early,
+        residency_late_alpha=new_residency_late,
+        contact_residency_early_max=contact_residency_early_max,
+        contact_residency_late_max=contact_residency_late_max,
+        prop_residency_early_max=prop_residency_early_max,
+        prop_residency_late_max=prop_residency_late_max,
+        usage_residency_early_max=usage_residency_early_max,
+        usage_residency_late_max=usage_residency_late_max,
+        rear_symmetry_alpha=new_rear_symmetry,
+        rear_symmetry_max=rear_symmetry_max,
+        exit_penalty_alpha=new_exit_penalty,
+        exit_penalty_max=exit_penalty_max,
+        coop_min_leg_alpha=new_coop_min_leg,
+        coop_min_leg_factor_target=coop_min_leg_factor_target,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──

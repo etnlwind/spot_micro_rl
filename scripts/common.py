@@ -33,7 +33,7 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-_TRAIN_VERSION_FALLBACK = "V28"
+_TRAIN_VERSION_FALLBACK = "V28.1"
 
 # Training configuration for TRAIN_VERSION.
 # Update this dict alongside TRAIN_VERSION whenever reward design changes.
