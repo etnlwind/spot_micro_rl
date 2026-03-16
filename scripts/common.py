@@ -2131,6 +2131,14 @@ def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | N
         "limb_validity_reason": "limb KPI unavailable",
         "limb_usage_min": None,
         "rear_left_right_usage_diff": None,
+        # V28.2: residency EMA 지표
+        "contact_band_residency_fl": None,
+        "contact_band_residency_fr": None,
+        "contact_band_residency_rl": None,
+        "contact_band_residency_rr": None,
+        "prop_band_residency_rl": None,
+        "prop_band_residency_rr": None,
+        "rear_pair_residency_gap": None,
         "validity_stage": "observe_0_199",
         "collapse_detected": False,
         "collapse_persistent": False,
@@ -2192,6 +2200,13 @@ def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | N
     foot_jitter_score = jitter_quality_score(rewards)
     limb_metrics = compute_limb_validity_metrics(rewards)
     verdict, reasons, _greens, _yellows, _reds = evaluate_training_window(current_iter, survival_pct, bad_orient, rewards)
+    # V28.2: rear pair residency 경보
+    _rear_gap = rewards.get("rear_pair_residency_gap")
+    _rr_residency = rewards.get("residency_ema_contact_rr")
+    if _rear_gap is not None and _rear_gap > 0.15:
+        reasons.append(f"⚠️ rear residency gap={_rear_gap:.3f} > 0.15")
+    if _rr_residency is not None and _rr_residency < 0.30:
+        reasons.append(f"🔴 RR residency={_rr_residency:.3f} < 0.30 경보")
     hard_gate_pass = bool(
         survival_pct >= 70.0
         and fall_pct <= 10.0
@@ -2239,6 +2254,14 @@ def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | N
             "front_left_right_propulsion_diff": limb_metrics.get("front_left_right_propulsion_diff"),
             "front_rear_propulsion_balance": rewards.get("front_rear_propulsion_diff_raw"),
             "diagonal_coupling_raw": rewards.get("diagonal_coupling_raw"),
+            # V28.2: residency EMA 지표 (tensorboard Episode_Reward/residency_ema_* 로그에서 읽음)
+            "contact_band_residency_fl": rewards.get("residency_ema_contact_fl"),
+            "contact_band_residency_fr": rewards.get("residency_ema_contact_fr"),
+            "contact_band_residency_rl": rewards.get("residency_ema_contact_rl"),
+            "contact_band_residency_rr": rewards.get("residency_ema_contact_rr"),
+            "prop_band_residency_rl": rewards.get("residency_ema_prop_rl"),
+            "prop_band_residency_rr": rewards.get("residency_ema_prop_rr"),
+            "rear_pair_residency_gap": rewards.get("rear_pair_residency_gap"),
             "contact_ratio_fl": limb_metrics["contact_ratios"].get("fl"),
             "contact_ratio_fr": limb_metrics["contact_ratios"].get("fr"),
             "contact_ratio_rl": limb_metrics["contact_ratios"].get("rl"),

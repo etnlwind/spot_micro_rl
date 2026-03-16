@@ -327,6 +327,18 @@ def reset_v23_raw_metric_extras(env: ManagerBasedRLEnv, env_ids) -> dict[str, to
     for name, buffer in env._v23_raw_metric_episode_sums.items():
         extras[f"Episode_Reward/{name}"] = torch.mean(buffer[env_ids]) / env.max_episode_length_s
         buffer[env_ids] = 0.0
+    # V28.2: residency EMA 평균 로깅 (reset 전에 캡처해서 tensorboard에 기록)
+    if hasattr(env, "_v281_residency_ema"):
+        for key in ["contact_fl", "contact_fr", "contact_rl", "contact_rr", "prop_rl", "prop_rr"]:
+            if key in env._v281_residency_ema:
+                vals = env._v281_residency_ema[key][env_ids]
+                if vals.numel() > 0:
+                    extras[f"Episode_Reward/residency_ema_{key}"] = vals.mean()
+        if "contact_rl" in env._v281_residency_ema and "contact_rr" in env._v281_residency_ema:
+            rl_vals = env._v281_residency_ema["contact_rl"][env_ids]
+            rr_vals = env._v281_residency_ema["contact_rr"][env_ids]
+            if rl_vals.numel() > 0:
+                extras["Episode_Reward/rear_pair_residency_gap"] = torch.abs(rl_vals - rr_vals).mean()
     # V28.1: per-leg EMA residency 리셋 (episode 경계에서 초기화)
     if hasattr(env, "_v281_residency_ema"):
         for buf in env._v281_residency_ema.values():
@@ -907,6 +919,28 @@ def late_phase_band_exit_penalty(
         gap = torch.clamp(float(residency_floor) - ema, min=0.0)
         penalty += gap
     return penalty * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
+def rear_pair_contact_diff_penalty(
+    env: ManagerBasedRLEnv,
+    diff_threshold: float = 0.10,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28.2: RL vs RR current-step contact_ratio 차이를 즉각 패널티.
+
+    EMA 기반이 아닌 현재 step contact_ratio로 즉각 반응.
+    run 재기동 후 EMA 워밍업 사각지대를 보완.
+    threshold 미만의 소폭 변동은 무시.
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    rl_contact = metrics["contact_ratio_rl"]
+    rr_contact = metrics["contact_ratio_rr"]
+    diff = torch.abs(rl_contact - rr_contact)
+    gap = torch.clamp(diff - float(diff_threshold), min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
 
 
 def front_rear_support_balance_penalty(
@@ -2375,6 +2409,9 @@ def _curriculum_apply_v281_weights(
     # cooperation min-leg factor (ramp 0→target)
     coop_min_leg_alpha: float,
     coop_min_leg_factor_target: float,
+    # V28.2: rear pair contact diff penalty alpha + max
+    rear_contact_diff_alpha: float = 0.0,
+    rear_contact_diff_max: float = 0.0,
 ) -> None:
     """V28.1 신규 term들의 가중치를 relay/ramp alpha 기반으로 적용."""
     # 1. Residency rewards (relay: early + late 합산 → 단일 term weight)
@@ -2423,6 +2460,16 @@ def _curriculum_apply_v281_weights(
             cfg = env.reward_manager.get_term_cfg("four_limb_cooperation")
             cfg.params["min_leg_factor_low"] = current_factor
             env.reward_manager.set_term_cfg("four_limb_cooperation", cfg)
+        except Exception:
+            pass
+
+    # 5. V28.2: Rear pair contact diff penalty (current-step, simple ramp)
+    if abs(rear_contact_diff_max) > 1e-9:
+        rear_cd_w = rear_contact_diff_alpha * rear_contact_diff_max
+        try:
+            cfg = env.reward_manager.get_term_cfg("rear_pair_contact_diff")
+            cfg.weight = rear_cd_w
+            env.reward_manager.set_term_cfg("rear_pair_contact_diff", cfg)
         except Exception:
             pass
 
@@ -2802,6 +2849,10 @@ def reward_weight_curriculum(
     coop_min_leg_ramp_start: int = 800,
     coop_min_leg_ramp_end: int = 1000,
     coop_min_leg_factor_target: float = 1.0,  # 1.0이면 V28 동작 유지
+    # V28.2: rear pair contact diff penalty ramp (current-step)
+    rear_contact_diff_ramp_start: int = 300,
+    rear_contact_diff_ramp_end: int = 600,
+    rear_contact_diff_max: float = 0.0,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -2862,6 +2913,9 @@ def reward_weight_curriculum(
         env._crr_coop_min_leg_alpha = _curriculum_target_alpha(
             iteration, coop_min_leg_ramp_start, coop_min_leg_ramp_end
         )
+        env._crr_rear_contact_diff_alpha = _curriculum_target_alpha(
+            iteration, rear_contact_diff_ramp_start, rear_contact_diff_ramp_end
+        )
         env._crr_last_update = iteration
         env._crr_gate_paused = False
         _curriculum_apply_weights(
@@ -2918,6 +2972,8 @@ def reward_weight_curriculum(
             exit_penalty_max=exit_penalty_max,
             coop_min_leg_alpha=env._crr_coop_min_leg_alpha,
             coop_min_leg_factor_target=coop_min_leg_factor_target,
+            rear_contact_diff_alpha=env._crr_rear_contact_diff_alpha,
+            rear_contact_diff_max=rear_contact_diff_max,
         )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
@@ -2933,6 +2989,7 @@ def reward_weight_curriculum(
         print(f"  residency_relay=[{residency_relay_up_start}→{residency_relay_up_end}→{residency_relay_down_end}] (V28.1)")
         print(f"  rear_sym_ramp=[{rear_symmetry_ramp_start}~{rear_symmetry_ramp_end}], exit_ramp=[{exit_penalty_ramp_start}~{exit_penalty_ramp_end}] (V28.1)")
         print(f"  coop_min_leg_ramp=[{coop_min_leg_ramp_start}~{coop_min_leg_ramp_end}] target={coop_min_leg_factor_target:.2f} (V28.1)")
+        print(f"  rear_contact_diff_ramp=[{rear_contact_diff_ramp_start}~{rear_contact_diff_ramp_end}] max={rear_contact_diff_max:.1f} (V28.2)")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
         # INIT 시점 key weight 로깅
@@ -2976,6 +3033,7 @@ def reward_weight_curriculum(
     target_rear_symmetry = _curriculum_target_alpha(iteration, rear_symmetry_ramp_start, rear_symmetry_ramp_end)
     target_exit_penalty = _curriculum_target_alpha(iteration, exit_penalty_ramp_start, exit_penalty_ramp_end)
     target_coop_min_leg = _curriculum_target_alpha(iteration, coop_min_leg_ramp_start, coop_min_leg_ramp_end)
+    target_rear_contact_diff = _curriculum_target_alpha(iteration, rear_contact_diff_ramp_start, rear_contact_diff_ramp_end)
 
     # 이미 target에 도달 → 스킵
     if (
@@ -2993,6 +3051,7 @@ def reward_weight_curriculum(
         and abs(env._crr_rear_symmetry_alpha - target_rear_symmetry) < 1e-6
         and abs(env._crr_exit_penalty_alpha - target_exit_penalty) < 1e-6
         and abs(env._crr_coop_min_leg_alpha - target_coop_min_leg) < 1e-6
+        and abs(env._crr_rear_contact_diff_alpha - target_rear_contact_diff) < 1e-6
     ):
         return None
 
@@ -3025,6 +3084,7 @@ def reward_weight_curriculum(
     max_step_rear_sym = update_interval / max(1, rear_symmetry_ramp_end - rear_symmetry_ramp_start)
     max_step_exit = update_interval / max(1, exit_penalty_ramp_end - exit_penalty_ramp_start)
     max_step_coop_min_leg = update_interval / max(1, coop_min_leg_ramp_end - coop_min_leg_ramp_start)
+    max_step_rear_contact_diff = update_interval / max(1, rear_contact_diff_ramp_end - rear_contact_diff_ramp_start)
 
     new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
     new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
@@ -3043,6 +3103,7 @@ def reward_weight_curriculum(
     new_rear_symmetry = min(target_rear_symmetry, env._crr_rear_symmetry_alpha + max_step_rear_sym)
     new_exit_penalty = min(target_exit_penalty, env._crr_exit_penalty_alpha + max_step_exit)
     new_coop_min_leg = min(target_coop_min_leg, env._crr_coop_min_leg_alpha + max_step_coop_min_leg)
+    new_rear_contact_diff = min(target_rear_contact_diff, env._crr_rear_contact_diff_alpha + max_step_rear_contact_diff)
 
     # 실제 변화 없으면 스킵
     if (
@@ -3060,6 +3121,7 @@ def reward_weight_curriculum(
         and abs(new_rear_symmetry - env._crr_rear_symmetry_alpha) < 1e-6
         and abs(new_exit_penalty - env._crr_exit_penalty_alpha) < 1e-6
         and abs(new_coop_min_leg - env._crr_coop_min_leg_alpha) < 1e-6
+        and abs(new_rear_contact_diff - env._crr_rear_contact_diff_alpha) < 1e-6
     ):
         return None
 
@@ -3080,6 +3142,7 @@ def reward_weight_curriculum(
     env._crr_rear_symmetry_alpha = new_rear_symmetry
     env._crr_exit_penalty_alpha = new_exit_penalty
     env._crr_coop_min_leg_alpha = new_coop_min_leg
+    env._crr_rear_contact_diff_alpha = new_rear_contact_diff
 
     # ── 가중치 적용 ──
     _curriculum_apply_weights(
@@ -3136,6 +3199,8 @@ def reward_weight_curriculum(
         exit_penalty_max=exit_penalty_max,
         coop_min_leg_alpha=new_coop_min_leg,
         coop_min_leg_factor_target=coop_min_leg_factor_target,
+        rear_contact_diff_alpha=new_rear_contact_diff,
+        rear_contact_diff_max=rear_contact_diff_max,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──

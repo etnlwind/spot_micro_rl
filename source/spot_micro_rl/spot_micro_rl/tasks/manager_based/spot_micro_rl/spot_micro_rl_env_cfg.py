@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V28.1"
+TRAIN_VERSION = "V28.2"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -220,18 +220,22 @@ class SpotMicroRewardCurriculumCfg:
             "prop_residency_late_max": 3.0,
             "usage_residency_early_max": 1.0,
             "usage_residency_late_max": 2.0,
-            # V28.1: rear pair residency symmetry penalty (iter 600~1000)
-            "rear_symmetry_ramp_start": 600,
-            "rear_symmetry_ramp_end": 1000,
-            "rear_symmetry_max": -8.0,            # 최대 패널티 (음수)
-            # V28.1: late-phase band exit penalty (iter 800~1200)
-            "exit_penalty_ramp_start": 800,
-            "exit_penalty_ramp_end": 1200,
-            "exit_penalty_max": -6.0,             # 최대 패널티 (음수)
-            # V28.1: cooperation min-leg factor ramp (iter 800~1000, 1.0 → 0.2)
-            "coop_min_leg_ramp_start": 800,
-            "coop_min_leg_ramp_end": 1000,
-            "coop_min_leg_factor_target": 0.2,    # 최약 다리 band 밖 시 80% 감쇠
+            # V28.2: rear pair residency symmetry penalty 강화 (iter 400~700, 완충 포함)
+            "rear_symmetry_ramp_start": 400,      # V28.1: 600 → V28.2: 400
+            "rear_symmetry_ramp_end": 700,        # V28.1: 1000 → V28.2: 700
+            "rear_symmetry_max": -28.0,           # V28.1: -8.0 → V28.2: -28.0 (3.5배)
+            # V28.2: late-phase band exit penalty 강화 (iter 600~900)
+            "exit_penalty_ramp_start": 600,       # V28.1: 800 → V28.2: 600
+            "exit_penalty_ramp_end": 900,         # V28.1: 1200 → V28.2: 900
+            "exit_penalty_max": -15.0,            # V28.1: -6.0 → V28.2: -15.0 (2.5배)
+            # V28.2: cooperation min-leg factor 강화 (iter 600~800, 1.0 → 0.05)
+            "coop_min_leg_ramp_start": 600,       # V28.1: 800 → V28.2: 600
+            "coop_min_leg_ramp_end": 800,         # V28.1: 1000 → V28.2: 800
+            "coop_min_leg_factor_target": 0.05,   # V28.1: 0.2 → V28.2: 0.05 (95% 감쇠)
+            # V28.2: rear pair contact diff penalty (신규, current-step, iter 300~600)
+            "rear_contact_diff_ramp_start": 300,
+            "rear_contact_diff_ramp_end": 600,
+            "rear_contact_diff_max": -15.0,       # threshold 0.10, max -15.0
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -824,12 +828,23 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V28.1: Late-phase band exit penalty (iter 800~1200 ramp)
+        # V28.2: Late-phase band exit penalty 강화 (iter 600~900 ramp)
         self.rewards.late_phase_band_exit = RewTerm(
             func=custom_mdp.late_phase_band_exit_penalty,
-            weight=0.0,  # curriculum이 -6.0까지 ramp (iter 800~1200)
+            weight=0.0,  # curriculum이 -15.0까지 ramp (iter 600~900)
             params={
                 "residency_floor": 0.50,  # 600~800 분석 기반 최소 기대 residency
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        # V28.2: Rear pair contact diff penalty (신규, current-step, iter 300~600 ramp)
+        self.rewards.rear_pair_contact_diff = RewTerm(
+            func=custom_mdp.rear_pair_contact_diff_penalty,
+            weight=0.0,  # curriculum이 -15.0까지 ramp (iter 300~600)
+            params={
+                "diff_threshold": 0.10,  # 단일 threshold (V28.3에서 2단계 검토)
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
