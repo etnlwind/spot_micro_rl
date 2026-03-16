@@ -12,16 +12,15 @@ else:
     import common
 
 
-# V27.1b: restart-on-collapse 설정 — 4발 전체 감시, propulsion 포함
-# V27.1b: iter 100~200은 warning only (제약 초반 완화 구간), iter 200부터 restart 후보
-_COLLAPSE_CHECK_ITER_MIN = 200   # iter 200 이전은 warning only — 자동 재시작 없음
-_COLLAPSE_CHECK_ITER_MIN_WARN = 100  # iter 100부터 경고만 출력 (재시작은 안 함)
-_COLLAPSE_CHECK_ITER_MAX = 300   # iter 300 이후는 이미 늦음 — 재시작 대신 알림만
-_COLLAPSE_CONTACT_THRESHOLD = 0.05
-_COLLAPSE_PROPULSION_THRESHOLD = 0.05   # V27.1a 신규: propulsion도 같이 봄
-_COLLAPSE_SWING_THRESHOLD = 0.95
-_COLLAPSE_CONSECUTIVE_REQUIRED = 3  # 연속 N회 감지 시 실제 collapse로 판정
-_COLLAPSE_LEGS = ("fl", "fr", "rl", "rr")  # V27.1a: 4발 전체 감시
+_collapse_cfg = common.TRAINING_CONFIG.get("collapse_restart", {})
+_COLLAPSE_CHECK_ITER_MIN = _collapse_cfg.get("check_iter_min", 200)
+_COLLAPSE_CHECK_ITER_MIN_WARN = _collapse_cfg.get("check_iter_warn_min", 100)
+_COLLAPSE_CHECK_ITER_MAX = _collapse_cfg.get("check_iter_max", 300)
+_COLLAPSE_CONTACT_THRESHOLD = _collapse_cfg.get("contact_threshold", 0.05)
+_COLLAPSE_PROPULSION_THRESHOLD = _collapse_cfg.get("propulsion_threshold", 0.05)
+_COLLAPSE_SWING_THRESHOLD = _collapse_cfg.get("swing_threshold", 0.95)
+_COLLAPSE_CONSECUTIVE_REQUIRED = _collapse_cfg.get("consecutive_required", 3)
+_COLLAPSE_LEGS = ("fl", "fr", "rl", "rr")
 
 
 def _get_collapse_metrics(data: dict) -> tuple[str | None, float | None, float | None, float | None]:
@@ -216,8 +215,7 @@ def main() -> None:
                     collapse_consecutive_count = 0
                     collapse_restart_done = False
 
-                # V27.1b: restart-on-collapse (iter 200~300) — iter 100~200은 warning only
-                # V27.1b: iter 100~200 구간 warning only (제약 완화 초반 — 학습 억제 vs collapse 혼동 방지)
+                # restart-on-collapse: iter 범위/임계값은 TRAINING_CONFIG["collapse_restart"] 기준
                 if (not collapse_restart_done
                         and _COLLAPSE_CHECK_ITER_MIN_WARN <= current_iter < _COLLAPSE_CHECK_ITER_MIN):
                     collapsed_leg, leg_contact, leg_prop, leg_swing = _get_collapse_metrics(data)
