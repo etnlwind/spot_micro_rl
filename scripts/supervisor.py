@@ -384,6 +384,7 @@ def handle_command(command: str, checkpoint_iters: list[int] | None = None, targ
         common.send_text(f"<pre>{common.build_context_resolution_text()}</pre>", common.SUPERVISOR_LOG, parse_mode="HTML")
         return
     if command == "resume":
+        common.reload_train_version()  # .env에서 최신 TRAIN_VERSION 재로드
         result = common.launch_training(common.SUPERVISOR_LOG, fresh=False)
         run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
         checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A (fresh)"
