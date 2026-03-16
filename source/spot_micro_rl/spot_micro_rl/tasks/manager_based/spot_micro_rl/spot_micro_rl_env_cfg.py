@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V28.2"
+TRAIN_VERSION = "V28.3"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -236,6 +236,14 @@ class SpotMicroRewardCurriculumCfg:
             "rear_contact_diff_ramp_start": 300,
             "rear_contact_diff_ramp_end": 600,
             "rear_contact_diff_max": -15.0,       # threshold 0.10, max -15.0
+            # V28.3: front pair contact cap penalty (신규, iter 700~1000)
+            "front_contact_cap_ramp_start": 700,
+            "front_contact_cap_ramp_end": 1000,
+            "front_contact_cap_max": -10.0,       # contact_cap=0.65, FL/FR 고착 억제
+            # V28.3: front-rear balance penalty 활성화 (iter 700~1000)
+            "front_balance_ramp_start": 700,
+            "front_balance_ramp_end": 1000,
+            "front_balance_max": -8.0,            # max_diff=0.30, 보조 신호 (cap의 ~14%)
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -697,9 +705,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.front_rear_support_balance_penalty = RewTerm(
             func=custom_mdp.front_rear_support_balance_penalty,
-            weight=0.0,  # V27: 비활성
+            weight=0.0,  # V28.3: curriculum ramp으로 제어 (-8.0까지, iter 700~1000)
             params={
-                "max_diff": 0.50,
+                "max_diff": 0.30,   # V28.3: 0.50 → 0.30 (현재 diff=0.37 즉시 발동)
                 "contact_target": 0.5,
                 "propulsion_target": 0.30,
                 "leg_lift_target": 0.18,
@@ -834,6 +842,17 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             weight=0.0,  # curriculum이 -15.0까지 ramp (iter 600~900)
             params={
                 "residency_floor": 0.50,  # 600~800 분석 기반 최소 기대 residency
+                "min_vel": 0.05,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        # V28.3: Front pair contact cap penalty (신규, iter 700~1000 ramp)
+        self.rewards.front_pair_contact_cap = RewTerm(
+            func=custom_mdp.front_pair_contact_cap_penalty,
+            weight=0.0,  # curriculum이 -10.0까지 ramp (iter 700~1000)
+            params={
+                "contact_cap": 0.65,   # soft cap — 0.84+ 고착 억제용, 이상적 목표값 아님
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
             },

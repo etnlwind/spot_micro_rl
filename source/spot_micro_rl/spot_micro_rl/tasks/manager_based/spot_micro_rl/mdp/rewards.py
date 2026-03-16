@@ -943,6 +943,28 @@ def rear_pair_contact_diff_penalty(
     return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
 
 
+def front_pair_contact_cap_penalty(
+    env: ManagerBasedRLEnv,
+    contact_cap: float = 0.65,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V28.3: FL/FR contact ratio 상한 초과 시 패널티.
+
+    앞발 고정 local optimum 차단.
+    contact_cap=0.65는 이상적 목표값이 아니라 0.84+ 고착 억제용 soft cap.
+    band_high(0.45)와 다른 역할: band는 소극적 억제, cap은 적극적 패널티.
+    """
+    metrics = compute_v23_raw_metrics(env)
+    if not metrics:
+        return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+    fl_contact = metrics["contact_ratio_fl"]
+    fr_contact = metrics["contact_ratio_fr"]
+    gap = torch.clamp(fl_contact - float(contact_cap), min=0.0) \
+        + torch.clamp(fr_contact - float(contact_cap), min=0.0)
+    return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
 def front_rear_support_balance_penalty(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -2412,6 +2434,12 @@ def _curriculum_apply_v281_weights(
     # V28.2: rear pair contact diff penalty alpha + max
     rear_contact_diff_alpha: float = 0.0,
     rear_contact_diff_max: float = 0.0,
+    # V28.3: front pair contact cap penalty alpha + max
+    front_contact_cap_alpha: float = 0.0,
+    front_contact_cap_max: float = 0.0,
+    # V28.3: front-rear balance penalty alpha + max
+    front_balance_alpha: float = 0.0,
+    front_balance_max: float = 0.0,
 ) -> None:
     """V28.1 신규 term들의 가중치를 relay/ramp alpha 기반으로 적용."""
     # 1. Residency rewards (relay: early + late 합산 → 단일 term weight)
@@ -2470,6 +2498,26 @@ def _curriculum_apply_v281_weights(
             cfg = env.reward_manager.get_term_cfg("rear_pair_contact_diff")
             cfg.weight = rear_cd_w
             env.reward_manager.set_term_cfg("rear_pair_contact_diff", cfg)
+        except Exception:
+            pass
+
+    # 6. V28.3: Front pair contact cap penalty (simple ramp)
+    if abs(front_contact_cap_max) > 1e-9:
+        front_cap_w = front_contact_cap_alpha * front_contact_cap_max
+        try:
+            cfg = env.reward_manager.get_term_cfg("front_pair_contact_cap")
+            cfg.weight = front_cap_w
+            env.reward_manager.set_term_cfg("front_pair_contact_cap", cfg)
+        except Exception:
+            pass
+
+    # 7. V28.3: Front-rear balance penalty (simple ramp)
+    if abs(front_balance_max) > 1e-9:
+        front_bal_w = front_balance_alpha * front_balance_max
+        try:
+            cfg = env.reward_manager.get_term_cfg("front_rear_support_balance_penalty")
+            cfg.weight = front_bal_w
+            env.reward_manager.set_term_cfg("front_rear_support_balance_penalty", cfg)
         except Exception:
             pass
 
@@ -2853,6 +2901,14 @@ def reward_weight_curriculum(
     rear_contact_diff_ramp_start: int = 300,
     rear_contact_diff_ramp_end: int = 600,
     rear_contact_diff_max: float = 0.0,
+    # V28.3: front pair contact cap penalty ramp
+    front_contact_cap_ramp_start: int = 700,
+    front_contact_cap_ramp_end: int = 1000,
+    front_contact_cap_max: float = 0.0,
+    # V28.3: front-rear balance penalty ramp
+    front_balance_ramp_start: int = 700,
+    front_balance_ramp_end: int = 1000,
+    front_balance_max: float = 0.0,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -2916,6 +2972,12 @@ def reward_weight_curriculum(
         env._crr_rear_contact_diff_alpha = _curriculum_target_alpha(
             iteration, rear_contact_diff_ramp_start, rear_contact_diff_ramp_end
         )
+        env._crr_front_contact_cap_alpha = _curriculum_target_alpha(
+            iteration, front_contact_cap_ramp_start, front_contact_cap_ramp_end
+        )
+        env._crr_front_balance_alpha = _curriculum_target_alpha(
+            iteration, front_balance_ramp_start, front_balance_ramp_end
+        )
         env._crr_last_update = iteration
         env._crr_gate_paused = False
         _curriculum_apply_weights(
@@ -2974,6 +3036,10 @@ def reward_weight_curriculum(
             coop_min_leg_factor_target=coop_min_leg_factor_target,
             rear_contact_diff_alpha=env._crr_rear_contact_diff_alpha,
             rear_contact_diff_max=rear_contact_diff_max,
+            front_contact_cap_alpha=env._crr_front_contact_cap_alpha,
+            front_contact_cap_max=front_contact_cap_max,
+            front_balance_alpha=env._crr_front_balance_alpha,
+            front_balance_max=front_balance_max,
         )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
@@ -2990,6 +3056,8 @@ def reward_weight_curriculum(
         print(f"  rear_sym_ramp=[{rear_symmetry_ramp_start}~{rear_symmetry_ramp_end}], exit_ramp=[{exit_penalty_ramp_start}~{exit_penalty_ramp_end}] (V28.1)")
         print(f"  coop_min_leg_ramp=[{coop_min_leg_ramp_start}~{coop_min_leg_ramp_end}] target={coop_min_leg_factor_target:.2f} (V28.1)")
         print(f"  rear_contact_diff_ramp=[{rear_contact_diff_ramp_start}~{rear_contact_diff_ramp_end}] max={rear_contact_diff_max:.1f} (V28.2)")
+        print(f"  front_cap_ramp=[{front_contact_cap_ramp_start}~{front_contact_cap_ramp_end}] max={front_contact_cap_max:.1f} (V28.3)")
+        print(f"  front_bal_ramp=[{front_balance_ramp_start}~{front_balance_ramp_end}] max={front_balance_max:.1f} (V28.3)")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
         # INIT 시점 key weight 로깅
@@ -3034,6 +3102,8 @@ def reward_weight_curriculum(
     target_exit_penalty = _curriculum_target_alpha(iteration, exit_penalty_ramp_start, exit_penalty_ramp_end)
     target_coop_min_leg = _curriculum_target_alpha(iteration, coop_min_leg_ramp_start, coop_min_leg_ramp_end)
     target_rear_contact_diff = _curriculum_target_alpha(iteration, rear_contact_diff_ramp_start, rear_contact_diff_ramp_end)
+    target_front_contact_cap = _curriculum_target_alpha(iteration, front_contact_cap_ramp_start, front_contact_cap_ramp_end)
+    target_front_balance = _curriculum_target_alpha(iteration, front_balance_ramp_start, front_balance_ramp_end)
 
     # 이미 target에 도달 → 스킵
     if (
@@ -3052,6 +3122,8 @@ def reward_weight_curriculum(
         and abs(env._crr_exit_penalty_alpha - target_exit_penalty) < 1e-6
         and abs(env._crr_coop_min_leg_alpha - target_coop_min_leg) < 1e-6
         and abs(env._crr_rear_contact_diff_alpha - target_rear_contact_diff) < 1e-6
+        and abs(env._crr_front_contact_cap_alpha - target_front_contact_cap) < 1e-6
+        and abs(env._crr_front_balance_alpha - target_front_balance) < 1e-6
     ):
         return None
 
@@ -3085,6 +3157,8 @@ def reward_weight_curriculum(
     max_step_exit = update_interval / max(1, exit_penalty_ramp_end - exit_penalty_ramp_start)
     max_step_coop_min_leg = update_interval / max(1, coop_min_leg_ramp_end - coop_min_leg_ramp_start)
     max_step_rear_contact_diff = update_interval / max(1, rear_contact_diff_ramp_end - rear_contact_diff_ramp_start)
+    max_step_front_cap = update_interval / max(1, front_contact_cap_ramp_end - front_contact_cap_ramp_start)
+    max_step_front_bal = update_interval / max(1, front_balance_ramp_end - front_balance_ramp_start)
 
     new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
     new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
@@ -3104,6 +3178,8 @@ def reward_weight_curriculum(
     new_exit_penalty = min(target_exit_penalty, env._crr_exit_penalty_alpha + max_step_exit)
     new_coop_min_leg = min(target_coop_min_leg, env._crr_coop_min_leg_alpha + max_step_coop_min_leg)
     new_rear_contact_diff = min(target_rear_contact_diff, env._crr_rear_contact_diff_alpha + max_step_rear_contact_diff)
+    new_front_contact_cap = min(target_front_contact_cap, env._crr_front_contact_cap_alpha + max_step_front_cap)
+    new_front_balance = min(target_front_balance, env._crr_front_balance_alpha + max_step_front_bal)
 
     # 실제 변화 없으면 스킵
     if (
@@ -3122,6 +3198,8 @@ def reward_weight_curriculum(
         and abs(new_exit_penalty - env._crr_exit_penalty_alpha) < 1e-6
         and abs(new_coop_min_leg - env._crr_coop_min_leg_alpha) < 1e-6
         and abs(new_rear_contact_diff - env._crr_rear_contact_diff_alpha) < 1e-6
+        and abs(new_front_contact_cap - env._crr_front_contact_cap_alpha) < 1e-6
+        and abs(new_front_balance - env._crr_front_balance_alpha) < 1e-6
     ):
         return None
 
@@ -3143,6 +3221,8 @@ def reward_weight_curriculum(
     env._crr_exit_penalty_alpha = new_exit_penalty
     env._crr_coop_min_leg_alpha = new_coop_min_leg
     env._crr_rear_contact_diff_alpha = new_rear_contact_diff
+    env._crr_front_contact_cap_alpha = new_front_contact_cap
+    env._crr_front_balance_alpha = new_front_balance
 
     # ── 가중치 적용 ──
     _curriculum_apply_weights(
@@ -3201,6 +3281,10 @@ def reward_weight_curriculum(
         coop_min_leg_factor_target=coop_min_leg_factor_target,
         rear_contact_diff_alpha=new_rear_contact_diff,
         rear_contact_diff_max=rear_contact_diff_max,
+        front_contact_cap_alpha=new_front_contact_cap,
+        front_contact_cap_max=front_contact_cap_max,
+        front_balance_alpha=new_front_balance,
+        front_balance_max=front_balance_max,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──
