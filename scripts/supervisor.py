@@ -783,6 +783,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                     # /start: 버전이 동일한 경우에만 checkpoint 덮어쓰기 확인 요청.
                     # 버전이 다르면 (예: V27.1b → V28) 확인 없이 바로 fresh start.
                     if command == "start":
+                        common.reload_train_version()  # .env에서 최신 TRAIN_VERSION 재로드
                         _state = common.load_state()
                         state_version = _state.get("train_version") or ""
                         version_changed = state_version and state_version != common.TRAIN_VERSION
