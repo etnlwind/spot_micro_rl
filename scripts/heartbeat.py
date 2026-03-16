@@ -212,6 +212,11 @@ def main() -> None:
                     if resume_iter > 0:
                         skip_up_to = (resume_iter // args.video_iter_step) * args.video_iter_step
                         last_video_milestone = max(last_video_milestone, skip_up_to)
+                    elif last_video_milestone == 0:
+                        # fresh start(resume_iter=0)에서 heartbeat가 뒤늦게 시작된 경우:
+                        # 이미 지나간 milestone은 소급 생성하지 않고 현재 iter 이후부터만 추적
+                        skip_up_to = (current_iter // args.video_iter_step) * args.video_iter_step
+                        last_video_milestone = skip_up_to
                     collapse_consecutive_count = 0
                     collapse_restart_done = False
 
