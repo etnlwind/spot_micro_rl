@@ -810,7 +810,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             # 버전 업그레이드이거나 checkpoint 없음 → 확인 없이 바로 시작
                             if version_changed:
                                 common.send_text(
-                                    f"🆕 <b>VERSION UPGRADE — {state_version} → {common.TRAIN_VERSION}</b>\n"
+                                    f"🆕 <b>VERSION UPGRADE — {run_version} → {common.TRAIN_VERSION}</b>\n"
                                     f"<i>새 버전이므로 확인 없이 iter 0부터 시작합니다.</i>",
                                     common.SUPERVISOR_LOG,
                                     parse_mode="HTML",
