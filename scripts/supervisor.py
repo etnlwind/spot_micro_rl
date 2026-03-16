@@ -786,10 +786,13 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                     if command == "start":
                         common.reload_train_version()  # .env에서 최신 TRAIN_VERSION 재로드
                         _state = common.load_state()
-                        state_version = _state.get("train_version") or ""
-                        version_changed = state_version and state_version != common.TRAIN_VERSION
                         state_ckpt = _state.get("active_checkpoint") or ""
-                        existing_checkpoint = common.resolve_active_checkpoint(common.resolve_active_run_dir()) or state_ckpt
+                        _active_run_dir = common.resolve_active_run_dir()
+                        existing_checkpoint = common.resolve_active_checkpoint(_active_run_dir) or state_ckpt
+                        # 실제 run 디렉토리의 버전과 비교 (state.json train_version은 /start 시도 시
+                        # 미리 업데이트될 수 있어 신뢰 불가)
+                        run_version = (common._read_run_train_version(_active_run_dir) if _active_run_dir else "") or ""
+                        version_changed = run_version and run_version != common.TRAIN_VERSION
                         if existing_checkpoint and not version_changed:
                             # 동일 버전에서 기존 진행상황 있음 → 덮어쓰기 확인 필요
                             ckpt_name = os.path.basename(existing_checkpoint)
