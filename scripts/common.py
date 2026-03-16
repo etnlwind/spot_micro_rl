@@ -924,7 +924,8 @@ def _read_run_train_version(run_dir: str) -> str | None:
     txt_path = os.path.join(run_dir, "train_version.txt")
     if os.path.isfile(txt_path):
         try:
-            return open(txt_path, encoding="utf-8").read().strip()
+            with open(txt_path, encoding="utf-8") as f:
+                return f.read().strip()
         except Exception:
             pass
 

@@ -221,7 +221,10 @@ def _build_command_ack(command: str, checkpoint_iters: list[int] | None = None, 
     checkpoint_iters = checkpoint_iters or []
     first_iter = checkpoint_iters[0] if checkpoint_iters else None
     run_dir = common.resolve_run_dir_for_version(target_version) if target_version else common.resolve_active_run_dir()
-    checkpoint = _resolve_requested_checkpoint(run_dir, first_iter)
+    try:
+        checkpoint = _resolve_requested_checkpoint(run_dir, first_iter)
+    except RuntimeError:
+        checkpoint = None
     if checkpoint and run_dir:
         checkpoint_run = os.path.dirname(os.path.abspath(checkpoint))
         if os.path.abspath(run_dir) != checkpoint_run:
@@ -410,7 +413,11 @@ def handle_command(command: str, checkpoint_iters: list[int] | None = None, targ
         iter_list = checkpoint_iters if checkpoint_iters else [None]
         for iter_num in iter_list:
             run_dir = base_run_dir
-            checkpoint = _resolve_requested_checkpoint(run_dir, iter_num)
+            try:
+                checkpoint = _resolve_requested_checkpoint(run_dir, iter_num)
+            except RuntimeError as e:
+                _send_notice("NOT FOUND", str(e), icon="⚠️")
+                continue
             if checkpoint and run_dir:
                 checkpoint_run = os.path.dirname(os.path.abspath(checkpoint))
                 if os.path.abspath(run_dir) != checkpoint_run:
