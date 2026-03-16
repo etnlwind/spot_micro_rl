@@ -33,12 +33,11 @@ if SCRIPT_DIR not in sys.path:
 
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
-_TRAIN_VERSION_FALLBACK = "V28"
 
 # Training configuration for TRAIN_VERSION.
 # Update this dict alongside TRAIN_VERSION whenever reward design changes.
 TRAINING_CONFIG = {
-    "description": f"{_TRAIN_VERSION_FALLBACK}: 3층 reward 구조 (Layer A Survival / Layer B Validity Floor / Layer C Target-Band Incentive)",
+    "description": "TRAIN_VERSION 미설정 — .env 또는 환경변수를 확인하세요.",
     "ppo": {
         "gamma": 0.97,
         "clip_param": 0.1,
@@ -138,7 +137,13 @@ TASK = _env.get("TASK", "Isaac-Velocity-Flat-SpotMicro-v0")
 LOG_SUBDIR = _env.get("LOG_SUBDIR", "spot_micro_flat")
 ISAAC_LAB = _env.get("ISAAC_LAB_PATH", r"C:\IsaacLab\isaaclab.bat")
 CONDA_ENV_NAME = _env.get("CONDA_ENV_NAME") or os.environ.get("CONDA_DEFAULT_ENV", "env_isaaclab")
-TRAIN_VERSION = _env.get("TRAIN_VERSION") or os.environ.get("TRAIN_VERSION") or _TRAIN_VERSION_FALLBACK
+TRAIN_VERSION = _env.get("TRAIN_VERSION") or os.environ.get("TRAIN_VERSION") or ""
+if not TRAIN_VERSION:
+    raise EnvironmentError(
+        "[common.py] TRAIN_VERSION이 설정되지 않았습니다.\n"
+        f"  .env 파일({ENV_FILE})에 TRAIN_VERSION=V28.1 형식으로 추가하거나\n"
+        "  환경변수 TRAIN_VERSION을 설정한 후 다시 실행하세요."
+    )
 TRAIN_ENVS = int(_env.get("TRAIN_ENVS", "24576"))
 PLAY_ENVS = int(_env.get("PLAY_ENVS", "50"))
 MAX_ITERATIONS = int(_env.get("MAX_ITERATIONS", "15000"))
