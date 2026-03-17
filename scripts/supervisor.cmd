@@ -19,6 +19,9 @@ if defined LISTEN_MODE if not defined FOREGROUND_MODE (
     set "SPOT_MICRO_SUPERVISOR_BACKGROUND=1"
 )
 
+rem WSL2로 수정된 .py 파일의 stale pyc 문제 방지 — pyc 읽기/쓰기 비활성화
+set "PYTHONDONTWRITEBYTECODE=1"
+
 for %%A in (%*) do (
     if /I not "%%~A"=="--foreground" (
         set "FORWARDED_ARGS=!FORWARDED_ARGS! "
