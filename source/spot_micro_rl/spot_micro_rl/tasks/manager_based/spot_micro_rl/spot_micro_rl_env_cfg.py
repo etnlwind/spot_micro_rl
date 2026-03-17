@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V29"
+TRAIN_VERSION = "V29.2"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -211,9 +211,10 @@ class SpotMicroRewardCurriculumCfg:
             "coop_reward_initial": 0.0,
             "coop_reward_final": 8.0,        # band_hit_count >= 2/3 trigger
             # V28.1: residency relay ramp (early triangle 600→800→1000, late ramp 800→1000→유지)
-            "residency_relay_up_start": 600,
-            "residency_relay_up_end": 800,
-            "residency_relay_down_end": 1000,
+            # V29.2: 타이밍 지연 — gait 안정화 후 잔류 학습 (600/800/1000 → 800/1000/1200)
+            "residency_relay_up_start": 800,
+            "residency_relay_up_end": 1000,
+            "residency_relay_down_end": 1200,
             "contact_residency_early_max": 3.0,   # early 최대 weight (600→800 peak)
             "contact_residency_late_max": 4.0,    # late 최대 weight (1000+ 유지)
             "prop_residency_early_max": 2.0,
@@ -705,9 +706,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.front_rear_support_balance_penalty = RewTerm(
             func=custom_mdp.front_rear_support_balance_penalty,
-            weight=0.0,
+            weight=-4.0,  # V29.2: 0.0 → -4.0 활성화 (FL/FR 0.84 vs RL/RR 0.49 gap 0.36 직접 패널티)
             params={
-                "max_diff": 0.50,   # V29: 원복 (V28.3에서 0.30으로 강화했으나 front_cap 삭제로 불필요)
+                "max_diff": 0.25,   # V29.2: 0.50 → 0.25 (gap 0.36 즉각 패널티 — front dominance 억제)
                 "contact_target": 0.5,
                 "propulsion_target": 0.30,
                 "leg_lift_target": 0.18,
@@ -740,10 +741,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # band 수치는 V26 iter 200 실측 기반: contact [0.20~0.45], propulsion [0.15~0.38]
         self.rewards.per_leg_contact_target_band = RewTerm(
             func=custom_mdp.per_leg_contact_target_band_reward,
-            weight=0.5,  # V28: initial 0.5, curriculum이 5.0까지 ramp (iter 100~300)
+            weight=3.0,  # V29.2: 0.5 → 3.0 (RL/RR이 band 안에 있을 때 강한 양의 신호)
             params={
                 "band_low": 0.20,
-                "band_high": 0.45,
+                "band_high": 0.75,  # V29.2: 0.45 → 0.75 (RL/RR 0.48~0.53이 band 안에 포함)
                 "band_ramp_start": 0.05,
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -794,8 +795,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.per_leg_contact_band_residency_reward,
             weight=0.0,  # curriculum relay ramp으로 제어
             params={
-                "band_low": 0.25,   # V29: 0.20 → 0.25 (더 강한 최소 요건)
-                "band_high": 0.65,  # V29 신규: 상한 추가 (FL/FR 0.83+ 고착 구조 해제)
+                "band_low": 0.20,   # V29.2: 0.25 → 0.20 (RL/RR 에피소드 초반 band 진입 가능)
+                "band_high": 0.85,  # V29.2: 0.65 → 0.85 (FL/FR 0.84도 band 포함 → residency reward 활성화)
                 "ema_alpha": 0.05,
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -806,7 +807,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             weight=0.0,
             params={
                 "band_low": 0.15,
-                "band_high": 0.65,  # V29 신규: 상한 추가
+                "band_high": 0.70,  # V29.2: 0.65 → 0.70 (FL/FR prop 0.64~0.66 포함)
                 "ema_alpha": 0.05,
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),

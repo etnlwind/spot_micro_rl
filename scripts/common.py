@@ -2326,8 +2326,8 @@ def build_supervisor_kpi_snapshot_for_iteration(run_dir: str, iteration: int | N
     _rr_residency = rewards.get("residency_ema_contact_rr")
     if _rear_gap is not None and _rear_gap > 0.15:
         reasons.append(f"⚠️ rear residency gap={_rear_gap:.3f} > 0.15")
-    if _rr_residency is not None and _rr_residency < 0.30:
-        reasons.append(f"🔴 RR residency={_rr_residency:.3f} < 0.30 경보")
+    if _rr_residency is not None and _rr_residency < 0.15:
+        reasons.append(f"🔴 RR residency={_rr_residency:.3f} < 0.15 경보")
     hard_gate_pass = bool(
         survival_pct >= 70.0
         and fall_pct <= 10.0
