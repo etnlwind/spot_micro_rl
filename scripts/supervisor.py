@@ -763,7 +763,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
         while True:
             try:
                 common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
-                for update in common.fetch_updates(timeout_sec=0, log_path=common.SUPERVISOR_LOG):
+                for update in common.fetch_updates(timeout_sec=30, log_path=common.SUPERVISOR_LOG):
                     update_id = int(update.get("update_id", 0) or 0)
                     if not _remember_update_id(update_id):
                         common.write_log(f"Skipped duplicate Telegram update_id={update_id}", common.SUPERVISOR_LOG)
@@ -883,7 +883,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                 common.update_state(last_error=str(err))
                 common.write_log("Command loop error:\n" + common.capture_exception(), common.SUPERVISOR_LOG)
                 common.send_text(common.format_supervisor_error_text(err), common.SUPERVISOR_LOG)
-            time.sleep(max(1, args.poll))
+                time.sleep(max(5, args.poll))  # 에러 시에만 대기 후 재시도
     except KeyboardInterrupt as err:
         exit_reason = "keyboard-interrupt"
         exit_detail = str(err)
