@@ -402,10 +402,16 @@ def _now() -> str:
 
 def write_log(message: str, log_path: str) -> None:
     line = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {message}"
-    print(line)
-    _ensure_logs_dir()
-    with open(log_path, "a", encoding="utf-8") as file:
-        file.write(line + "\n")
+    try:
+        print(line)
+    except OSError:
+        pass  # DETACHED_PROCESS에서 stdout 무효화 시 무시
+    try:
+        _ensure_logs_dir()
+        with open(log_path, "a", encoding="utf-8") as file:
+            file.write(line + "\n")
+    except OSError:
+        pass  # 디스크 풀/권한 오류 시 silent fail (로그 실패로 프로세스 죽이지 않음)
 
 
 def _read_text_tail(path: str, max_chars: int = 1200) -> str:
@@ -716,6 +722,8 @@ def _telegram_get_updates(offset: int, timeout_sec: int = 0) -> list[dict] | Non
         if err.code == 409:
             return None
         raise
+    except (json.JSONDecodeError, ValueError):
+        return []  # Telegram 응답 파싱 실패 — 다음 poll에서 재시도
     if not response.get("ok"):
         return []
     return response.get("result") or []
@@ -2557,7 +2565,7 @@ def _build_status_snapshot(use_cache: bool = True) -> dict:
         mode = "idle"
     else:
         mode = cached_mode
-    return {
+    result = {
         "state": state,
         "run_dir": run_dir,
         "checkpoint": checkpoint,

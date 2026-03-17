@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V29.2"
+TRAIN_VERSION = "V30"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -200,7 +200,7 @@ class SpotMicroRewardCurriculumCfg:
             "band_ramp_start": 100,
             "band_ramp_end": 300,
             "band_contact_initial": 0.5,     # iter 100부터 약하게 시작
-            "band_contact_final": 5.0,       # V26 iter200 실측 기반 band [0.20~0.45]
+            "band_contact_final": 5.0,       # V26 iter200 실측 기반 (V29.2: band [0.20~0.75])
             "band_propulsion_initial": 0.5,
             "band_propulsion_final": 4.0,    # band [0.15~0.38]
             # V28 Layer C: usage band + cooperation ramp (iter 200~450, 후반 강화형)
@@ -832,7 +832,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V28.1: Rear pair residency symmetry penalty (iter 600~1000 ramp)
         self.rewards.rear_pair_residency_symmetry = RewTerm(
             func=custom_mdp.rear_pair_residency_symmetry_penalty,
-            weight=0.0,  # curriculum이 -8.0까지 ramp (iter 600~1000)
+            weight=0.0,  # curriculum이 -28.0까지 ramp (V28.2: -8→-28, iter 400~700)
             params={
                 "min_diff": 0.05,
                 "min_vel": 0.05,

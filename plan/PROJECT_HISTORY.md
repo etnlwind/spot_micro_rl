@@ -1,54 +1,46 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-03-15
-**Project Status**: V26.1 훈련 진행 중 — Symmetric Existence Floor + Load Sharing
-**Current Active Run Snapshot**: V26.1 fresh run (2026-03-15 시작) / TRAIN_VERSION=”V26”
+**Last Updated**: 2026-03-18
+**Project Status**: V29.2 훈련 진행 중 — Residency band 교정 + Front dominance penalty
+**Current Active Run**: `2026-03-17_23-06-20` / TRAIN_VERSION=”V29.2”
+
+> 최신 핸드오프: `plan/HANDOFF.md` 참조
 
 ---
 
-## 📌 Current Status Snapshot (V26.1 active)
-
-### 2026-03-15 V26.1 훈련 시작
+## 📌 Current Status Snapshot (V29.2 active)
 
 | 항목 | 값 |
 |------|-----|
-| TRAIN_VERSION | `”V26”` |
-| 상태 | 훈련 진행 중 (fresh run) |
-| 진입점 | `logs\_launch_supervisor.cmd` |
-| supervisor PID | 18064 |
-| 핵심 변경 | 8개 symmetric reward term (Existence Floor + Load Sharing) |
-| 이전 버전 | V25 실패 (iter 400, RR collapse) |
+| TRAIN_VERSION | `”V29.2”` |
+| 상태 | 훈련 진행 중 (iter 200+) |
+| 진입점 | 프로젝트 루트 `supervisor.cmd` |
+| 핵심 변경 | residency band 확장, front_rear_balance penalty 활성화, enforce 지연 |
+| 이전 버전 | V29 실패 (band_high < 실측 → 전체 gradient 소멸) |
 
-최근 핵심 커밋:
-
-- `346f674` Fix: add per-leg metrics to kpi_snapshot for video report
-- `1c242fe` Add V26.1 reward implementation, docs, and RL/RR limb metrics
-- `dc577ba` Fix /start fresh-start UX: confirmation flow
-
-중요:
-
-- 아래 역사 섹션은 프로젝트 전체 의사결정 배경을 보존하기 위한 연대기다.
-- 가장 최신 active handoff는 `plan/MEMORY.md`, `plan/CURRENT_STATE_2026-03-15.md`를 먼저 본다.
-
-### 학습 버전 요약 (V23~V26)
+### 학습 버전 요약 (V23~V29.2)
 
 | 버전 | 판정 | 핵심 교훈 |
 |------|------|-----------|
 | V23 | 실패 | rear-left 3족 보행 exploit, contact sensor 오매핑 |
 | V24 | 실패 | collapse 고착 후 패널티가 회피를 유도 |
 | V25 | 실패 | 비대칭 패널티 → collapse 위치만 RL→RR 이동 |
-| V26.1 | 훈련 중 | symmetric per-leg existence floor + load sharing |
-
-- **현재 코드 기준 학습 버전 태그**: `TRAIN_VERSION = “V26”`
-- **설계 철학 문서**: `plan/V26_ANALYSIS.md`
-- **구현 계획 문서**: `plan/V26.1_PLAN.md` (active)
+| V26~V26.1 | 실패 | symmetric floor은 작동하나 floor만으로 유지 불가 |
+| V27 | 실패 | per-limb validity — 강하면 전체 억제, 약하면 TAP |
+| V28 | ⚠️ | **target-band 패러다임 전환** — iter 600~800 4-limb 성공, 이후 RL 붕괴 |
+| V28.1 | ⚠️ | residency 유지 — iter 1000 validity pass 최초 달성, RR 붕괴 |
+| V28.2 | ✅ | rear 대칭 달성 (rear_usage_diff=0.012) → **front 고착 발견** |
+| V28.3 | 실패 | front cap 패널티 — FL/FR 0.83+ 변화 없음 |
+| V29 | 실패 | residency band_high=0.65 < FL/FR 0.84 → gradient 소멸 |
+| V29.2 | 🟡 훈련 중 | band 파라미터 교정 + front_rear_balance(-4.0) |
+| **V30** | 🔧 **준비 중** | ★ 초기 자세 대칭 교정 — FL/FR 과접지 물리적 근본 원인 제거 |
 
 핵심 문서:
 
-- `plan/V26_ANALYSIS.md`: V26 설계 철학 (부하 분산 + 파손 위험 최소화)
-- `plan/V26.1_PLAN.md`: V26.1 구현 계획 + 판정 기준
-- `plan/V25_ANALYSIS.md`: V25 실패 분석 (RR collapse)
-- `plan/V24_ANALYSIS.md`: V24 실패 분석
+- `plan/HANDOFF.md`: 현재 상태 + V30 초기 자세 교정
+- `plan/V29.2_PLAN.md`: V29.2 설계 및 성공 기준
+- `plan/V29_ANALYSIS.md`: V29 실패 분석
+- `plan/V28_PLAN.md`: target-band 패러다임 전환 (이정표)
 
 ### V22 핵심 변경
 
@@ -95,12 +87,53 @@
 
 접촉 이벤트 기반 `stride_length`, `gait_cycle_period`는 참고 지표로 유지한다.
 
-### 현재 운영 기준
+### V27~V29.2 히스토리 (2026-03-16 ~ 2026-03-18)
 
-- 실운영 검증 런: `2026-03-11_02-39-01`
-- 최종 체크포인트: `model_15000.pt`
-- 최신 검증 ZIP: `clip_1005_iter15000_20260311_132732.zip`
-- V23 준비 문서: `plan/V23_ANALYSIS.md`
+#### V27: Per-limb Validity 강화 (2026-03-16)
+- Contact residency EMA + propulsion/usage band 구조 도입
+- **실패**: 강하면 전체 억제 (contact 0.005~0.020), 약하면 TAP 최적화 (contact ≈0.10 정체)
+- 패널티만으로는 3-leg local optimum 탈출 불가 확인
+
+#### V28: Target-Band 패러다임 전환 (2026-03-16) ★ 이정표
+- **"패널티로 강제" → "인센티브로 유도"** 구조 전환
+- Layer A(Survival) + Layer B(Floor) + **Layer C(Target-Band Incentive)**
+- contact band [0.20~0.45], propulsion band [0.15~0.38] (V26 iter 200 실측 기반)
+- **iter 600~800**: 최초 4-limb cooperation 달성 (reward 475)
+- **iter 1000+**: RL 붕괴 — band 진입은 성공했으나 유지 메커니즘 없음
+- 교훈: **band entry ≠ band occupancy** → residency 개념 필요
+
+#### V28.1: Residency 유지 (2026-03-16)
+- 6개 새 reward term: per-leg residency, rear symmetry, late-phase exit penalty, cooperation min-leg
+- **iter 1000**: validity pass 최초 달성 (RL contact 0.448)
+- **iter 1200+**: RR 붕괴 (RL↔RR 역전) — EMA reset 맹점 + 대칭 패널티 부족
+
+#### V28.2: Rear 대칭 달성 (2026-03-16) ✅
+- rear_pair_residency_symmetry: -8.0 → **-28.0** (3.5배), ramp 400~700
+- rear_pair_contact_diff_penalty (신규): current-step 기반, threshold 0.10, max -15.0
+- **iter 1703**: rear_usage_diff=**0.012** (거의 완벽 대칭)
+- **새로운 문제 발견**: FL/FR contact 0.84/0.89 — "front-heavy beetle walk"
+
+#### V28.3: Front Contact Cap (2026-03-17)
+- front_pair_contact_cap_penalty: threshold 0.65, max -10.0
+- front_rear_support_balance_penalty: weight -8.0, max_diff 0.30
+- **실패**: FL/FR 0.840→0.824 (0.016 변화) — 고착된 정책에 외부 패널티 무효
+- 교훈: **이미 형성된 정책을 패널티로 깨기 어려움 → reward 구조 자체 변경 필요**
+
+#### V29: Residency Band 상한 추가 (2026-03-17)
+- contact_residency band_high=0.65 (FL/FR 0.83을 band 밖으로 밀어 penalty gradient 생성 의도)
+- stride_length_reward, swing_quality_gated_velocity 신규 추가
+- **실패**: FL/FR(0.84) > band_high(0.65) → residency reward=0, gradient=0
+  RL/RR(0.49) > target_band_high(0.45) → 이것도 0
+  **전체 4발이 모든 band 밖 → 학습 신호 완전 소멸**
+- 교훈: band threshold는 반드시 **실측 데이터 기반**이어야 함
+
+#### V29.2: Band 파라미터 교정 (2026-03-17~) 🟡 현재
+- contact_residency band: [0.25, 0.65] → **[0.20, 0.85]**
+- per_leg_contact_target_band: band_high 0.45 → **0.75**, weight 0.5 → **3.0**
+- front_rear_support_balance_penalty: weight 0.0 → **-4.0**, max_diff 0.25
+- residency enforce: iter 600→**800** 시작
+- **iter 201**: per_leg_contact_target_band TOP5 진입, F-R balance 0.1072
+- 상세: `plan/V29.2_PLAN.md`, `plan/V29_ANALYSIS.md`
 
 ---
 

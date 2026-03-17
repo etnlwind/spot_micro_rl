@@ -43,24 +43,24 @@ SPOT_MICRO_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.20),  # 서있는 자세 높이
+        pos=(0.0, 0.0, 0.192),  # V30: 발끝 대칭 자세 높이 (지면 +2mm)
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
-            # leg=-0.5: upper leg 약간 기울임, foot=+1.2: 무릎 구부림
-            # 높이 약 0.19m의 자연스러운 서있는 자세
-            # V23: 어깨 과도 벌림을 줄인 phase-1 posture target
+            # V30: 앞/뒤 발끝 대칭 자세 — F-R 하중 50:50
+            # leg=-0.71, foot=1.31 → 앞발/뒷발 CoM 기준 각 93mm 대칭
+            # 이전(leg=-0.5, foot=1.2): 앞 121mm / 뒤 65mm → 앞다리 과접지 원인
             "front_left_shoulder": -0.04,
-            "front_left_leg": -0.5,
-            "front_left_foot": 1.2,
+            "front_left_leg": -0.71,
+            "front_left_foot": 1.31,
             "front_right_shoulder": -0.04,
-            "front_right_leg": -0.5,
-            "front_right_foot": 1.2,
+            "front_right_leg": -0.71,
+            "front_right_foot": 1.31,
             "rear_left_shoulder": -0.04,
-            "rear_left_leg": -0.5,
-            "rear_left_foot": 1.2,
+            "rear_left_leg": -0.71,
+            "rear_left_foot": 1.31,
             "rear_right_shoulder": -0.04,
-            "rear_right_leg": -0.5,
-            "rear_right_foot": 1.2,
+            "rear_right_leg": -0.71,
+            "rear_right_foot": 1.31,
         },
         joint_vel={".*": 0.0},
     ),

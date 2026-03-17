@@ -264,7 +264,7 @@ def _build_command_ack(command: str, checkpoint_iters: list[int] | None = None, 
         checkpoint_hint = ""
     if command == "start":
         return (
-            f"🚀 <b>TRAINING START (FRESH) — {run_name}</b>\n"
+            f"🚀 <b>TRAINING START — {run_name}</b>\n"
             "<i>iter 0부터 새로 시작합니다. checkpoint가 있으면 확인을 요청합니다.</i>"
         )
     if command == "resume":
@@ -626,7 +626,7 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
             _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {existing_ckpt}\nversion: {common.TRAIN_VERSION}\nsource: cli", icon="🚀")
             _print_local(f"training already running\nrun: {run_name}\ncheckpoint: {existing_ckpt}")
         else:
-            _send_notice("TRAINING START (FRESH)", f"run: {run_name}\ncheckpoint: iter 0 (fresh)\nversion: {common.TRAIN_VERSION}\nsource: cli", icon="🚀")
+            _send_notice("TRAINING START", f"run: {run_name}\ncheckpoint: iter 0 (fresh)\nversion: {common.TRAIN_VERSION}\nsource: cli", icon="🚀")
             _print_local(f"training started fresh\nrun: {run_name}")
         return 0
     if action == "resume":
@@ -830,13 +830,15 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             pending_confirm = None
                             common.write_log(f"[Confirm] action={action} confirmed by user", common.SUPERVISOR_LOG)
                             if action == "fresh_start":
+                                # 3초 룰: 즉시 ACK 전송 후 launch
+                                _send_notice(f"{common.TRAIN_VERSION} 새 훈련 확인", f"새로 구성된 reward/env 설정으로 iter 0부터 시작합니다.", icon="✅")
                                 result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
                                 run_name = _safe_basename(result["run_dir"])
                                 if result["mode"] == "already-running":
                                     _send_notice("TRAINING ACTIVE", f"run: {run_name}", icon="🚀")
                                 else:
                                     common.send_text(
-                                        f"🚀 <b>TRAINING START (FRESH)</b>\n"
+                                        f"🚀 <b>TRAINING START</b>\n"
                                         f"<i>run: {run_name}</i>\n"
                                         f"<i>version: {common.TRAIN_VERSION}</i>\n"
                                         f"<i>iter 0부터 시작합니다.</i>",
@@ -880,9 +882,8 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             ckpt_iter = common.get_checkpoint_iter(existing_checkpoint)
                             pending_confirm = {"action": "fresh_start", "ckpt_iter": ckpt_iter, "ckpt_name": ckpt_name, "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC}
                             common.send_text(
-                                f"⚠️ <b>확인 필요 — FRESH START ({common.TRAIN_VERSION})</b>\n"
-                                f"<i>현재 진행: iter {ckpt_iter:,} ({ckpt_name})</i>\n\n"
-                                f"이 진행상황을 초기화하고 <b>iter 0부터 새로 시작</b>합니다.\n"
+                                f"⚠️ <b>확인 필요 — {common.TRAIN_VERSION} 새 훈련</b>\n"
+                                f"새로 구성된 reward/env 설정으로 <b>iter 0부터 새 훈련을 시작</b>합니다.\n"
                                 f"<i>계속하려면 Y를 입력하세요. (60초 내, 다른 입력은 취소)</i>",
                                 common.SUPERVISOR_LOG,
                                 parse_mode="HTML",
@@ -899,7 +900,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
                             run_name = _safe_basename(result["run_dir"])
                             common.send_text(
-                                f"🚀 <b>TRAINING START (FRESH)</b>\n"
+                                f"🚀 <b>TRAINING START</b>\n"
                                 f"<i>run: {run_name}</i>\n"
                                 f"<i>version: {common.TRAIN_VERSION}</i>\n"
                                 f"<i>iter 0부터 시작합니다.</i>",
@@ -921,20 +922,29 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                     )
                     break
             except Exception as err:
-                common.update_state(last_error=str(err))
-                common.write_log("Command loop error:\n" + common.capture_exception(), common.SUPERVISOR_LOG)
-                common.send_text(common.format_supervisor_error_text(err), common.SUPERVISOR_LOG)
+                try:
+                    common.update_state(last_error=str(err))
+                    common.write_log("Command loop error:\n" + common.capture_exception(), common.SUPERVISOR_LOG)
+                    common.send_text(common.format_supervisor_error_text(err), common.SUPERVISOR_LOG)
+                except Exception:
+                    pass  # 에러 핸들러 내부 실패로 프로세스 죽이지 않음
                 time.sleep(max(5, args.poll))  # 에러 시에만 대기 후 재시도
     except KeyboardInterrupt as err:
         exit_reason = "keyboard-interrupt"
         exit_detail = str(err)
-        common.write_log("Supervisor interrupted by keyboard signal.", common.SUPERVISOR_LOG)
+        try:
+            common.write_log("Supervisor interrupted by keyboard signal.", common.SUPERVISOR_LOG)
+        except Exception:
+            pass
         raise
     except BaseException as err:
         exit_reason = f"fatal:{type(err).__name__}"
         exit_detail = str(err)
-        common.update_state(last_error=str(err))
-        common.write_log("Supervisor fatal error:\n" + common.capture_exception(), common.SUPERVISOR_LOG)
+        try:
+            common.update_state(last_error=str(err))
+            common.write_log("Supervisor fatal error:\n" + common.capture_exception(), common.SUPERVISOR_LOG)
+        except Exception:
+            pass  # 로깅 실패해도 finally 블록은 실행되어야 함
         raise
     finally:
         common.write_log(

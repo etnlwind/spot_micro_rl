@@ -170,6 +170,7 @@ def main() -> None:
     last_run_name = ""
     collapse_consecutive_count = 0
     collapse_restart_done = False  # 현재 run에서 이미 restart했으면 중복 방지
+    _training_stopped_by_heartbeat = False  # heartbeat가 stop_training 호출했는지 추적
     try:
         while True:
             try:
@@ -251,14 +252,16 @@ def main() -> None:
                 if missed:
                     # 훈련 정지는 한 번만
                     common.stop_training(common.HEARTBEAT_LOG)
+                    _training_stopped_by_heartbeat = True
                     total_missed = len(missed)
                     for idx, milestone in enumerate(missed, start=1):
                         _run_video_report(run_dir, milestone, current_iter, total_missed, idx, args.video_iter_step)
-                    last_video_milestone = missed[-1]
+                        last_video_milestone = milestone  # 각 milestone 완료 후 즉시 업데이트
                     # 다음 예정 milestone 안내
                     next_milestone = last_video_milestone + args.video_iter_step
                     catchup_summary = f"iter {', '.join(f'{m:,}' for m in missed)}" if total_missed > 1 else f"iter {missed[0]:,}"
                     common.launch_training(common.HEARTBEAT_LOG)
+                    _training_stopped_by_heartbeat = False
                     common.write_log(f"[VideoReport] all done ({catchup_summary}), training restarted", common.HEARTBEAT_LOG)
                     common.send_text(
                         f"🚀 <b>TRAINING RESUME — {'누락 보완 완료' if current_iter > missed[0] else '영상 리포트 완료'}: {catchup_summary}</b>\n"
@@ -283,9 +286,19 @@ def main() -> None:
                 common.send_text(report_text, common.HEARTBEAT_LOG, parse_mode="HTML")
                 last_sent_milestone = milestone
             except Exception as err:
-                common.write_log(f"Heartbeat loop error: {err}\n{common.capture_exception()}", common.HEARTBEAT_LOG)
+                try:
+                    common.write_log(f"Heartbeat loop error: {err}\n{common.capture_exception()}", common.HEARTBEAT_LOG)
+                except Exception:
+                    pass  # write_log 실패로 프로세스 죽이지 않음
             time.sleep(args.poll)
     finally:
+        # heartbeat가 stop_training 호출 후 죽었으면 training 복구
+        if _training_stopped_by_heartbeat:
+            try:
+                common.write_log("Heartbeat exiting while training stopped — attempting training recovery", common.HEARTBEAT_LOG)
+                common.launch_training(common.HEARTBEAT_LOG)
+            except Exception:
+                pass  # 복구 실패해도 PID lock은 반드시 해제
         common.release_pid_lock(common.HEARTBEAT_PID_FILE)
 
 

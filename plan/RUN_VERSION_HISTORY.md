@@ -1,6 +1,6 @@
 # Run Version History
 
-Generated: 2026-03-15
+Generated: 2026-03-15, Updated: 2026-03-18
 
 ## 데이터 위치
 
@@ -48,10 +48,14 @@ regardless of the actual reward design.
 | V28.3 | `c50925f` | 2026-03-17 | front contact cap penalty 추가; TRAIN_VERSION V28.2→V28.3 |
 | V29 | `0d57630` | 2026-03-17 | residency band_high=0.65 + stride_length + swing_gate_velocity; TRAIN_VERSION V28.3→V29 |
 | V29 (reliability) | `f11242e` | 2026-03-17 | TRAIN_VERSION 단일 소스(env_cfg.py 권위), supervisor 중복 프로세스 자동 종료, 알림 버전 표시 |
+| V29.2 | `483c627` | 2026-03-17 | residency band 교정 [0.20,0.85], target_band 0.75/w=3.0, front_rear_balance -4.0, enforce 800→ |
+| V29.2 (docs) | `ff62aff` | 2026-03-17 | V29 analysis + V29.2 plan 문서 추가 |
 
-**Note**: env_cfg.py has `TRAIN_VERSION = "V26"` (reward design V26.1 base), common.py has `TRAIN_VERSION = "V26.1"`.
+**Note (V26 era)**: env_cfg.py had `TRAIN_VERSION = "V26"` (reward design V26.1 base), common.py had `TRAIN_VERSION = "V26.1"`.
 V26 (01-46-44) and V26.1 (07-08-50) are **separate experiments**: V26 was an exploratory run with uncommitted code;
-V26.1 was designed after analyzing V26 results and committed. The canonical label for external reporting is **V26.1**.
+V26.1 was designed after analyzing V26 results and committed.
+
+**Note (V29+ era)**: TRAIN_VERSION is now single-sourced from `env_cfg.py`. `common.py` imports it from there.
 
 ---
 
@@ -93,6 +97,8 @@ V26.1 was designed after analyzing V26 results and committed. The canonical labe
 | 2026-03-16_xx-xx-xx | **V28** | ~? | V28 | V28 run (재기동 후 RR collapse) → 실패 |
 | 2026-03-16_xx-xx-xx | **V28.2** | ~1703 | V28.2 | rear pair 대칭 달성 (rear_usage_diff=0.012 at iter 1703) → 성공 |
 | 2026-03-17_xx-xx-xx | **V28.3** | ~2200 | V28.3 | front cap 추가; FL/FR contact 0.83~0.88 고착 → 실패 |
+| 2026-03-17_18-01-05 | **V29** | ~1000 | V29 | residency band_high=0.65; 전체 4발 band 밖 → gradient 소멸 → 실패 |
+| 2026-03-17_23-06-20 | **V29.2** | 200+ | V29.2 | band 교정 [0.20,0.85]; 🟡 훈련 진행 중 |
 
 ---
 
