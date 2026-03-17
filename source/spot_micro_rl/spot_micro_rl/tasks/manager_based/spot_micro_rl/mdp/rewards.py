@@ -2363,7 +2363,10 @@ def swing_quality_gated_velocity(
     # min_swing_ratio 이하이면 0 (hard gate)
     swing_gate = torch.clamp((min_swing - min_swing_ratio) / (0.5 - min_swing_ratio + 1e-6), 0.0, 1.0)
 
-    return swing_gate * vel_x_clamped
+    # 전진 속도 최소 게이팅 (정지/후진 시 보상 차단)
+    vel_gate = _heading_velocity_gate(env, asset_cfg, min_vel)
+
+    return swing_gate * vel_x_clamped * vel_gate
 
 
 # ============================================================
