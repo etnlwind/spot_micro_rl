@@ -973,8 +973,8 @@ def _resolve_active_checkpoint_from_state(run_dir: str | None = None) -> str | N
     return checkpoint
 
 
-def resolve_live_training_context() -> tuple[str | None, str | None]:
-    processes = list_training_processes()
+def resolve_live_training_context(training_procs: list[dict] | None = None) -> tuple[str | None, str | None]:
+    processes = training_procs if training_procs is not None else list_training_processes()
     if not processes:
         return None, None
     latest_run = get_latest_run_dir()
@@ -991,8 +991,8 @@ def resolve_live_training_context() -> tuple[str | None, str | None]:
     return latest_run, get_latest_checkpoint(latest_run)
 
 
-def resolve_active_run_dir() -> str | None:
-    live_run_dir, _ = resolve_live_training_context()
+def resolve_active_run_dir(training_procs: list[dict] | None = None) -> str | None:
+    live_run_dir, _ = resolve_live_training_context(training_procs=training_procs)
     if live_run_dir:
         return live_run_dir
     state_run_dir = _resolve_active_run_from_state()
@@ -1105,12 +1105,12 @@ def resolve_run_dir_for_version(version: str) -> str | None:
     return os.path.join(LOG_BASE, sorted(candidates)[-1])
 
 
-def resolve_active_checkpoint(run_dir: str | None = None) -> str | None:
-    live_run_dir, live_checkpoint = resolve_live_training_context()
+def resolve_active_checkpoint(run_dir: str | None = None, training_procs: list[dict] | None = None) -> str | None:
+    live_run_dir, live_checkpoint = resolve_live_training_context(training_procs=training_procs)
     if live_checkpoint:
         if not run_dir or run_dir == live_run_dir:
             return live_checkpoint
-    run_dir = run_dir or live_run_dir or resolve_active_run_dir()
+    run_dir = run_dir or live_run_dir or resolve_active_run_dir(training_procs=training_procs)
     latest_checkpoint = get_latest_checkpoint(run_dir)
     state_checkpoint = _resolve_active_checkpoint_from_state(run_dir)
     if state_checkpoint:
@@ -1320,9 +1320,22 @@ def _run_hidden_cmd(command: str, **kwargs):
     return subprocess.run(command, shell=True, **kwargs)
 
 
+_TRAINING_LOG_MAX_BYTES = 20 * 1024 * 1024  # 20 MB 초과 시 rotate
+
+
+def _rotate_training_log() -> None:
+    try:
+        if os.path.isfile(TRAINING_LOG) and os.path.getsize(TRAINING_LOG) > _TRAINING_LOG_MAX_BYTES:
+            bak = TRAINING_LOG + ".bak"
+            os.replace(TRAINING_LOG, bak)
+    except OSError:
+        pass
+
+
 def _launch_training_command(command: str, launcher_name: str) -> str:
     logs_dir = os.path.join(PROJECT_ROOT, "logs")
     os.makedirs(logs_dir, exist_ok=True)
+    _rotate_training_log()
     launcher_path = os.path.join(logs_dir, launcher_name)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(TRAINING_LOG, "a", encoding="utf-8") as f:
@@ -1400,6 +1413,36 @@ def _list_matching_processes(match_fn) -> list[dict]:
     return sorted(deduped.values(), key=lambda item: item["pid"])
 
 
+def _scan_all_managed_processes() -> tuple[list[dict], list[dict], list[dict]]:
+    """training / heartbeat / supervisor 프로세스를 psutil 1회 스캔으로 동시 수집."""
+    training, heartbeat, supervisor = [], [], []
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+        try:
+            cmdline = " ".join(proc.info["cmdline"] or [])
+            if not cmdline:
+                continue
+            name = proc.info.get("name") or ""
+            entry = {
+                "pid": proc.info["pid"],
+                "name": name,
+                "cmdline": cmdline,
+                "create_time": float(proc.info.get("create_time") or 0.0),
+            }
+            if _looks_like_training_command(name, cmdline):
+                training.append(entry)
+            if _looks_like_heartbeat_command(name, cmdline):
+                heartbeat.append(entry)
+            if _looks_like_supervisor_command(name, cmdline):
+                supervisor.append(entry)
+        except (psutil.Error, PermissionError, OSError):
+            pass
+    key = "pid"
+    training = sorted({e[key]: e for e in training}.values(), key=lambda x: x[key])
+    heartbeat = sorted({e[key]: e for e in heartbeat}.values(), key=lambda x: x[key])
+    supervisor = sorted({e[key]: e for e in supervisor}.values(), key=lambda x: x[key])
+    return training, heartbeat, supervisor
+
+
 def list_heartbeat_processes() -> list[dict]:
     return _list_matching_processes(_looks_like_heartbeat_command)
 
@@ -1458,8 +1501,9 @@ def build_heartbeat_command(iter_step: int | None = None, poll: int | None = Non
 
 
 def launch_heartbeat(log_path: str, iter_step: int | None = None, poll: int | None = None, video_iter_step: int | None = None) -> dict:
-    if is_heartbeat_running():
-        return {"mode": "already-running", "processes": list_heartbeat_processes()}
+    existing = list_heartbeat_processes()
+    if existing or _read_live_pid_lock(HEARTBEAT_PID_FILE):
+        return {"mode": "already-running", "processes": existing}
     command = build_heartbeat_command(iter_step=iter_step, poll=poll, video_iter_step=video_iter_step)
     write_log(f"Launching heartbeat: {command}", log_path)
     with open(HEARTBEAT_LOG, "ab") as heartbeat_log_file:
@@ -1499,8 +1543,12 @@ def stop_heartbeat(log_path: str) -> list[int]:
 
 
 def ensure_heartbeat_running(log_path: str, iter_step: int | None = None, poll: int | None = None, video_iter_step: int | None = None) -> dict:
-    if is_heartbeat_running():
-        return {"mode": "already-running", "processes": list_heartbeat_processes()}
+    # PID lock 빠른 경로: 파일만 읽으면 되므로 psutil 스캔 불필요
+    if _read_live_pid_lock(HEARTBEAT_PID_FILE):
+        return {"mode": "already-running", "processes": []}
+    procs = list_heartbeat_processes()
+    if procs:
+        return {"mode": "already-running", "processes": procs}
     return launch_heartbeat(log_path, iter_step=iter_step, poll=poll, video_iter_step=video_iter_step)
 
 
@@ -1686,6 +1734,9 @@ def find_latest_report_xlsx(run_dir: str | None = None) -> str | None:
     return None
 
 
+_tfevents_cache: dict = {}  # event_path → {"mtime": float, "size": int, "data": dict}
+
+
 def read_tfevents(run_dir: str, retries: int = 3):
     try:
         from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
@@ -1694,6 +1745,14 @@ def read_tfevents(run_dir: str, retries: int = 3):
     event_path = _get_latest_event_file(run_dir)
     if not event_path:
         return None
+    try:
+        st = os.stat(event_path)
+        current_mtime, current_size = st.st_mtime, st.st_size
+    except OSError:
+        current_mtime, current_size = 0.0, -1
+    cached = _tfevents_cache.get(event_path)
+    if cached and cached["mtime"] == current_mtime and cached["size"] == current_size:
+        return cached["data"]
     for attempt in range(retries):
         try:
             accumulator = EventAccumulator(event_path)
@@ -1702,6 +1761,7 @@ def read_tfevents(run_dir: str, retries: int = 3):
             for tag in accumulator.Tags().get("scalars", []):
                 events = accumulator.Scalars(tag)
                 data[tag] = [(event.step, event.value) for event in events]
+            _tfevents_cache[event_path] = {"mtime": current_mtime, "size": current_size, "data": data}
             return data
         except Exception:
             if attempt < retries - 1:
@@ -2386,16 +2446,16 @@ def append_report_record(run_dir: str, record: dict | None) -> None:
     try:
         with open(history_path, "a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    except Exception as err:
+        write_log(f"append_report_record: failed to write heartbeat history: {err}", SUPERVISOR_LOG)
     # train_version.txt — 버전 조회 fallback용 마커 파일
     try:
         ver_path = os.path.join(run_dir, "train_version.txt")
         if not os.path.isfile(ver_path):
             with open(ver_path, "w", encoding="utf-8") as f:
                 f.write(TRAIN_VERSION)
-    except Exception:
-        pass
+    except Exception as err:
+        write_log(f"append_report_record: failed to write train_version.txt: {err}", SUPERVISOR_LOG)
     try:
         refresh_training_logs(run_dir, SUPERVISOR_LOG)
     except Exception as err:
@@ -2435,11 +2495,30 @@ def _get_last_heartbeat_age(run_dir: str | None) -> str:
     return "N/A"
 
 
-def _build_status_snapshot() -> dict:
+_status_snapshot_cache: dict | None = None
+_status_snapshot_cache_time: float = 0.0
+_STATUS_SNAPSHOT_TTL_SEC = 30.0
+
+
+def invalidate_status_snapshot_cache() -> None:
+    global _status_snapshot_cache, _status_snapshot_cache_time
+    _status_snapshot_cache = None
+    _status_snapshot_cache_time = 0.0
+
+
+def _build_status_snapshot(use_cache: bool = True) -> dict:
+    global _status_snapshot_cache, _status_snapshot_cache_time
+    now = time.monotonic()
+    if use_cache and _status_snapshot_cache is not None and now - _status_snapshot_cache_time < _STATUS_SNAPSHOT_TTL_SEC:
+        return _status_snapshot_cache
     state = load_state()
-    run_dir = resolve_active_run_dir()
-    checkpoint = resolve_active_checkpoint(run_dir)
-    training_alive = is_training_running()
+    # 프로세스 스캔 1회로 training / heartbeat / supervisor 동시 수집 — run_dir/checkpoint 해석에도 재사용
+    training_procs, heartbeat_procs, supervisor_procs = _scan_all_managed_processes()
+    run_dir = resolve_active_run_dir(training_procs=training_procs)
+    checkpoint = resolve_active_checkpoint(run_dir, training_procs=training_procs)
+    training_alive = bool(training_procs)
+    heartbeat_alive = bool(heartbeat_procs) or bool(_read_live_pid_lock(HEARTBEAT_PID_FILE))
+    supervisor_alive = bool(supervisor_procs)
     kpi_snapshot = build_supervisor_kpi_snapshot(run_dir) if run_dir and os.path.isdir(run_dir) else {}
     iter_num = int(kpi_snapshot.get("iter") or 0) or get_checkpoint_iter(checkpoint)
     progress_pct = (iter_num / MAX_ITERATIONS * 100.0) if MAX_ITERATIONS > 0 else 0.0
@@ -2454,8 +2533,6 @@ def _build_status_snapshot() -> dict:
     last_report_zip = state.get("last_report_zip") or ""
     if not _path_matches_run(last_report_zip, run_dir):
         last_report_zip = find_latest_report_zip(run_dir) or ""
-    heartbeat_alive = is_heartbeat_running()
-    supervisor_alive = bool(list_supervisor_processes())
     last_heartbeat_report_text = _get_last_heartbeat_age(run_dir)
     if heartbeat_alive:
         last_heartbeat_text = f"alive | report {last_heartbeat_report_text}"
@@ -2464,12 +2541,12 @@ def _build_status_snapshot() -> dict:
     else:
         last_heartbeat_text = "stopped"
     supervisor_version_text = _process_status_version_text(
-        list_supervisor_processes(),
+        supervisor_procs,
         [SUPERVISOR_SCRIPT, __file__],
         pid_file=SUPERVISOR_PID_FILE,
     )
     heartbeat_version_text = _process_status_version_text(
-        list_heartbeat_processes(),
+        heartbeat_procs,
         [HEARTBEAT_SCRIPT, __file__],
         pid_file=HEARTBEAT_PID_FILE,
     )
@@ -2501,6 +2578,9 @@ def _build_status_snapshot() -> dict:
         "supervisor_version_text": supervisor_version_text,
         "heartbeat_version_text": heartbeat_version_text,
     }
+    _status_snapshot_cache = result
+    _status_snapshot_cache_time = now
+    return result
 
 
 def get_master_log_path() -> str:
@@ -2582,7 +2662,13 @@ def _load_yaml_config(file_path: str):
         return {}
 
 
+_git_commit_cache: str | None = None
+
+
 def _get_repo_git_commit() -> str:
+    global _git_commit_cache
+    if _git_commit_cache is not None:
+        return _git_commit_cache
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -2594,9 +2680,11 @@ def _get_repo_git_commit() -> str:
             errors="replace",
         )
         if proc.returncode == 0:
-            return (proc.stdout or "").strip()
+            _git_commit_cache = (proc.stdout or "").strip()
+            return _git_commit_cache
     except Exception:
         pass
+    _git_commit_cache = ""
     return ""
 
 

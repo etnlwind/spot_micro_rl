@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import sys
 import time
 
@@ -54,10 +55,13 @@ def _get_collapse_metrics(data: dict) -> tuple[str | None, float | None, float |
     return worst[0], worst[1], worst[2], worst[3]
 
 
-def _restore_last_milestone(run_dir: str, iter_step: int) -> int:
+def _restore_last_milestone(run_dir: str, iter_step: int, report_kind: str | None = None) -> int:
+    """report_kind 지정 시 해당 종류의 record만 포함."""
     records = common.load_report_history(run_dir)
     last_milestone = 0
     for record in records:
+        if report_kind and record.get("report_kind") != report_kind:
+            continue
         try:
             milestone = int(record.get("milestone") or 0)
         except (TypeError, ValueError):
@@ -72,29 +76,8 @@ def _restore_last_milestone(run_dir: str, iter_step: int) -> int:
     return last_milestone
 
 
-def _restore_last_video_milestone(run_dir: str, video_iter_step: int) -> int:
-    records = common.load_report_history(run_dir)
-    last_milestone = 0
-    for record in records:
-        if record.get("report_kind") != "video_report":
-            continue
-        try:
-            milestone = int(record.get("milestone") or 0)
-        except (TypeError, ValueError):
-            milestone = 0
-        if milestone <= 0:
-            try:
-                cycle_num = int(record.get("cycle_num") or 0)
-            except (TypeError, ValueError):
-                cycle_num = 0
-            milestone = cycle_num * int(video_iter_step)
-        last_milestone = max(last_milestone, milestone)
-    return last_milestone
-
-
 def _get_resume_checkpoint_iter() -> int:
     """state.json의 active_checkpoint에서 iter 번호를 추출. 예: model_1800.pt → 1800."""
-    import re
     state = common.load_state()
     checkpoint = state.get("active_checkpoint") or ""
     m = re.search(r"model_(\d+)\.pt", os.path.basename(checkpoint))
@@ -207,7 +190,7 @@ def main() -> None:
                 if run_name != last_run_name:
                     last_run_name = run_name
                     last_sent_milestone = _restore_last_milestone(run_dir, args.iter_step)
-                    last_video_milestone = _restore_last_video_milestone(run_dir, args.video_iter_step)
+                    last_video_milestone = _restore_last_milestone(run_dir, args.video_iter_step, report_kind="video_report")
                     # 재개 시작 iter 이전 milestone은 이미 완료된 것으로 간주
                     resume_iter = _get_resume_checkpoint_iter()
                     if resume_iter > 0:

@@ -1,6 +1,8 @@
 import argparse
 import collections
+import datetime
 import os
+import re
 import subprocess
 import sys
 import time
@@ -15,6 +17,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 _BOOTSTRAP_ENV_VAR = "SPOT_MICRO_SUPERVISOR_BOOTSTRAPPED"
 _BACKGROUND_LAUNCH_ENV_VAR = "SPOT_MICRO_SUPERVISOR_BACKGROUND"
+_LAUNCHER_POLL_DEADLINE_SEC = 20
+_LAUNCHER_POLL_INTERVAL_SEC = 0.5
+_CONFIRM_TIMEOUT_SEC = 60.0
 
 
 def _load_bootstrap_env(path: str) -> dict[str, str]:
@@ -165,6 +170,10 @@ def _send_notice(title: str, body: str, icon: str = "👮") -> None:
     )
 
 
+def _safe_basename(path: str | None) -> str:
+    return os.path.basename(path) if path else "N/A"
+
+
 def _parse_command_request(text: str) -> tuple[str, str]:
     stripped = (text or "").strip()
     if not stripped:
@@ -187,7 +196,6 @@ def _parse_command_args(arg_text: str) -> tuple[str | None, list[int]]:
       "V26.1 800 600"   → ("V26.1", [800, 600])    V26.1 다중 iter
       "v26.1 1000"      → ("V26.1", [1000])        대소문자 무관
     """
-    import re
     arg_text = (arg_text or "").strip()
     if not arg_text:
         return None, []
@@ -221,6 +229,18 @@ def _resolve_requested_checkpoint(run_dir: str | None, checkpoint_iter: int | No
 
 
 def _build_command_ack(command: str, checkpoint_iters: list[int] | None = None, target_version: str | None = None) -> str:
+    # 컨텍스트(run_dir/checkpoint/training) 불필요한 명령은 즉시 반환 — psutil 스캔 없음
+    if command == "status":
+        return "👮 <b>SUPERVISOR STATUS — 현재 상태를 조회합니다</b>"
+    if command == "help":
+        return "❔ <b>HELP — 명령 목록을 전송합니다</b>"
+    if command == "shutdown":
+        return "🛑 <b>SUPERVISOR SHUTDOWN — 종료를 준비합니다</b>"
+    if command == "selfcheck":
+        return "🔍 <b>SELFCHECK — context 해석 점검을 시작합니다</b>"
+    if command == "stop":
+        return "⏹️ <b>TRAINING STOP — 진행 중인 훈련을 중단합니다</b>"
+
     checkpoint_iters = checkpoint_iters or []
     first_iter = checkpoint_iters[0] if checkpoint_iters else None
     run_dir = common.resolve_run_dir_for_version(target_version) if target_version else common.resolve_active_run_dir()
@@ -232,8 +252,8 @@ def _build_command_ack(command: str, checkpoint_iters: list[int] | None = None, 
         checkpoint_run = os.path.dirname(os.path.abspath(checkpoint))
         if os.path.abspath(run_dir) != checkpoint_run:
             run_dir = checkpoint_run
-    run_name = os.path.basename(run_dir) if run_dir else "N/A"
-    checkpoint_name = os.path.basename(checkpoint) if checkpoint else "N/A"
+    run_name = _safe_basename(run_dir)
+    checkpoint_name = _safe_basename(checkpoint)
     training_running = common.is_training_running()
     if len(checkpoint_iters) > 1:
         iter_seq = " → ".join(str(i) for i in checkpoint_iters)
@@ -253,14 +273,6 @@ def _build_command_ack(command: str, checkpoint_iters: list[int] | None = None, 
             f"<i>checkpoint: {checkpoint_name}</i>\n"
             "<i>마지막 checkpoint에서 재개합니다.</i>"
         )
-    if command == "stop":
-        return "⏹️ <b>TRAINING STOP — 진행 중인 훈련을 중단합니다</b>"
-    if command == "status":
-        return "👮 <b>SUPERVISOR STATUS — 현재 상태를 조회합니다</b>"
-    if command == "help":
-        return "❔ <b>HELP — 명령 목록을 전송합니다</b>"
-    if command == "shutdown":
-        return "🛑 <b>SUPERVISOR SHUTDOWN — 종료를 준비합니다</b>"
     if command == "report":
         if training_running:
             return (
@@ -389,7 +401,7 @@ def handle_command(command: str, checkpoint_iters: list[int] | None = None, targ
     if command == "resume":
         common.reload_train_version()  # env_cfg.py 기준으로 TRAIN_VERSION 갱신
         result = common.launch_training(common.SUPERVISOR_LOG, fresh=False)
-        run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
+        run_name = _safe_basename(result["run_dir"])
         checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A (fresh)"
         if result["mode"] == "already-running":
             _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nversion: {common.TRAIN_VERSION}", icon="▶️")
@@ -398,7 +410,7 @@ def handle_command(command: str, checkpoint_iters: list[int] | None = None, targ
         return
     if command == "stop":
         result = common.stop_training(common.SUPERVISOR_LOG)
-        checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A"
+        checkpoint_name = _safe_basename(result["checkpoint"])
         _send_notice("TRAINING STOPPED", f"killed: {len(result['killed'])}\ncheckpoint: {checkpoint_name}", icon="⏹️")
         return
     if command == "shutdown":
@@ -485,11 +497,11 @@ def _run_supervisor_background(args: argparse.Namespace) -> int:
             creationflags=creationflags,
         )
     common.write_log(f"Supervisor background launcher PID: {proc.pid}", common.SUPERVISOR_LOG)
-    # 자식 초기화 시간 고려: 0.5초 간격으로 최대 20초 폴링
-    deadline = time.time() + 20
+    # 자식 초기화 시간 고려: _LAUNCHER_POLL_INTERVAL_SEC 간격으로 최대 _LAUNCHER_POLL_DEADLINE_SEC 폴링
+    deadline = time.monotonic() + _LAUNCHER_POLL_DEADLINE_SEC
     live_pid = 0
-    while time.time() < deadline:
-        time.sleep(0.5)
+    while time.monotonic() < deadline:
+        time.sleep(_LAUNCHER_POLL_INTERVAL_SEC)
         live_pid = common._read_live_pid_lock(common.SUPERVISOR_PID_FILE)
         if live_pid:
             break
@@ -608,9 +620,9 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
     if action == "start":
         common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
         result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
-        run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
+        run_name = _safe_basename(result["run_dir"])
         if result["mode"] == "already-running":
-            existing_ckpt = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A"
+            existing_ckpt = _safe_basename(result["checkpoint"])
             _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {existing_ckpt}\nversion: {common.TRAIN_VERSION}\nsource: cli", icon="🚀")
             _print_local(f"training already running\nrun: {run_name}\ncheckpoint: {existing_ckpt}")
         else:
@@ -620,8 +632,8 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
     if action == "resume":
         common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
         result = common.launch_training(common.SUPERVISOR_LOG, fresh=False)
-        run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
-        checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A"
+        run_name = _safe_basename(result["run_dir"])
+        checkpoint_name = _safe_basename(result["checkpoint"])
         if result["mode"] == "already-running":
             _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}\nversion: {common.TRAIN_VERSION}\nsource: cli", icon="▶️")
             _print_local(f"training already running\nrun: {run_name}\ncheckpoint: {checkpoint_name}")
@@ -631,7 +643,7 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
         return 0
     if action == "stop":
         result = common.stop_training(common.SUPERVISOR_LOG)
-        checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A"
+        checkpoint_name = _safe_basename(result["checkpoint"])
         _send_notice("TRAINING STOPPED", f"killed: {len(result['killed'])}\ncheckpoint: {checkpoint_name}\nsource: cli", icon="⏹️")
         _print_local(f"training stopped\nkilled: {len(result['killed'])}\ncheckpoint: {checkpoint_name}")
         return 0
@@ -708,32 +720,24 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
     raise RuntimeError(f"Unsupported action: {action}")
 
 
-def _kill_existing_supervisor_and_heartbeat(exclude_pids: list[int] | None = None) -> None:
+def _kill_existing_supervisor_and_heartbeat(exclude_pids: list[int] | None = None) -> list[dict]:
     """--listen 시작 전 기존 supervisor/heartbeat 프로세스를 모두 종료.
 
     자기 자신(현재 PID)과 exclude_pids(런처 PID 등)는 제외하고 종료.
+    training_procs를 반환해 호출부에서 재사용 가능.
     """
     my_pid = os.getpid()
     skip_pids = set(exclude_pids or []) | {my_pid}
     killed = []
 
-    for entry in common.list_supervisor_processes():
+    training_procs, heartbeat_procs, supervisor_procs = common._scan_all_managed_processes()
+    for entry, label in [(e, "supervisor") for e in supervisor_procs] + [(e, "heartbeat") for e in heartbeat_procs]:
         pid = int(entry.get("pid") or 0)
         if pid and pid not in skip_pids:
             try:
                 psutil.Process(pid).kill()
-                killed.append(f"supervisor pid={pid}")
-                common.write_log(f"[startup] Killed existing supervisor PID {pid}", common.SUPERVISOR_LOG)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-
-    for entry in common.list_heartbeat_processes():
-        pid = int(entry.get("pid") or 0)
-        if pid and pid not in skip_pids:
-            try:
-                psutil.Process(pid).kill()
-                killed.append(f"heartbeat pid={pid}")
-                common.write_log(f"[startup] Killed existing heartbeat PID {pid}", common.SUPERVISOR_LOG)
+                killed.append(f"{label} pid={pid}")
+                common.write_log(f"[startup] Killed existing {label} PID {pid}", common.SUPERVISOR_LOG)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
@@ -745,6 +749,7 @@ def _kill_existing_supervisor_and_heartbeat(exclude_pids: list[int] | None = Non
     if killed:
         common.write_log(f"[startup] Cleaned up {len(killed)} process(es): {', '.join(killed)}", common.SUPERVISOR_LOG)
         time.sleep(1)  # 프로세스 완전 종료 대기
+    return training_procs
 
 
 def _run_supervisor_loop(args: argparse.Namespace) -> int:
@@ -752,25 +757,25 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
     exit_reason = "loop-returned"
     exit_detail = ""
     launcher_pid = getattr(args, "launcher_pid", None) or 0
-    _kill_existing_supervisor_and_heartbeat(exclude_pids=[launcher_pid] if launcher_pid else None)
+    training_procs = _kill_existing_supervisor_and_heartbeat(exclude_pids=[launcher_pid] if launcher_pid else None)
     common.release_pid_lock(common.SUPERVISOR_PID_FILE)  # stale lock 잔존 방어 (Windows PID 재사용 등)
     common.clear_supervisor_shutdown_request()
     common.acquire_pid_lock(common.SUPERVISOR_PID_FILE, "supervisor", common.SUPERVISOR_LOG)
     common.mark_supervisor_started(session_id, os.getpid(), common.SUPERVISOR_LOG)
     common.write_log(f"Supervisor session started: session={session_id} pid={os.getpid()}", common.SUPERVISOR_LOG)
     common.prime_update_offset(common.SUPERVISOR_LOG)
-    common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
-    common.update_state(mode="training" if common.is_training_running() else "idle", last_command="startup", last_error="")
-    import datetime as _dt
-    _sv_ver = _dt.datetime.fromtimestamp(os.path.getmtime(__file__)).strftime("%Y-%m-%d %H:%M")
+    # training_procs는 kill scan에서 이미 수집 — is_training_running() 추가 psutil 스캔 불필요
+    common.update_state(mode="training" if bool(training_procs) else "idle", last_command="startup", last_error="")
+    _sv_ver = datetime.datetime.fromtimestamp(os.path.getmtime(__file__)).strftime("%Y-%m-%d %H:%M")
+    # ACTIVE 메시지를 heartbeat launch 전에 즉시 전송 — launch_heartbeat()가 최대 15초 대기하므로
     common.send_text(
         f"👮 <b>SUPERVISOR ACTIVE</b>  version: <code>{_sv_ver}</code>  train: <code>{common.TRAIN_VERSION}</code>\n\n"
         + common.help_text(),
         common.SUPERVISOR_LOG,
         parse_mode="HTML",
     )
+    common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
     pending_confirm: dict | None = None  # {"action": "fresh_start", "ckpt_iter": int, "ckpt_name": str, "expires_at": float}
-    _CONFIRM_TIMEOUT_SEC = 60.0
     try:
         while True:
             try:
@@ -802,7 +807,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                             common.write_log(f"[Confirm] action={action} confirmed by user", common.SUPERVISOR_LOG)
                             if action == "fresh_start":
                                 result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
-                                run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
+                                run_name = _safe_basename(result["run_dir"])
                                 if result["mode"] == "already-running":
                                     _send_notice("TRAINING ACTIVE", f"run: {run_name}", icon="🚀")
                                 else:
@@ -868,7 +873,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                                     parse_mode="HTML",
                                 )
                             result = common.launch_training(common.SUPERVISOR_LOG, fresh=True)
-                            run_name = os.path.basename(result["run_dir"]) if result["run_dir"] else "N/A"
+                            run_name = _safe_basename(result["run_dir"])
                             common.send_text(
                                 f"🚀 <b>TRAINING START (FRESH)</b>\n"
                                 f"<i>run: {run_name}</i>\n"
