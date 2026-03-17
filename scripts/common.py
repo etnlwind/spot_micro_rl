@@ -159,15 +159,34 @@ def _read_env_cfg_train_version() -> str:
     return ""
 
 
+def _sync_env_train_version(ver: str) -> None:
+    """.env 파일의 TRAIN_VERSION을 ver로 자동 동기화."""
+    try:
+        lines = []
+        replaced = False
+        if os.path.isfile(ENV_FILE):
+            with open(ENV_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith("TRAIN_VERSION="):
+                new_lines.append(f"TRAIN_VERSION={ver}\n")
+                replaced = True
+            else:
+                new_lines.append(line)
+        if not replaced:
+            new_lines.append(f"TRAIN_VERSION={ver}\n")
+        with open(ENV_FILE, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        print(f"[common.py] WARNING: .env 자동 동기화 실패: {e}")
+
+
 def _resolve_train_version(context: str = "init") -> str:
     """TRAIN_VERSION을 결정하는 단일 진입점.
 
-    우선순위:
-      1. env_cfg.py (훈련 코드의 권위있는 소스) — 항상 우선
-      2. .env / 환경변수 — fallback (env_cfg.py 읽기 실패 시)
-
-    두 소스가 다를 경우 WARNING을 출력한다.
-    silent mismatch가 가장 위험하므로 불일치는 반드시 노출.
+    env_cfg.py가 권위있는 소스. 불일치 시 .env를 자동 동기화하여
+    두 소스가 항상 일치하도록 유지한다. 사용자 개입 불필요.
     """
     cfg_ver = _read_env_cfg_train_version()
     env_ver = _load_env(ENV_FILE).get("TRAIN_VERSION") or os.environ.get("TRAIN_VERSION") or ""
@@ -175,13 +194,12 @@ def _resolve_train_version(context: str = "init") -> str:
     if cfg_ver and env_ver and cfg_ver != env_ver:
         print(
             f"\n{'!' * 60}\n"
-            f"[common.py] ⚠️  TRAIN_VERSION 불일치 [{context}]\n"
-            f"  env_cfg.py (권위):  {cfg_ver}\n"
-            f"  .env / 환경변수:    {env_ver}\n"
-            f"  → env_cfg.py 기준 {cfg_ver}을 사용합니다.\n"
-            f"  → .env를 {cfg_ver}로 업데이트하세요: TRAIN_VERSION={cfg_ver}\n"
+            f"[common.py] TRAIN_VERSION 불일치 감지 [{context}]\n"
+            f"  env_cfg.py: {cfg_ver}  /  .env: {env_ver}\n"
+            f"  → .env를 {cfg_ver}로 자동 동기화합니다.\n"
             f"{'!' * 60}\n"
         )
+        _sync_env_train_version(cfg_ver)
 
     ver = cfg_ver or env_ver
     if not ver:
