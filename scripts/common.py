@@ -1570,8 +1570,19 @@ def launch_training(log_path: str, fresh: bool = False) -> dict:
     else:
         baseline_run = get_latest_run_dir()
         resume_run = resolve_active_run_dir()
-        checkpoint = resolve_active_checkpoint(resume_run)
-        command = build_train_command(resume_run, checkpoint) if checkpoint else build_train_command()
+        run_ver = _read_run_train_version(resume_run) if resume_run else None
+        if run_ver and run_ver != TRAIN_VERSION:
+            # 버전 불일치 — 구버전 run을 resume하면 안 됨, fresh start로 전환
+            write_log(
+                f"launch_training: version mismatch ({run_ver} → {TRAIN_VERSION}), forcing fresh start",
+                log_path,
+            )
+            update_state(active_run="", active_checkpoint="", last_command="start-fresh")
+            fresh = True
+            command = build_train_command()
+        else:
+            checkpoint = resolve_active_checkpoint(resume_run)
+            command = build_train_command(resume_run, checkpoint) if checkpoint else build_train_command()
     write_log(f"Launching training (fresh={fresh}): {command}", log_path)
     launcher_path = _launch_training_command(command, "_launch_training.cmd")
     write_log(f"Training launcher: {launcher_path}", log_path)
@@ -2431,10 +2442,14 @@ def append_report_record(run_dir: str, record: dict | None) -> None:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as err:
         write_log(f"append_report_record: failed to write heartbeat history: {err}", SUPERVISOR_LOG)
-    # train_version.txt — 버전 조회 fallback용 마커 파일
+    # train_version.txt — 버전 조회 fallback용 마커 파일 (버전 변경 시 즉시 갱신)
     try:
         ver_path = os.path.join(run_dir, "train_version.txt")
-        if not os.path.isfile(ver_path):
+        existing_ver = ""
+        if os.path.isfile(ver_path):
+            with open(ver_path, "r", encoding="utf-8") as f:
+                existing_ver = f.read().strip()
+        if existing_ver != TRAIN_VERSION:
             with open(ver_path, "w", encoding="utf-8") as f:
                 f.write(TRAIN_VERSION)
     except Exception as err:

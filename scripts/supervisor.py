@@ -775,6 +775,30 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
         parse_mode="HTML",
     )
     common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
+
+    # 버전 불일치 감지 — ACTIVE 메시지 직후 별도 경고 전송
+    _active_run_at_start = common.resolve_active_run_dir()
+    _run_ver_at_start = common._read_run_train_version(_active_run_at_start) if _active_run_at_start else None
+    if _run_ver_at_start and _run_ver_at_start != common.TRAIN_VERSION:
+        if bool(training_procs):
+            # 훈련 실행 중인데 구버전 → 경고만 (강제 중단은 사용자 판단)
+            common.send_text(
+                f"⚠️ <b>VERSION MISMATCH</b>\n"
+                f"<i>실행 중인 훈련: <code>{_run_ver_at_start}</code> | 현재 코드: <code>{common.TRAIN_VERSION}</code></i>\n"
+                f"<i>/start 명령으로 새 버전 훈련을 시작하세요.</i>",
+                common.SUPERVISOR_LOG,
+                parse_mode="HTML",
+            )
+        else:
+            # 훈련 없음 + 활성 run이 구버전 → 자동 fresh start
+            common.send_text(
+                f"🆕 <b>VERSION UPGRADE — {_run_ver_at_start} → {common.TRAIN_VERSION}</b>\n"
+                f"<i>구버전 run 감지. iter 0부터 새 훈련을 자동 시작합니다.</i>",
+                common.SUPERVISOR_LOG,
+                parse_mode="HTML",
+            )
+            common.launch_training(common.SUPERVISOR_LOG, fresh=True)
+
     pending_confirm: dict | None = None  # {"action": "fresh_start", "ckpt_iter": int, "ckpt_name": str, "expires_at": float}
     try:
         while True:
