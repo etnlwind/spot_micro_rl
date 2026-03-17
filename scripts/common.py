@@ -558,7 +558,7 @@ def mark_supervisor_exited(session_id: str, reason: str, detail: str = "") -> di
     )
 
 
-def acquire_pid_lock(pid_file: str, owner_name: str, log_path: str) -> None:
+def acquire_pid_lock(pid_file: str, owner_name: str, log_path: str, force: bool = False) -> None:
     _ensure_logs_dir()
     old_pid = 0
     try:
@@ -567,8 +567,10 @@ def acquire_pid_lock(pid_file: str, owner_name: str, log_path: str) -> None:
                 old_pid = int(file.read().strip())
     except Exception:
         old_pid = 0
-    if old_pid and psutil.pid_exists(old_pid):
+    if old_pid and psutil.pid_exists(old_pid) and not force:
         raise RuntimeError(f"{owner_name} already running (PID {old_pid})")
+    if old_pid and psutil.pid_exists(old_pid) and force:
+        write_log(f"[acquire_pid_lock] force-overwrite: {owner_name} stale lock PID {old_pid} still alive — overwriting", log_path)
     with open(pid_file, "w", encoding="utf-8") as file:
         file.write(str(os.getpid()))
     write_log(f"{owner_name} lock acquired (PID {os.getpid()})", log_path)

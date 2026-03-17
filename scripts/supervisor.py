@@ -742,7 +742,8 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
     exit_detail = ""
     _kill_existing_supervisor_and_heartbeat()  # 기존 supervisor/heartbeat 강제 종료
     common.clear_supervisor_shutdown_request()
-    common.acquire_pid_lock(common.SUPERVISOR_PID_FILE, "supervisor", common.SUPERVISOR_LOG)
+    # force=True: kill 직후이므로 stale lock이 남아 있어도 강제 획득 (PID 재사용 등 edge case 대응)
+    common.acquire_pid_lock(common.SUPERVISOR_PID_FILE, "supervisor", common.SUPERVISOR_LOG, force=True)
     common.mark_supervisor_started(session_id, os.getpid(), common.SUPERVISOR_LOG)
     common.write_log(f"Supervisor session started: session={session_id} pid={os.getpid()}", common.SUPERVISOR_LOG)
     common.prime_update_offset(common.SUPERVISOR_LOG)
