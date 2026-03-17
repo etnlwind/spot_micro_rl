@@ -699,10 +699,46 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
     raise RuntimeError(f"Unsupported action: {action}")
 
 
+def _kill_existing_supervisor_and_heartbeat() -> None:
+    """--listen 시작 전 기존 supervisor/heartbeat 프로세스를 모두 종료.
+
+    자기 자신(현재 PID)은 제외하고 종료하여 중복 실행을 원천 차단.
+    """
+    my_pid = os.getpid()
+    killed = []
+
+    for entry in common.list_supervisor_processes():
+        pid = int(entry.get("pid") or 0)
+        if pid and pid != my_pid:
+            try:
+                psutil.Process(pid).kill()
+                killed.append(f"supervisor pid={pid}")
+                common.write_log(f"[startup] Killed existing supervisor PID {pid}", common.SUPERVISOR_LOG)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+    for entry in common.list_heartbeat_processes():
+        pid = int(entry.get("pid") or 0)
+        if pid and pid != my_pid:
+            try:
+                psutil.Process(pid).kill()
+                killed.append(f"heartbeat pid={pid}")
+                common.write_log(f"[startup] Killed existing heartbeat PID {pid}", common.SUPERVISOR_LOG)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+    common.release_pid_lock(common.HEARTBEAT_PID_FILE)
+
+    if killed:
+        common.write_log(f"[startup] Cleaned up {len(killed)} process(es): {', '.join(killed)}", common.SUPERVISOR_LOG)
+        time.sleep(1)  # 프로세스 완전 종료 대기
+
+
 def _run_supervisor_loop(args: argparse.Namespace) -> int:
     session_id = uuid.uuid4().hex[:12]
     exit_reason = "loop-returned"
     exit_detail = ""
+    _kill_existing_supervisor_and_heartbeat()  # 기존 supervisor/heartbeat 강제 종료
     common.clear_supervisor_shutdown_request()
     common.acquire_pid_lock(common.SUPERVISOR_PID_FILE, "supervisor", common.SUPERVISOR_LOG)
     common.mark_supervisor_started(session_id, os.getpid(), common.SUPERVISOR_LOG)
