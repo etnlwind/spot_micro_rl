@@ -92,6 +92,22 @@ stride_efficiency = 이동 거리 / 접지 횟수
 
 ---
 
+## 수정 우선순위 계층
+
+V29의 수정 항목은 중요도와 역할이 다르다. 구현 및 분석 시 아래 계층을 기준으로 판단한다.
+
+| 계층 | 항목 | 역할 |
+|------|------|------|
+| 🔴 핵심 (Core) | contact/prop/usage residency band_high=0.65 | reward 구조 근본 교정. 이것만으로도 앞발 고착 억제 가능. |
+| 🟠 직접 품질 신호 | stride_length_reward 활성화 | "크게 내딛기"를 직접 보상. residency 교정과 함께 작동. |
+| 🟡 보조 구조 변경 | swing_quality_gate_velocity | 4발 균등 swing을 velocity와 연결. residency+stride 효과 보완. |
+| 🟢 안전장치 | stability penalty 강화 | 과보폭 자동 조절. 핵심 철학이 아닌 보조. **과강도 시 첫 조정 후보.** |
+
+**분석 원칙**: 결과가 좋거나 나쁠 때 이 계층 순서로 원인을 추적한다.
+residency 교정이 작동했는지 먼저 확인하고, 그 다음 stride, swing_gate 순으로 기여 분리.
+
+---
+
 ## V29 핵심 수정 (5개)
 
 ### 수정 1. contact_residency 밴드 상한 추가
@@ -196,7 +212,7 @@ def swing_quality_gated_velocity(
 ```python
 "swing_gate_ramp_start": 500,
 "swing_gate_ramp_end": 800,
-"swing_gate_max": 20.0,  # forward_velocity(35.0)의 일부를 이쪽으로 이전
+"swing_gate_max": 15.0,  # forward_velocity(35.0)의 43% — 보수적 시작
 ```
 
 **수치 근거**:
@@ -204,12 +220,19 @@ def swing_quality_gated_velocity(
 V28.3 실측 FL swing=0.174, FR swing=0.115:
   min_swing = 0.115
   gate = 0.115 / 0.30 = 0.383
-  swing_gate_velocity ≈ fwd_vel × 0.383 → reward 62% 손실
 
-FL/FR swing 0.30 달성 시:
-  gate = 1.0 → full reward
-  → 4발 균등 swing이 직접 이익
+  max=15.0: 15 × 0.383 = 5.75/step 기여 (손실 9.25/step)
+  FL/FR swing 0.30 달성 시 얻는 추가 이득: +9.25/step → 강한 유인
+
+  max=20.0 대신 15.0을 선택한 이유:
+  - residency 상한 + stride + swing_gate + stability penalty가 동시 적용됨
+  - forward_velocity(35.0) 재배분 비율이 57%이면 초기 학습 불안정 가능성
+  - 15.0(43%)로 시작해 iter 800 판정 후 필요 시 V29.1에서 상향
 ```
+
+> **주의**: swing_gate_max는 forward velocity reward를 직접 재배분하는 강한 항목이다.
+> 1차 구현에서는 보수적으로 15.0으로 시작하고, iter 800 판정 결과에 따라 후속 버전에서 조정한다.
+> swing_gate_max를 먼저 올리기 전에 stability penalty를 먼저 낮추는 것을 검토할 것.
 
 ---
 
@@ -230,6 +253,12 @@ ang_vel_xy_l2: -0.2 → -1.0   # 과보폭 시 pitch/roll 흔들림 억제
 보폭이 너무 클 때:  착지 충격 증가 → lin_vel_z 패널티 증가 → 조절
 → 자연스러운 최적 보폭이 reward 함수 내에서 스스로 결정됨
 ```
+
+> **위치**: 이 항목은 핵심 철학이 아닌 **보조 안전장치**다.
+> stride+swing_gate+residency 변화와 동시에 적용되어 학습이 과소극적으로 후퇴하는 징후가
+> 보이면 (early iter에서 contact 전반이 낮아지거나 reward 상승이 지연될 경우),
+> **stability penalty를 가장 먼저 낮추는 것을 우선 검토한다.**
+> (lin_vel_z -2.0 → -1.2, ang_vel_xy -1.0 → -0.5 수준으로 되돌리기)
 
 ---
 
@@ -341,7 +370,7 @@ iter 800+:     모든 제약 full strength
    "stride_length_max": 12.0,
    "swing_gate_ramp_start": 500,
    "swing_gate_ramp_end": 800,
-   "swing_gate_max": 20.0,
+   "swing_gate_max": 15.0,
    ```
 
 ---
@@ -353,7 +382,7 @@ iter 800+:     모든 제약 full strength
 | contact band_high=0.65 | trot 허용 최대 contact | EMA alpha=0.05 → 50 step 내 reward 소멸 |
 | stride target=0.10m | trot 보폭 이론값 0.08~0.12m | 자연스러운 중간값 |
 | stride max=12.0 | fwd_vel(35.0)의 34% | 보조 신호, 주 신호 초과 금지 |
-| swing_gate max=20.0 | fwd_vel(35.0)의 57% | 4발 균등 swing 강력 유도 |
+| swing_gate max=15.0 | fwd_vel(35.0)의 43% | 4발 균등 swing 유도, 보수적 시작 |
 | lin_vel_z -0.7→-2.0 | 충격 억제 2.9배 | trot_gait(180) 대비 여전히 약하지만 의미있는 신호 |
 | ang_vel_xy -0.2→-1.0 | 흔들림 억제 5배 | 과보폭 자동 조절 역할 |
 
@@ -440,7 +469,7 @@ heartbeat의 rear_pair_residency_gap > 0.15 경보 유지.
 | front_contact_cap | 없음 | -10.0 | **제거** |
 | front_balance | 비활성 | -8.0 | **제거** |
 | stride_length_reward | 비활성 | 비활성 | **max=12.0 활성화** |
-| swing_gate_velocity | 없음 | 없음 | **max=20.0 신규** |
+| swing_gate_velocity | 없음 | 없음 | **max=15.0 신규** |
 | lin_vel_z_l2 | -0.7 | -0.7 | **-2.0** |
 | ang_vel_xy_l2 | -0.2 | -0.2 | **-1.0** |
 | 앞발 고착 해결 | ❌ | ❌ | ✅ (목표) |
@@ -486,6 +515,24 @@ heartbeat의 rear_pair_residency_gap > 0.15 경보 유지.
 
 ---
 
+## 성공 기준
+
+**V29의 성공은 reward/survival 수치가 아니라 보행 품질로 판정한다.**
+
+> V29는 reward가 높아도 아래 기준을 충족하지 못하면 실패다.
+> 반대로 reward가 V28.3보다 낮아도 아래 기준을 충족하면 성공이다.
+
+| 지표 | V28.3 최종 | V29 성공 기준 |
+|------|-----------|--------------|
+| FL/FR contact | 0.824 / 0.883 | **0.65 이하** |
+| FL/FR swing | 0.174 / 0.115 | **0.25 이상** |
+| front-rear diff | ~0.36 | **0.20 이하** |
+| diagonal_coupling_raw | 0.536 | **0.65 이상** |
+| rear_usage_diff | 0.014 | **0.10 이하 유지** |
+| 영상 | 짧은 보폭 벌레 걸음 | **자연스러운 보폭 확대** |
+
+---
+
 ## 최종 판단
 
 V28.3 실패의 핵심은 **외부에서 패널티를 추가하는 방식의 한계**였다.
@@ -500,3 +547,8 @@ V29는 reward 구조 안에서 앞발 고착이 자연스럽게 손해가 되고
 
 마지막 업데이트: 2026-03-17
 기준 데이터: V28.3 Run3 (2026-03-17_15-28-19) iter 2200
+분석팀 피드백 반영: 2026-03-17
+  - swing_gate_max 20.0 → 15.0 (보수적 시작)
+  - stability penalty "첫 조정 후보" 명시
+  - 수정 우선순위 계층 추가
+  - 성공 기준 단락 추가
