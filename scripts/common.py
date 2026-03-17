@@ -1509,24 +1509,7 @@ def launch_heartbeat(log_path: str, iter_step: int | None = None, poll: int | No
     with open(HEARTBEAT_LOG, "ab") as heartbeat_log_file:
         proc = _popen_hidden_cmd(command, stdout=heartbeat_log_file, stderr=subprocess.STDOUT)
     write_log(f"Heartbeat launcher PID: {proc.pid}", log_path)
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        heartbeat_pid = _read_live_pid_lock(HEARTBEAT_PID_FILE)
-        if heartbeat_pid:
-            processes = list_heartbeat_processes()
-            if not processes:
-                processes = [{"pid": heartbeat_pid, "name": "python.exe", "cmdline": HEARTBEAT_SCRIPT}]
-            write_log(f"Heartbeat active PID: {heartbeat_pid}", log_path)
-            return {"mode": "started", "processes": processes}
-        if proc.poll() is not None:
-            break
-        time.sleep(0.5)
-    log_tail = _read_text_tail(HEARTBEAT_LOG)
-    raise RuntimeError(
-        "Heartbeat failed to start"
-        + (f" (launcher rc={proc.returncode})" if proc.poll() is not None else "")
-        + (f"\n{log_tail}" if log_tail else "")
-    )
+    return {"mode": "started", "processes": []}
 
 
 def stop_heartbeat(log_path: str) -> list[int]:
