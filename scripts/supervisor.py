@@ -483,8 +483,16 @@ def _run_supervisor_background(args: argparse.Namespace) -> int:
             creationflags=creationflags,
         )
     common.write_log(f"Supervisor background launcher PID: {proc.pid}", common.SUPERVISOR_LOG)
-    time.sleep(3)
-    live_pid = common._read_live_pid_lock(common.SUPERVISOR_PID_FILE)
+    # 자식 초기화 시간 고려: 0.5초 간격으로 최대 20초 폴링
+    deadline = time.time() + 20
+    live_pid = 0
+    while time.time() < deadline:
+        time.sleep(0.5)
+        live_pid = common._read_live_pid_lock(common.SUPERVISOR_PID_FILE)
+        if live_pid:
+            break
+        if proc.poll() is not None:
+            break  # 자식 프로세스 종료됨
     if live_pid:
         common.write_log(f"Supervisor background active PID: {live_pid}", common.SUPERVISOR_LOG)
         _print_local(f"supervisor launched in background (pid {live_pid})")
