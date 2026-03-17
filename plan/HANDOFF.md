@@ -1,183 +1,147 @@
 # HANDOFF.md
 
 > 마지막 업데이트: 2026-03-17
-> 이전 세션 커밋: `0d57630` (develop 브랜치)
+> 최신 커밋: `ff62aff` (develop 브랜치)
 
 ---
 
 ## 1. 현재 목표
 
-**V29 훈련 시작 및 모니터링**
+**V29.2 훈련 진행 중**
 
-V28 시리즈 → V29 진행 상황:
-- V28: iter 1000 이후 RL collapse → 실패
-- V28.1: run 재기동 후 RR collapse → 실패
-- **V28.2: rear pair 대칭 완전 달성 (iter 1703: rear_usage_diff=0.012) → 성공**
-- **V28.3: front contact cap(-10.0) 추가했으나 FL/FR contact 고착 미해결 → 실패**
-- **V29: 구현 완료, 훈련 시작 대기 중** ← 현재 위치
-
-V28.3 실패 근본 원인: contact_residency band_low만 존재(상한 없음) → FL 0.83도 최대 reward → 외부 패널티로는 한계.
-V29 목표: reward 구조 내부 개혁 — band_high=0.65 추가 + stride_length + swing_gate_velocity.
+| 버전 | 결과 | 비고 |
+|------|------|------|
+| V28.2 | ✅ rear 대칭 달성 | iter 1703 rear_usage_diff=0.012 |
+| V28.3 | ❌ front contact 고착 | FL/FR 0.83+ 유지 — cap 패널티로 해결 불가 |
+| V29 | ❌ residency 목표 미달 | band_high 설정 오류로 reward gradient 없음 |
+| **V29.2** | 🟡 **훈련 중** | iter 201, run `2026-03-17_23-06-20` |
 
 ---
 
-## 2. 수정한 파일과 핵심 변경점
+## 2. V29 실패 원인 (→ `plan/V29_ANALYSIS.md`)
 
-### V29 (커밋 `0d57630`) ← 최신
+1. `contact_residency band_high=0.65` → FL/FR(0.84)이 band 밖 → residency reward 0
+2. `per_leg_contact_target_band band_high=0.45` → RL/RR(0.49)도 band 밖 → 전 다리 gradient 없음
+3. `front_rear_support_balance_penalty weight=0.0` → front dominance 방치
+4. enforce 시작 iter 625 → gait 안정화 전 패널티 → gait B→C 퇴행
 
-**`source/.../mdp/rewards.py`**
-- `_update_v281_contact/prop/usage_ema`: band_high 파라미터 추가 (contact > band_high이면 in_band=0)
-- `per_leg_contact/prop_band_residency_reward`: band_high=1.0 (default, cfg에서 0.65로 전달)
-- `limb_usage_band_residency_reward`: band_high 추가
-- `swing_quality_gated_velocity()` 신규:
-  - 4발 swing ratio EMA를 계산하여 min()을 bottleneck으로 사용
-  - min_swing_ratio(=0.15) 이상일 때만 heading_velocity를 보상
-  - 앞발만 땅에 붙이고 뒷발만 스윙하는 벌레걸음 원천 차단
-- `_curriculum_apply_v281_weights`: V28.3 항목(#6 front_cap, #7 front_balance) → V29(#6 stride_length, #7 swing_gate)
-- `reward_weight_curriculum`: V28.3 파라미터 전체 → V29(stride_length_ramp, swing_gate_ramp) 교체
+---
+
+## 3. V29.2 변경사항 (→ `plan/V29.2_PLAN.md`)
 
 **`source/.../spot_micro_rl_env_cfg.py`**
-- `TRAIN_VERSION = "V29"`
-- `lin_vel_z_l2`: -0.7 → **-2.0** (수직 진동 억제 강화)
-- `ang_vel_xy_l2`: -0.2 → **-1.0** (몸통 흔들림 억제 강화)
-- `contact_residency`: band_low 0.20→0.25, **band_high=0.65 추가**
-- `prop_residency`: **band_high=0.65 추가**
-- `usage_residency`: **band_high=0.65 추가**
-- `front_pair_contact_cap` RewTerm **삭제** → `swing_gate_velocity` RewTerm **추가**
-- `front_rear_support_balance_penalty` max_diff: 0.30 → 0.50 원복
-- `stride_length`: target_stride 0.06→**0.10**, weight 12.0→**0.0** (curriculum 제어)
-- TRAINING_CONFIG: front_cap/front_balance → stride_length(max=12.0, 400~700) + swing_gate(max=15.0, 600~900)
+
+| 항목 | V29 | V29.2 |
+|------|-----|-------|
+| TRAIN_VERSION | V29 | **V29.2** |
+| contact_residency band | [0.25, 0.65] | **[0.20, 0.85]** |
+| prop_residency band_high | 0.65 | **0.70** |
+| per_leg_contact_target_band band_high | 0.45 | **0.75** |
+| per_leg_contact_target_band weight | 0.5 | **3.0** |
+| front_rear_support_balance_penalty | weight=0.0 | **weight=-4.0, max_diff=0.25** |
+| residency enforce 시작 | iter 600 | **iter 800** |
+
+**`scripts/common.py`**
+- KPI 경보 threshold: RR residency 0.30 → **0.15**
 
 ---
 
-### 이전 버전 참고
+## 4. 수퍼바이저/인프라 개선 (이번 세션)
 
-**V28.3 (커밋 `c50925f`)**
-- `front_pair_contact_cap_penalty()` 신규 (contact_cap=0.65, max=-10.0, ramp 700~1000)
-- 결과: FL contact 0.83~0.88 고착 유지 → 실패
-
-**V28.2 (커밋 `745d7b6`)**
-- `rear_pair_contact_diff_penalty()` 신규 — rear 대칭 강제
-- 결과: iter 1703 rear_usage_diff=0.012 → **성공**
-
----
-
-## 3. 아직 안 끝난 작업
-
-### 즉시 필요
-- [ ] **V29 훈련 시작** — supervisor 재시작 후 `/start` 명령
-
-### V29 훈련 중 모니터링
-
-| 체크포인트 | 핵심 지표 |
-|-----------|---------|
-| iter 400 | stride ramp 시작 — FL/FR contact EMA 변화 방향 확인 |
-| iter 600~700 | FL/FR contact < 0.75 (band_high 효과 발현) |
-| iter 700 판정 | FL/FR contact < 0.75, rear_usage_diff < 0.10 |
-| iter 900 판정 | FL/FR contact < 0.65, FL/FR swing > 0.25, front-rear diff < 0.25 |
-| iter 1200 최종 | FL/FR contact 0.50~0.65, diagonal_coupling_raw > 0.70 |
-
-### V29 경보 기준 (heartbeat)
-| 지표 | 경보 기준 | 액션 |
-|------|----------|------|
-| rear_pair_residency_gap | > 0.15 ⚠️ | rear 불안정 감시 |
-| contact_band_residency_rr | < 0.30 🔴 | 즉시 확인 |
-| FL/FR contact (iter 700+) | 계속 증가 또는 > 0.80 | ramp 재검토 |
-| rear_usage_diff (iter 700+) | > 0.20 | 즉시 중단 고려 |
-
-### V29 결과에 따른 후속
-- FL/FR contact < 0.65 달성 → V29 ANALYSIS 작성 후 V30 계획
-- iter 900 swing < 0.25 미달 → **V29b: swing_gate min_swing_ratio 조정**
-- rear 불안정 재발 → 즉시 중단, rear 우선 재검토
+| 항목 | 변경 |
+|------|------|
+| 명령 ACK 지연 | `_build_command_ack()` — status/help/stop 등 즉시 반환 (psutil 스캔 없음) |
+| ACTIVE 메시지 지연 | heartbeat launch 전에 먼저 전송 |
+| psutil 스캔 중복 | `_scan_all_managed_processes()` 1회 통합 (기존 5회) |
+| tfevents 캐시 | mtime+size 기반 — 파일 불변 시 재파싱 없음 |
+| status snapshot TTL | 30초 캐시 |
+| heartbeat launch polling | 제거 — fire-and-forget |
+| train_version.txt | 버전 변경 시 항상 덮어쓰기 (기존: 최초 1회만) |
+| 버전 불일치 감지 | supervisor 시작 시 자동 감지 → 경고 or 자동 fresh start |
+| training_launch.log | 20MB 초과 시 rotation |
+| status에 train_version 표시 | 추가 |
 
 ---
 
-## 4. 다음 액션
+## 5. V29.2 훈련 모니터링
 
-### 즉시 (훈련 시작)
+### 초기 신호 (iter 201 — 정상)
+- `per_leg_contact_target_band` TOP5 진입 (+1.4656) ✅ — V29.2 변경 즉시 작동
+- `front_rear_balance: 0.1072` — 초기치로 양호
+- 생존율 11.7%, 낙상 96% — 정상 초기 구간
+
+### 체크포인트 기준
+
+| iter | 핵심 지표 | 판정 기준 |
+|------|----------|---------|
+| 400 | contact_target_band reward 추이 | RL/RR band 진입 확인 |
+| 500 | F-R contact gap | < 0.25 목표 (V29는 0.36) |
+| 600 | gait | ⭐ B 유지 (V29는 625에서 enforce로 퇴행) |
+| 800 | residency enforce 시작 | RR residency > 0.10 이어야 진입 의미 있음 |
+| 1000 | RR residency | > 0.20 목표 (V29는 0.134) |
+| 1000 | gait | ⭐ B 유지 (V29는 🟡 C로 퇴행) |
+
+### 경보 기준
+
+| 지표 | 경보 | 액션 |
+|------|------|------|
+| 생존율 (iter 400+) | < 80% | front_rear penalty 완화 검토 |
+| F-R contact gap (iter 600) | > 0.30 | balance penalty 효과 없음 → 재검토 |
+| RR residency (iter 1000+) | < 0.15 🔴 | V29.2 실패 판정 |
+| gait (iter 800) | 🟡 C | enforce 타이밍 추가 지연 검토 |
+
+---
+
+## 6. 현재 브랜치 상태
+
 ```
-1. supervisor.cmd 실행 (supervisor 재시작)
-2. Telegram /start 명령
-3. heartbeat 확인 (iter 100, 200, 300 초기 상태)
-```
-
-### iter 600 체크포인트
-heartbeat에서:
-- FL/FR contact < 0.78 (band_high 효과 시작)
-- rear_usage_diff < 0.10
-- swing_gate reward 증가 방향 확인
-
-### iter 900 핵심 판정
-- FL/FR contact < 0.65 ✅
-- FL swing > 0.25, FR swing > 0.25 ✅
-- front-rear diff < 0.25 ✅
-- diagonal_coupling_raw > 0.60 ✅
-
----
-
-## 5. 실행/검증 명령
-
-### heartbeat 로그 분석 (Python)
-```bash
-python3 -c "
-import json, sys
-sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
-path = 'logs/rsl_rl/spot_micro_flat/<RUN_NAME>/heartbeat_reports.jsonl'
-with open(path, encoding='utf-8') as f:
-    records = [json.loads(l) for l in f if l.strip()]
-for r in records:
-    k = r['kpi_snapshot']
-    print(f'iter {k[\"iter\"]}: reward={k[\"reward\"]:.1f} FL={k.get(\"contact_ratio_fl\",0):.3f} FR={k.get(\"contact_ratio_fr\",0):.3f} RL={k.get(\"contact_ratio_rl\",0):.3f} RR={k.get(\"contact_ratio_rr\",0):.3f} fl_sw={k.get(\"swing_time_fl\",0):.3f} fr_sw={k.get(\"swing_time_fr\",0):.3f} rdiff={k.get(\"rear_left_right_usage_diff\",0):.3f} valid={k.get(\"limb_validity_pass\")}')
-"
+브랜치: develop
+최신 커밋: ff62aff — Add V29 analysis and V29.2 plan documents
+원격 동기화: ✅ push 완료
 ```
 
-### 최신 run 디렉토리 확인
-```bash
-ls -lt logs/rsl_rl/spot_micro_flat/ | head -5
+### 최근 커밋 목록
+```
+ff62aff Add V29 analysis and V29.2 plan documents
+483c627 Implement V29.2: fix residency band + front dominance penalty
+08434ff Fix version mismatch: auto fresh-start on TRAIN_VERSION upgrade
+b9c2d17 Add train_version to supervisor status output
+a802076 Remove heartbeat launch polling — fire-and-forget
+1579805 Optimize supervisor/heartbeat response latency
 ```
 
 ---
 
-## 6. 주의사항
+## 7. 주의사항
 
 ### 운영
 - **supervisor는 반드시 프로젝트 루트의 `supervisor.cmd`로만 실행**
 - **rewards.py / env_cfg.py 수정 시 supervisor 재시작 필수**
-- **실행 중인 훈련은 명시적 요청 없이 중단/재시작 금지**
+- **WSL2에서 git push**: `cmd.exe /c "cd /d D:\project\spot_micro_rl && git push origin develop"`
 
 ### 코드
 - **버전별 상수는 TRAINING_CONFIG에서 읽어야 함** (rewards.py에 하드코딩 금지)
-- **TRAIN_VERSION 동기화 항상 검증**
+- **TRAIN_VERSION 변경 시 supervisor 재시작** — 실행 중 프로세스는 구버전 코드 사용
 
-### V29 설계 원칙
-- **band_high=0.65는 residency 내부 구조** — cap 패널티(외부)와 다름
-  - FL contact 0.65 초과 시 residency reward 0 → 고착이 손해
-- **swing_gate_max=15.0** (분석팀 제안 12.0보다 강하게, 20.0보다 약하게)
-- **stride_length target=0.10m** (V17 0.06m 대비 보폭 목표 확대)
-- **stability penalty 과강도 시 첫 조정 후보**: lin_vel_z_l2, ang_vel_xy_l2 모두 강화 — iter 500 전 reward 급락 시 -1.0/-0.5로 되돌릴 것
+### V29.2 설계 원칙
+- `per_leg_contact_target_band` band_high=0.75 → RL/RR(0.49)이 band 안 → 양의 gradient
+- `front_rear_support_balance_penalty` weight=-4.0 → F-R gap 0.36 즉각 패널티
+- enforce 타이밍 iter 800 → gait 안정화 충분히 확보 후 잔류 학습
 
 ### 참고 문서
-- `plan/V29_PLAN.md` — V29 설계 전체 **(필독)**
-- `plan/V28.3_ANALYSIS.md` — V28.3 실패 분석 (band_high 부재 근본 원인)
+- `plan/V29_ANALYSIS.md` — V29 실패 상세 분석
+- `plan/V29.2_PLAN.md` — V29.2 설계 및 성공 기준
+- `plan/V29_PLAN.md` — V29 원래 설계
 
 ---
 
-## 현재 브랜치 상태
+## 8. V29 실측 참고값 (iter 1000, 훈련 종료)
 
-```
-브랜치: develop
-최신 커밋: 0d57630 — Implement V29: residency band_high + stride_length + swing_gate_velocity
-원격 동기화: ✅ push 완료
-```
-
-### V28.3 실측 참고값 (iter 2200, 훈련 종료)
-| 지표 | 값 |
-|------|-----|
-| reward | ~580 |
-| FL contact / swing | 0.83~0.88 / 0.11~0.16 |
-| FR contact / swing | 0.83~0.88 / 0.11~0.16 |
-| RL contact / swing | ~0.50 / ~0.50 |
-| RR contact / swing | ~0.49 / ~0.51 |
-| rear_usage_diff | ~0.012 |
-| front-rear diff | ~0.37 |
-| 결과 | front 고착 미해결 → 실패 |
+| 지표 | V29 실측 | V29.2 목표 |
+|------|----------|-----------|
+| mean reward | 169 (max 303 @ iter 502) | > 280 지속 |
+| FL/FR contact | 0.845 | < 0.80 |
+| RL/RR contact | 0.487 | > 0.55 |
+| F-R gap | 0.358 | < 0.20 |
+| RR residency | 0.134 | > 0.20 |
+| gait @ iter 1000 | 🟡 C | ⭐ B |
