@@ -137,24 +137,73 @@ TASK = _env.get("TASK", "Isaac-Velocity-Flat-SpotMicro-v0")
 LOG_SUBDIR = _env.get("LOG_SUBDIR", "spot_micro_flat")
 ISAAC_LAB = _env.get("ISAAC_LAB_PATH", r"C:\IsaacLab\isaaclab.bat")
 CONDA_ENV_NAME = _env.get("CONDA_ENV_NAME") or os.environ.get("CONDA_DEFAULT_ENV", "env_isaaclab")
-TRAIN_VERSION = _env.get("TRAIN_VERSION") or os.environ.get("TRAIN_VERSION") or ""
-if not TRAIN_VERSION:
-    raise EnvironmentError(
-        "[common.py] TRAIN_VERSION이 설정되지 않았습니다.\n"
-        f"  .env 파일({ENV_FILE})에 TRAIN_VERSION=V28.1 형식으로 추가하거나\n"
-        "  환경변수 TRAIN_VERSION을 설정한 후 다시 실행하세요."
+def _read_env_cfg_train_version() -> str:
+    """env_cfg.py 소스코드에서 TRAIN_VERSION을 직접 파싱 (권위있는 소스).
+
+    .env나 환경변수는 stale할 수 있으므로, 실제 훈련 코드가 사용하는
+    env_cfg.py를 직접 읽어 TRAIN_VERSION을 추출한다.
+    """
+    import re as _re
+    cfg_path = os.path.join(
+        PROJECT_ROOT, "source", "spot_micro_rl", "spot_micro_rl",
+        "tasks", "manager_based", "spot_micro_rl", "spot_micro_rl_env_cfg.py",
     )
-def reload_train_version() -> str:
-    """최신 .env / 환경변수에서 TRAIN_VERSION을 다시 읽어 common.TRAIN_VERSION을 갱신."""
-    import common as _self
-    fresh = _load_env(ENV_FILE)
-    ver = fresh.get("TRAIN_VERSION") or os.environ.get("TRAIN_VERSION") or ""
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            for line in f:
+                m = _re.match(r'^TRAIN_VERSION\s*=\s*["\'](.+?)["\']', line)
+                if m:
+                    return m.group(1)
+    except Exception as e:
+        print(f"[common.py] WARNING: env_cfg.py 읽기 실패: {e}")
+    return ""
+
+
+def _resolve_train_version(context: str = "init") -> str:
+    """TRAIN_VERSION을 결정하는 단일 진입점.
+
+    우선순위:
+      1. env_cfg.py (훈련 코드의 권위있는 소스) — 항상 우선
+      2. .env / 환경변수 — fallback (env_cfg.py 읽기 실패 시)
+
+    두 소스가 다를 경우 WARNING을 출력한다.
+    silent mismatch가 가장 위험하므로 불일치는 반드시 노출.
+    """
+    cfg_ver = _read_env_cfg_train_version()
+    env_ver = _load_env(ENV_FILE).get("TRAIN_VERSION") or os.environ.get("TRAIN_VERSION") or ""
+
+    if cfg_ver and env_ver and cfg_ver != env_ver:
+        print(
+            f"\n{'!' * 60}\n"
+            f"[common.py] ⚠️  TRAIN_VERSION 불일치 [{context}]\n"
+            f"  env_cfg.py (권위):  {cfg_ver}\n"
+            f"  .env / 환경변수:    {env_ver}\n"
+            f"  → env_cfg.py 기준 {cfg_ver}을 사용합니다.\n"
+            f"  → .env를 {cfg_ver}로 업데이트하세요: TRAIN_VERSION={cfg_ver}\n"
+            f"{'!' * 60}\n"
+        )
+
+    ver = cfg_ver or env_ver
     if not ver:
         raise EnvironmentError(
-            "[common.py] TRAIN_VERSION이 설정되지 않았습니다.\n"
-            f"  .env 파일({ENV_FILE})에 TRAIN_VERSION=V28.1 형식으로 추가하거나\n"
-            "  환경변수 TRAIN_VERSION을 설정한 후 다시 실행하세요."
+            "[common.py] TRAIN_VERSION을 결정할 수 없습니다.\n"
+            f"  env_cfg.py 경로를 확인하거나 .env에 TRAIN_VERSION=VXX 형식으로 추가하세요.\n"
+            f"  env_cfg.py: {os.path.join(PROJECT_ROOT, 'source/spot_micro_rl/spot_micro_rl/tasks/manager_based/spot_micro_rl/spot_micro_rl_env_cfg.py')}"
         )
+    return ver
+
+
+TRAIN_VERSION = _resolve_train_version(context="startup")
+
+
+def reload_train_version() -> str:
+    """env_cfg.py (권위있는 소스)에서 TRAIN_VERSION을 다시 읽어 common.TRAIN_VERSION을 갱신.
+
+    .env가 stale한 경우에도 올바른 버전을 반환한다.
+    불일치 감지 시 WARNING을 출력하여 silent failure를 방지한다.
+    """
+    import common as _self
+    ver = _resolve_train_version(context="reload")
     _self.TRAIN_VERSION = ver
     return ver
 

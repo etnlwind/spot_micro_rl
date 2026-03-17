@@ -784,7 +784,22 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                     # /start: 버전이 동일한 경우에만 checkpoint 덮어쓰기 확인 요청.
                     # 버전이 다르면 (예: V27.1b → V28) 확인 없이 바로 fresh start.
                     if command == "start":
-                        common.reload_train_version()  # .env에서 최신 TRAIN_VERSION 재로드
+                        # ── 버전 검증: env_cfg.py(권위) vs .env 불일치 체크 ──
+                        # reload_train_version()은 env_cfg.py를 우선 읽고 .env와 불일치 시 WARNING 출력
+                        cfg_ver_before = common._read_env_cfg_train_version()
+                        env_ver_before = common._load_env(common.ENV_FILE).get("TRAIN_VERSION", "")
+                        if cfg_ver_before and env_ver_before and cfg_ver_before != env_ver_before:
+                            common.send_text(
+                                f"⚠️ <b>버전 불일치 감지 — 훈련을 중단합니다</b>\n"
+                                f"<code>env_cfg.py: {cfg_ver_before}</code>\n"
+                                f"<code>.env:       {env_ver_before}</code>\n\n"
+                                f".env의 TRAIN_VERSION을 <b>{cfg_ver_before}</b>로 수정한 뒤 다시 /start 하세요.\n"
+                                f"<i>(자동 수정하려면 /fix_version 명령)</i>",
+                                common.SUPERVISOR_LOG,
+                                parse_mode="HTML",
+                            )
+                            continue
+                        common.reload_train_version()  # env_cfg.py 기준으로 TRAIN_VERSION 갱신
                         _state = common.load_state()
                         state_ckpt = _state.get("active_checkpoint") or ""
                         _active_run_dir = common.resolve_active_run_dir()
