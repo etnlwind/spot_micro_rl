@@ -748,6 +748,7 @@ def _update_v281_contact_ema(
     metrics: dict,
     band_low: float,
     ema_alpha: float,
+    band_high: float = 1.0,
 ) -> None:
     """contact EMA를 이 step에서 아직 업데이트하지 않은 경우에만 갱신."""
     current_step = env.common_step_counter
@@ -757,7 +758,7 @@ def _update_v281_contact_ema(
     contact_tensor = torch.stack(
         [metrics[f"contact_ratio_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
     )  # (N, 4)
-    in_band = (contact_tensor >= band_low).float()
+    in_band = ((contact_tensor >= band_low) & (contact_tensor <= band_high)).float()
     for i, s in enumerate(_V23_LEG_SUFFIXES):
         key = f"contact_{s}"
         env._v281_residency_ema[key].mul_(1.0 - ema_alpha).add_(in_band[:, i] * ema_alpha)
@@ -768,6 +769,7 @@ def _update_v281_prop_ema(
     metrics: dict,
     band_low: float,
     ema_alpha: float,
+    band_high: float = 1.0,
 ) -> None:
     """propulsion EMA를 이 step에서 아직 업데이트하지 않은 경우에만 갱신."""
     current_step = env.common_step_counter
@@ -777,7 +779,7 @@ def _update_v281_prop_ema(
     prop_tensor = torch.stack(
         [metrics[f"propulsion_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
     )  # (N, 4)
-    in_band = (prop_tensor >= band_low).float()
+    in_band = ((prop_tensor >= band_low) & (prop_tensor <= band_high)).float()
     for i, s in enumerate(_V23_LEG_SUFFIXES):
         key = f"prop_{s}"
         env._v281_residency_ema[key].mul_(1.0 - ema_alpha).add_(in_band[:, i] * ema_alpha)
@@ -792,6 +794,7 @@ def _update_v281_usage_ema(
     propulsion_target: float,
     leg_lift_target: float,
     clearance_target: float,
+    band_high: float = 1.0,
 ) -> None:
     """usage EMA를 이 step에서 아직 업데이트하지 않은 경우에만 갱신."""
     current_step = env.common_step_counter
@@ -802,7 +805,7 @@ def _update_v281_usage_ema(
         metrics, contact_target, propulsion_target, leg_lift_target, clearance_target
     )
     in_band = torch.stack(
-        [(usage_scores[s] >= band_low).float() for s in _V23_LEG_SUFFIXES], dim=1
+        [((usage_scores[s] >= band_low) & (usage_scores[s] <= band_high)).float() for s in _V23_LEG_SUFFIXES], dim=1
     )  # (N, 4)
     for i, s in enumerate(_V23_LEG_SUFFIXES):
         key = f"usage_{s}"
@@ -812,6 +815,7 @@ def _update_v281_usage_ema(
 def per_leg_contact_band_residency_reward(
     env: ManagerBasedRLEnv,
     band_low: float = 0.20,
+    band_high: float = 1.0,
     ema_alpha: float = 0.05,
     min_vel: float = 0.05,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -821,12 +825,13 @@ def per_leg_contact_band_residency_reward(
     순간 진입이 아니라 episode 내 장기 체류를 유도.
     EMA는 per-env, per-episode 상태로 관리 (reset 시 초기화).
     relay: early(600→800→1000) + late(800→1000→유지) curriculum으로 제어.
+    V29: band_high 추가 (default=1.0 하위 호환). 0.65 설정 시 앞발 고착 억제.
     """
     _ensure_v281_residency_state(env)
     metrics = compute_v23_raw_metrics(env)
     if not metrics:
         return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
-    _update_v281_contact_ema(env, metrics, band_low, ema_alpha)
+    _update_v281_contact_ema(env, metrics, band_low, ema_alpha, band_high)
     ema_tensor = torch.stack(
         [env._v281_residency_ema[f"contact_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
     )  # (N, 4)
@@ -836,6 +841,7 @@ def per_leg_contact_band_residency_reward(
 def per_leg_propulsion_band_residency_reward(
     env: ManagerBasedRLEnv,
     band_low: float = 0.15,
+    band_high: float = 1.0,
     ema_alpha: float = 0.05,
     min_vel: float = 0.05,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -843,12 +849,13 @@ def per_leg_propulsion_band_residency_reward(
     """V28.1: 각 다리의 propulsion이 band 안에 지속 체류한 비율(EMA)을 보상.
 
     contact residency와 함께 작동하여 "접지+추진 동시 유지"를 장기 유도.
+    V29: band_high 추가 (default=1.0 하위 호환).
     """
     _ensure_v281_residency_state(env)
     metrics = compute_v23_raw_metrics(env)
     if not metrics:
         return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
-    _update_v281_prop_ema(env, metrics, band_low, ema_alpha)
+    _update_v281_prop_ema(env, metrics, band_low, ema_alpha, band_high)
     ema_tensor = torch.stack(
         [env._v281_residency_ema[f"prop_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
     )  # (N, 4)
@@ -858,6 +865,7 @@ def per_leg_propulsion_band_residency_reward(
 def limb_usage_band_residency_reward(
     env: ManagerBasedRLEnv,
     band_low: float = 0.20,
+    band_high: float = 1.0,
     ema_alpha: float = 0.05,
     contact_target: float = 0.5,
     propulsion_target: float = 0.30,
@@ -866,13 +874,15 @@ def limb_usage_band_residency_reward(
     min_vel: float = 0.05,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """V28.1: 각 다리의 usage_proxy가 band 안에 지속 체류한 비율(EMA)을 보상."""
+    """V28.1: 각 다리의 usage_proxy가 band 안에 지속 체류한 비율(EMA)을 보상.
+    V29: band_high 추가 (default=1.0 하위 호환).
+    """
     _ensure_v281_residency_state(env)
     metrics = compute_v23_raw_metrics(env)
     if not metrics:
         return torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
     _update_v281_usage_ema(
-        env, metrics, band_low, ema_alpha, contact_target, propulsion_target, leg_lift_target, clearance_target
+        env, metrics, band_low, ema_alpha, contact_target, propulsion_target, leg_lift_target, clearance_target, band_high
     )
     ema_tensor = torch.stack(
         [env._v281_residency_ema[f"usage_{s}"] for s in _V23_LEG_SUFFIXES], dim=1
@@ -2297,6 +2307,65 @@ def stride_length_reward(
     return reward * vel_gate
 
 
+def swing_quality_gated_velocity(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_swing_ratio: float = 0.15,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """스윙 품질 게이티드 속도 보상 (V29 신규).
+
+    4발 모두 최소 swing ratio 이상 들어올릴 때만 속도를 보상한다.
+    앞발만 땅에 붙이고 뒷발만 스윙하는 벌레걸음을 원천 차단.
+
+    보상값 = min(4발 swing_ratio) × heading_velocity
+      - min() 은 가장 덜 스윙하는 발이 bottleneck이 됨
+      - 4발 모두 min_swing_ratio 이상이어야 의미 있는 보상
+
+    Args:
+        sensor_cfg: 발 접촉 센서 설정
+        asset_cfg: 로봇 설정
+        contact_threshold: 접촉 판정 임계값
+        min_swing_ratio: 모든 발에 요구되는 최소 swing ratio
+        min_vel: 전진 속도 최소 게이팅 문턱값
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    is_contact = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()
+
+    num_envs = is_contact.shape[0]
+
+    # swing ratio EMA 상태 초기화
+    if not hasattr(env, "_swing_gate_ema"):
+        env._swing_gate_ema = torch.full((num_envs, 4), 0.5, device=is_contact.device)
+
+    if env._swing_gate_ema.shape[0] != num_envs:
+        env._swing_gate_ema = torch.full((num_envs, 4), 0.5, device=is_contact.device)
+
+    # 에피소드 리셋
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        env._swing_gate_ema[reset_mask] = 0.5
+
+    # swing = 1 - contact, EMA로 부드럽게
+    swing = 1.0 - is_contact  # (num_envs, 4)
+    env._swing_gate_ema = 0.95 * env._swing_gate_ema + 0.05 * swing
+
+    # 4발 중 최솟값 — 가장 적게 스윙하는 발이 bottleneck
+    min_swing = env._swing_gate_ema.min(dim=1).values  # (num_envs,)
+
+    # heading velocity (x 방향)
+    robot: Articulation = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_x_clamped = torch.clamp(vel_x, 0.0, None)
+
+    # min_swing_ratio 이하이면 0 (hard gate)
+    swing_gate = torch.clamp((min_swing - min_swing_ratio) / (0.5 - min_swing_ratio + 1e-6), 0.0, 1.0)
+
+    return swing_gate * vel_x_clamped
+
+
 # ============================================================
 # V20: Soft-Ramp Reward Weight Curriculum (STAND → WALK → TROT)
 # Hard phase switch를 선형 보간 ramp로 대체하여 critic shock 방지.
@@ -2434,12 +2503,12 @@ def _curriculum_apply_v281_weights(
     # V28.2: rear pair contact diff penalty alpha + max
     rear_contact_diff_alpha: float = 0.0,
     rear_contact_diff_max: float = 0.0,
-    # V28.3: front pair contact cap penalty alpha + max
-    front_contact_cap_alpha: float = 0.0,
-    front_contact_cap_max: float = 0.0,
-    # V28.3: front-rear balance penalty alpha + max
-    front_balance_alpha: float = 0.0,
-    front_balance_max: float = 0.0,
+    # V29: stride length reward alpha + max
+    stride_length_alpha: float = 0.0,
+    stride_length_max: float = 0.0,
+    # V29: swing quality gated velocity reward alpha + max
+    swing_gate_alpha: float = 0.0,
+    swing_gate_max: float = 0.0,
 ) -> None:
     """V28.1 신규 term들의 가중치를 relay/ramp alpha 기반으로 적용."""
     # 1. Residency rewards (relay: early + late 합산 → 단일 term weight)
@@ -2501,23 +2570,23 @@ def _curriculum_apply_v281_weights(
         except Exception:
             pass
 
-    # 6. V28.3: Front pair contact cap penalty (simple ramp)
-    if abs(front_contact_cap_max) > 1e-9:
-        front_cap_w = front_contact_cap_alpha * front_contact_cap_max
+    # 6. V29: Stride length reward (simple ramp)
+    if abs(stride_length_max) > 1e-9:
+        stride_w = stride_length_alpha * stride_length_max
         try:
-            cfg = env.reward_manager.get_term_cfg("front_pair_contact_cap")
-            cfg.weight = front_cap_w
-            env.reward_manager.set_term_cfg("front_pair_contact_cap", cfg)
+            cfg = env.reward_manager.get_term_cfg("stride_length")
+            cfg.weight = stride_w
+            env.reward_manager.set_term_cfg("stride_length", cfg)
         except Exception:
             pass
 
-    # 7. V28.3: Front-rear balance penalty (simple ramp)
-    if abs(front_balance_max) > 1e-9:
-        front_bal_w = front_balance_alpha * front_balance_max
+    # 7. V29: Swing quality gated velocity reward (simple ramp)
+    if abs(swing_gate_max) > 1e-9:
+        swing_gate_w = swing_gate_alpha * swing_gate_max
         try:
-            cfg = env.reward_manager.get_term_cfg("front_rear_support_balance_penalty")
-            cfg.weight = front_bal_w
-            env.reward_manager.set_term_cfg("front_rear_support_balance_penalty", cfg)
+            cfg = env.reward_manager.get_term_cfg("swing_gate_velocity")
+            cfg.weight = swing_gate_w
+            env.reward_manager.set_term_cfg("swing_gate_velocity", cfg)
         except Exception:
             pass
 
@@ -2901,14 +2970,14 @@ def reward_weight_curriculum(
     rear_contact_diff_ramp_start: int = 300,
     rear_contact_diff_ramp_end: int = 600,
     rear_contact_diff_max: float = 0.0,
-    # V28.3: front pair contact cap penalty ramp
-    front_contact_cap_ramp_start: int = 700,
-    front_contact_cap_ramp_end: int = 1000,
-    front_contact_cap_max: float = 0.0,
-    # V28.3: front-rear balance penalty ramp
-    front_balance_ramp_start: int = 700,
-    front_balance_ramp_end: int = 1000,
-    front_balance_max: float = 0.0,
+    # V29: stride length reward ramp
+    stride_length_ramp_start: int = 400,
+    stride_length_ramp_end: int = 700,
+    stride_length_max: float = 0.0,
+    # V29: swing quality gated velocity reward ramp
+    swing_gate_ramp_start: int = 600,
+    swing_gate_ramp_end: int = 900,
+    swing_gate_max: float = 0.0,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -2972,11 +3041,11 @@ def reward_weight_curriculum(
         env._crr_rear_contact_diff_alpha = _curriculum_target_alpha(
             iteration, rear_contact_diff_ramp_start, rear_contact_diff_ramp_end
         )
-        env._crr_front_contact_cap_alpha = _curriculum_target_alpha(
-            iteration, front_contact_cap_ramp_start, front_contact_cap_ramp_end
+        env._crr_stride_length_alpha = _curriculum_target_alpha(
+            iteration, stride_length_ramp_start, stride_length_ramp_end
         )
-        env._crr_front_balance_alpha = _curriculum_target_alpha(
-            iteration, front_balance_ramp_start, front_balance_ramp_end
+        env._crr_swing_gate_alpha = _curriculum_target_alpha(
+            iteration, swing_gate_ramp_start, swing_gate_ramp_end
         )
         env._crr_last_update = iteration
         env._crr_gate_paused = False
@@ -3036,10 +3105,10 @@ def reward_weight_curriculum(
             coop_min_leg_factor_target=coop_min_leg_factor_target,
             rear_contact_diff_alpha=env._crr_rear_contact_diff_alpha,
             rear_contact_diff_max=rear_contact_diff_max,
-            front_contact_cap_alpha=env._crr_front_contact_cap_alpha,
-            front_contact_cap_max=front_contact_cap_max,
-            front_balance_alpha=env._crr_front_balance_alpha,
-            front_balance_max=front_balance_max,
+            stride_length_alpha=env._crr_stride_length_alpha,
+            stride_length_max=stride_length_max,
+            swing_gate_alpha=env._crr_swing_gate_alpha,
+            swing_gate_max=swing_gate_max,
         )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
@@ -3056,8 +3125,8 @@ def reward_weight_curriculum(
         print(f"  rear_sym_ramp=[{rear_symmetry_ramp_start}~{rear_symmetry_ramp_end}], exit_ramp=[{exit_penalty_ramp_start}~{exit_penalty_ramp_end}] (V28.1)")
         print(f"  coop_min_leg_ramp=[{coop_min_leg_ramp_start}~{coop_min_leg_ramp_end}] target={coop_min_leg_factor_target:.2f} (V28.1)")
         print(f"  rear_contact_diff_ramp=[{rear_contact_diff_ramp_start}~{rear_contact_diff_ramp_end}] max={rear_contact_diff_max:.1f} (V28.2)")
-        print(f"  front_cap_ramp=[{front_contact_cap_ramp_start}~{front_contact_cap_ramp_end}] max={front_contact_cap_max:.1f} (V28.3)")
-        print(f"  front_bal_ramp=[{front_balance_ramp_start}~{front_balance_ramp_end}] max={front_balance_max:.1f} (V28.3)")
+        print(f"  stride_length_ramp=[{stride_length_ramp_start}~{stride_length_ramp_end}] max={stride_length_max:.1f} (V29)")
+        print(f"  swing_gate_ramp=[{swing_gate_ramp_start}~{swing_gate_ramp_end}] max={swing_gate_max:.1f} (V29)")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
         # INIT 시점 key weight 로깅
@@ -3102,8 +3171,8 @@ def reward_weight_curriculum(
     target_exit_penalty = _curriculum_target_alpha(iteration, exit_penalty_ramp_start, exit_penalty_ramp_end)
     target_coop_min_leg = _curriculum_target_alpha(iteration, coop_min_leg_ramp_start, coop_min_leg_ramp_end)
     target_rear_contact_diff = _curriculum_target_alpha(iteration, rear_contact_diff_ramp_start, rear_contact_diff_ramp_end)
-    target_front_contact_cap = _curriculum_target_alpha(iteration, front_contact_cap_ramp_start, front_contact_cap_ramp_end)
-    target_front_balance = _curriculum_target_alpha(iteration, front_balance_ramp_start, front_balance_ramp_end)
+    target_stride_length = _curriculum_target_alpha(iteration, stride_length_ramp_start, stride_length_ramp_end)
+    target_swing_gate = _curriculum_target_alpha(iteration, swing_gate_ramp_start, swing_gate_ramp_end)
 
     # 이미 target에 도달 → 스킵
     if (
@@ -3122,8 +3191,8 @@ def reward_weight_curriculum(
         and abs(env._crr_exit_penalty_alpha - target_exit_penalty) < 1e-6
         and abs(env._crr_coop_min_leg_alpha - target_coop_min_leg) < 1e-6
         and abs(env._crr_rear_contact_diff_alpha - target_rear_contact_diff) < 1e-6
-        and abs(env._crr_front_contact_cap_alpha - target_front_contact_cap) < 1e-6
-        and abs(env._crr_front_balance_alpha - target_front_balance) < 1e-6
+        and abs(env._crr_stride_length_alpha - target_stride_length) < 1e-6
+        and abs(env._crr_swing_gate_alpha - target_swing_gate) < 1e-6
     ):
         return None
 
@@ -3157,8 +3226,8 @@ def reward_weight_curriculum(
     max_step_exit = update_interval / max(1, exit_penalty_ramp_end - exit_penalty_ramp_start)
     max_step_coop_min_leg = update_interval / max(1, coop_min_leg_ramp_end - coop_min_leg_ramp_start)
     max_step_rear_contact_diff = update_interval / max(1, rear_contact_diff_ramp_end - rear_contact_diff_ramp_start)
-    max_step_front_cap = update_interval / max(1, front_contact_cap_ramp_end - front_contact_cap_ramp_start)
-    max_step_front_bal = update_interval / max(1, front_balance_ramp_end - front_balance_ramp_start)
+    max_step_stride_length = update_interval / max(1, stride_length_ramp_end - stride_length_ramp_start)
+    max_step_swing_gate = update_interval / max(1, swing_gate_ramp_end - swing_gate_ramp_start)
 
     new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
     new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
@@ -3178,8 +3247,8 @@ def reward_weight_curriculum(
     new_exit_penalty = min(target_exit_penalty, env._crr_exit_penalty_alpha + max_step_exit)
     new_coop_min_leg = min(target_coop_min_leg, env._crr_coop_min_leg_alpha + max_step_coop_min_leg)
     new_rear_contact_diff = min(target_rear_contact_diff, env._crr_rear_contact_diff_alpha + max_step_rear_contact_diff)
-    new_front_contact_cap = min(target_front_contact_cap, env._crr_front_contact_cap_alpha + max_step_front_cap)
-    new_front_balance = min(target_front_balance, env._crr_front_balance_alpha + max_step_front_bal)
+    new_stride_length = min(target_stride_length, env._crr_stride_length_alpha + max_step_stride_length)
+    new_swing_gate = min(target_swing_gate, env._crr_swing_gate_alpha + max_step_swing_gate)
 
     # 실제 변화 없으면 스킵
     if (
@@ -3198,8 +3267,8 @@ def reward_weight_curriculum(
         and abs(new_exit_penalty - env._crr_exit_penalty_alpha) < 1e-6
         and abs(new_coop_min_leg - env._crr_coop_min_leg_alpha) < 1e-6
         and abs(new_rear_contact_diff - env._crr_rear_contact_diff_alpha) < 1e-6
-        and abs(new_front_contact_cap - env._crr_front_contact_cap_alpha) < 1e-6
-        and abs(new_front_balance - env._crr_front_balance_alpha) < 1e-6
+        and abs(new_stride_length - env._crr_stride_length_alpha) < 1e-6
+        and abs(new_swing_gate - env._crr_swing_gate_alpha) < 1e-6
     ):
         return None
 
@@ -3221,8 +3290,8 @@ def reward_weight_curriculum(
     env._crr_exit_penalty_alpha = new_exit_penalty
     env._crr_coop_min_leg_alpha = new_coop_min_leg
     env._crr_rear_contact_diff_alpha = new_rear_contact_diff
-    env._crr_front_contact_cap_alpha = new_front_contact_cap
-    env._crr_front_balance_alpha = new_front_balance
+    env._crr_stride_length_alpha = new_stride_length
+    env._crr_swing_gate_alpha = new_swing_gate
 
     # ── 가중치 적용 ──
     _curriculum_apply_weights(
@@ -3281,10 +3350,10 @@ def reward_weight_curriculum(
         coop_min_leg_factor_target=coop_min_leg_factor_target,
         rear_contact_diff_alpha=new_rear_contact_diff,
         rear_contact_diff_max=rear_contact_diff_max,
-        front_contact_cap_alpha=new_front_contact_cap,
-        front_contact_cap_max=front_contact_cap_max,
-        front_balance_alpha=new_front_balance,
-        front_balance_max=front_balance_max,
+        stride_length_alpha=new_stride_length,
+        stride_length_max=stride_length_max,
+        swing_gate_alpha=new_swing_gate,
+        swing_gate_max=swing_gate_max,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──

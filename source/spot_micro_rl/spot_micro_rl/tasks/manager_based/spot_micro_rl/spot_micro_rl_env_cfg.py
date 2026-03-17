@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V28.3"
+TRAIN_VERSION = "V29"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -236,14 +236,14 @@ class SpotMicroRewardCurriculumCfg:
             "rear_contact_diff_ramp_start": 300,
             "rear_contact_diff_ramp_end": 600,
             "rear_contact_diff_max": -15.0,       # threshold 0.10, max -15.0
-            # V28.3: front pair contact cap penalty (신규, iter 700~1000)
-            "front_contact_cap_ramp_start": 700,
-            "front_contact_cap_ramp_end": 1000,
-            "front_contact_cap_max": -10.0,       # contact_cap=0.65, FL/FR 고착 억제
-            # V28.3: front-rear balance penalty 활성화 (iter 700~1000)
-            "front_balance_ramp_start": 700,
-            "front_balance_ramp_end": 1000,
-            "front_balance_max": -8.0,            # max_diff=0.30, 보조 신호 (cap의 ~14%)
+            # V29: stride length reward ramp (iter 400~700)
+            "stride_length_ramp_start": 400,
+            "stride_length_ramp_end": 700,
+            "stride_length_max": 12.0,            # 보폭 10cm 달성 시 최대 보상
+            # V29: swing quality gated velocity reward ramp (iter 600~900)
+            "swing_gate_ramp_start": 600,
+            "swing_gate_ramp_end": 900,
+            "swing_gate_max": 15.0,               # 4발 min swing × 속도 (swing_gate_max=15)
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -336,8 +336,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
 
         # 안정성 페널티
-        self.rewards.lin_vel_z_l2.weight = -0.7
-        self.rewards.ang_vel_xy_l2.weight = -0.2
+        self.rewards.lin_vel_z_l2.weight = -2.0   # V29: -0.7 → -2.0 (수직 진동 억제 강화)
+        self.rewards.ang_vel_xy_l2.weight = -1.0   # V29: -0.2 → -1.0 (몸통 흔들림 억제 강화)
         self.rewards.dof_torques_l2.weight = -3e-5
         self.rewards.dof_acc_l2.weight = -5e-6  # V17: -8e-8→-5e-6 (가속도 페널티 강화)
         # V17: 액션 변화율 페널티 대폭 강화 (빠른 떨림 물리적 차단)
@@ -705,9 +705,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.front_rear_support_balance_penalty = RewTerm(
             func=custom_mdp.front_rear_support_balance_penalty,
-            weight=0.0,  # V28.3: curriculum ramp으로 제어 (-8.0까지, iter 700~1000)
+            weight=0.0,
             params={
-                "max_diff": 0.30,   # V28.3: 0.50 → 0.30 (현재 diff=0.37 즉시 발동)
+                "max_diff": 0.50,   # V29: 원복 (V28.3에서 0.30으로 강화했으나 front_cap 삭제로 불필요)
                 "contact_target": 0.5,
                 "propulsion_target": 0.30,
                 "leg_lift_target": 0.18,
@@ -794,7 +794,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.per_leg_contact_band_residency_reward,
             weight=0.0,  # curriculum relay ramp으로 제어
             params={
-                "band_low": 0.20,
+                "band_low": 0.25,   # V29: 0.20 → 0.25 (더 강한 최소 요건)
+                "band_high": 0.65,  # V29 신규: 상한 추가 (FL/FR 0.83+ 고착 구조 해제)
                 "ema_alpha": 0.05,
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -805,6 +806,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             weight=0.0,
             params={
                 "band_low": 0.15,
+                "band_high": 0.65,  # V29 신규: 상한 추가
                 "ema_alpha": 0.05,
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -815,6 +817,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             weight=0.0,
             params={
                 "band_low": 0.20,
+                "band_high": 0.65,  # V29 신규: 상한 추가
                 "ema_alpha": 0.05,
                 "contact_target": 0.5,
                 "propulsion_target": 0.30,
@@ -847,14 +850,16 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V28.3: Front pair contact cap penalty (신규, iter 700~1000 ramp)
-        self.rewards.front_pair_contact_cap = RewTerm(
-            func=custom_mdp.front_pair_contact_cap_penalty,
-            weight=0.0,  # curriculum이 -10.0까지 ramp (iter 700~1000)
+        # V29: swing_gate_velocity (신규, iter 600~900 ramp)
+        self.rewards.swing_gate_velocity = RewTerm(
+            func=custom_mdp.swing_quality_gated_velocity,
+            weight=0.0,  # curriculum이 15.0까지 ramp (iter 600~900)
             params={
-                "contact_cap": 0.65,   # soft cap — 0.84+ 고착 억제용, 이상적 목표값 아님
-                "min_vel": 0.05,
+                "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "min_swing_ratio": 0.15,
+                "min_vel": 0.05,
             },
         )
 
@@ -923,13 +928,13 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ============================================================
         self.rewards.stride_length = RewTerm(
             func=custom_mdp.stride_length_reward,
-            weight=12.0,
+            weight=0.0,  # V29: curriculum ramp으로 제어 (iter 400~700), phase weights 참고
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
                 "contact_threshold": 1.0,
-                "target_stride": 0.06,
+                "target_stride": 0.10,  # V29: 0.06 → 0.10 (보폭 목표 확대)
                 "min_vel": 0.05,
             },
         )
