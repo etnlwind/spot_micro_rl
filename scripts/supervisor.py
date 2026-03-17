@@ -155,8 +155,9 @@ def _is_duplicate_command(chat_id: str | None, user_id: str | None, command_key:
 
 
 def _send_notice(title: str, body: str, icon: str = "👮") -> None:
+    ver = common.TRAIN_VERSION or "?"
     common.send_text(
-        f"{icon} <b>SUPERVISOR — {title}</b>\n<i>{body}</i>",
+        f"{icon} <b>SUPERVISOR — {title}</b>  <code>[{ver}]</code>\n<i>{body}</i>",
         common.SUPERVISOR_LOG,
         parse_mode="HTML",
     )
@@ -712,7 +713,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
     import datetime as _dt
     _sv_ver = _dt.datetime.fromtimestamp(os.path.getmtime(__file__)).strftime("%Y-%m-%d %H:%M")
     common.send_text(
-        f"👮 <b>SUPERVISOR ACTIVE</b>  version: <code>{_sv_ver}</code>\n\n"
+        f"👮 <b>SUPERVISOR ACTIVE</b>  version: <code>{_sv_ver}</code>  train: <code>{common.TRAIN_VERSION}</code>\n\n"
         + common.help_text(),
         common.SUPERVISOR_LOG,
         parse_mode="HTML",
