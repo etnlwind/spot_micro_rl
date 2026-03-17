@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V26.1 (Symmetric Existence Floor + Load Sharing) 훈련 진행 중
+**현재 상태**: V29 (Residency Band-High + Stride Length + Swing Gate Velocity) 훈련 준비 완료
 
 ### 기술 스택
 
@@ -211,11 +211,17 @@ python scripts/supervisor.py
 
 ### 현재 운영 기준
 
-- 학습 버전: `V26.1` (Symmetric Existence Floor + Load Sharing)
+- 학습 버전: `V29` (Residency Band-High + Stride Length + Swing Gate Velocity)
 - active 운영 스크립트: `scripts/supervisor.py`, `scripts/heartbeat.py`, `scripts/common.py`
 - 접촉 해석 기본값: `toe_link`
-- 참고 문서: `plan/V26.1_PLAN.md` (구현), `plan/V26_ANALYSIS.md` (설계 철학)
-- 이전 버전 문서: `plan/V25_ANALYSIS.md` (FAILED), `plan/V24_PLAN.md`, `plan/V23_PLAN.md`
+- 참고 문서: `plan/V29_PLAN.md` (구현), `plan/V28.3_ANALYSIS.md` (실패 분석)
+- 이전 버전 문서: `plan/V28.3_ANALYSIS.md` (front cap 실패), `plan/V28_HISTORY.md`, `plan/V26_ANALYSIS.md`
+
+#### Supervisor 개선사항 (V28~V29)
+
+- **버전 자동 동기화**: `env_cfg.py`가 TRAIN_VERSION 단일 권위 소스. `.env` 불일치 시 시작 시 자동 동기화 (silent failure 방지)
+- **중복 프로세스 차단**: `--listen` 시 기존 supervisor/heartbeat 자동 종료 후 PID lock 해제
+- **모든 알림에 버전 표시**: Telegram 메시지에 `[V29]` 태그 명시
 
 ---
 
@@ -235,32 +241,32 @@ python scripts/supervisor.py
 
 **안전장치**: ep_len < 200이면 ramp 일시 정지 (metric gating)
 
-### V26.1 Symmetric Existence Floor + Load Sharing (현재)
+### V29 Reward 3-Layer Architecture (현재)
 
-모든 다리에 동일 기준을 적용하는 8개 symmetric reward term. V25의 비대칭 패널티가 collapse 위치만 이동시킨 근본 원인을 해결.
+**Layer 1: Residency Band** — 4발 contact/propulsion/usage를 [band_low, band_high] 밴드 내 유지
 
-**Existence Floor (iter 0~200 ramp, initial→final)**
-
-| reward | final weight | 역할 |
+| reward | curriculum ramp | 역할 |
 |--------|--------|------|
-| `per_leg_contact_floor_penalty` | -20.0 | 4개 다리 각각 contact_ratio < 0.10 시 페널티 |
-| `per_leg_propulsion_floor_penalty` | -15.0 | 4개 다리 각각 propulsion < 0.05 시 페널티 (fake contact 차단) |
-| `limb_usage_min_penalty` | -15.0 | 4개 다리 중 최소 usage < 0.10 시 페널티 |
+| `per_leg_contact_band_residency_reward` | curriculum | 4발 contact EMA를 [0.25, 0.65] 밴드 내 유지 |
+| `per_leg_propulsion_band_residency_reward` | curriculum | 4발 propulsion EMA를 [0.15, 0.65] 밴드 내 유지 |
+| `limb_usage_band_residency_reward` | curriculum | 4발 usage EMA를 [0.15, 0.65] 밴드 내 유지 |
 
-**Load Sharing (iter 200~350 ramp, 0→final)**
+**band_high=0.65의 의미**: FL contact > 0.65이면 residency reward = 0 → 앞발 고착이 손해가 되는 reward 내부 구조 (V28.3의 외부 cap 패널티 방식 대비 근본 해결)
 
-| reward | final weight | 역할 |
-|--------|--------|------|
-| `rear_left_right_usage_diff_penalty` | -10.0 | rear 좌우 usage 편중 억제 (max_diff=0.40) |
-| `front_left_right_usage_diff_penalty` | -8.0 | front 좌우 usage 편중 억제 (max_diff=0.40) |
-| `rear_left_right_propulsion_diff_penalty` | -8.0 | rear 좌우 추진력 편중 억제 (max_diff=0.40) |
-| `front_rear_support_balance_penalty` | -5.0 | 앞/뒤 전체 지지 편중 억제 (max_diff=0.50) |
-
-**Gait Exploit 차단**
+**Layer 2: Symmetry Enforcement** — rear pair 대칭 + front-rear 균형
 
 | reward | weight | 역할 |
 |--------|--------|------|
-| `diagonal_coupling_soft_gate_reward` | +25.0 | collapse 다리 포함 diagonal 보상 soft attenuation (min_contact=0.15) |
+| `rear_pair_contact_diff_penalty` | -12.0 | rear 좌우 contact 편중 억제 (V28.2 핵심) |
+| `front_rear_support_balance_penalty` | -5.0 | 앞/뒤 전체 지지 편중 억제 (max_diff=0.50) |
+| `diagonal_coupling_soft_gate_reward` | +25.0 | collapse 다리 포함 diagonal 보상 soft gating |
+
+**Layer 3: Gait Quality** — V29 신규 (stride + swing gate)
+
+| reward | curriculum ramp | 역할 |
+|--------|--------|------|
+| `stride_length_reward` | iter 400→700 (max 12.0) | 보폭 0.10m 목표 — 앞발만 접지한 벌레걸음 억제 |
+| `swing_quality_gated_velocity` | iter 600→900 (max 15.0) | 4발 min swing ratio ≥ 0.15일 때만 전진 보상 — 벌레걸음 원천 차단 |
 
 ### 리워드 함수 패턴
 
@@ -313,7 +319,12 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V23** | **03-12~** | **posture-first refinement, rear joint velocity 강화** | ✅ 완료 |
 | **V24** | **03-13~** | **Limb Validity Gating: rear-left collapse 차단, 좌우 비대칭 페널티, 자동 영상 리포트** | ✅ 완료 |
 | **V25** | **03-14~03-15** | **rear_left_contact_floor_penalty -60 직접 처방 (RL 회복, RR collapse 이동)** | ❌ 실패 (iter 400) |
-| **V26.1** | **03-15~** | **Symmetric Existence Floor + Load Sharing: 모든 다리 동일 기준, collapse 이동 차단** | 🔄 운영 중 |
+| **V26.1** | **03-15** | **Symmetric Existence Floor + Load Sharing: 모든 다리 동일 기준, collapse 이동 차단** | ✅ 완료 |
+| **V27** | **03-16** | **contact residency EMA + prop/usage band: 점진적 접촉 분포 유도** | ❌ 실패 (iter 1000 RL collapse) |
+| **V28** | **03-16** | **V27 재기동 + 하이퍼파라미터 조정** | ❌ 실패 (RR collapse) |
+| **V28.2** | **03-16** | **rear pair 대칭 강제 (rear_pair_contact_diff_penalty)** | ✅ 성공 (iter 1703 rear_usage_diff=0.012) |
+| **V28.3** | **03-17** | **front contact cap(-10.0) 추가** | ❌ 실패 (FL/FR contact 0.83~0.88 고착) |
+| **V29** | **03-17~** | **Residency band_high=0.65 + stride_length + swing_gate_velocity** | 🔄 훈련 준비 |
 
 ### 핵심 교훈
 
@@ -337,15 +348,11 @@ python scripts/analyze_v20.py
 ```
 
 분석/운영 문서:
-- `plan/V19_ANALYSIS.md`
-- `plan/V20_ANALYSIS.md`
-- `plan/V21_ANALYSIS.md`
-- `plan/V22_ANALYSIS.md`
-- `plan/V23_PLAN.md`
-- `plan/V24_PLAN.md`
-- `plan/V25_ANALYSIS.md` (FAILED — iter 400, RR collapse)
-- `plan/V26_ANALYSIS.md` (설계 철학 문서)
-- `plan/V26.1_PLAN.md` (현재 구현 — active)
+- `plan/V19_ANALYSIS.md` ~ `plan/V26_ANALYSIS.md`
+- `plan/V28_HISTORY.md` (V28 series 경과)
+- `plan/V28.3_ANALYSIS.md` (front cap 실패 근본 원인 분석)
+- `plan/V29_PLAN.md` (현재 구현 — active)
+- `plan/HANDOFF.md` (AI 세션 핸드오프 — 최신 상태 요약)
 
 ---
 

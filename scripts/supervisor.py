@@ -463,10 +463,7 @@ def _build_listen_command(args: argparse.Namespace) -> list[str]:
 def _run_supervisor_background(args: argparse.Namespace) -> int:
     if sys.platform != "win32":
         raise RuntimeError("background supervisor launch is only supported on Windows")
-    live_pid = common._read_live_pid_lock(common.SUPERVISOR_PID_FILE)
-    if live_pid:
-        _print_local(f"supervisor already running (pid {live_pid})")
-        return 0
+    _kill_existing_supervisor_and_heartbeat()  # 기존 supervisor/heartbeat 강제 종료 후 재시작
     child_env = dict(os.environ)
     child_env.pop(_BACKGROUND_LAUNCH_ENV_VAR, None)
     creationflags = 0

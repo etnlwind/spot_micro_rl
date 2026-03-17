@@ -42,6 +42,12 @@ regardless of the actual reward design.
 | V26.1 (common.py fix) | `4b07453` | 2026-03-15 08:33 | Fix V23_TRAIN_VERSION "V24"→"V26.1" in common.py; fixes Excel mislabeling |
 | V26.1 (rename) | `f91513d` | 2026-03-15 08:53 | Rename V23_TRAIN_VERSION → TRAIN_VERSION in common.py |
 | V26.1 (unified) | `fe396d9` | 2026-03-15 09:02 | Single-source TRAIN_VERSION = "V26.1" in common.py; TRAINING_CONFIG dict |
+| V27 | (commit) | 2026-03-16 | contact residency EMA + propulsion/usage band reward 구조 도입; TRAIN_VERSION V26.1→V27 |
+| V28 | (commit) | 2026-03-16 | V27 재기동 + hyperparameter 조정; TRAIN_VERSION V27→V28 |
+| V28.2 | `745d7b6` | 2026-03-16 | rear pair 대칭 강제 (rear_pair_contact_diff_penalty); TRAIN_VERSION V28→V28.2 |
+| V28.3 | `c50925f` | 2026-03-17 | front contact cap penalty 추가; TRAIN_VERSION V28.2→V28.3 |
+| V29 | `0d57630` | 2026-03-17 | residency band_high=0.65 + stride_length + swing_gate_velocity; TRAIN_VERSION V28.3→V29 |
+| V29 (reliability) | `f11242e` | 2026-03-17 | TRAIN_VERSION 단일 소스(env_cfg.py 권위), supervisor 중복 프로세스 자동 종료, 알림 버전 표시 |
 
 **Note**: env_cfg.py has `TRAIN_VERSION = "V26"` (reward design V26.1 base), common.py has `TRAIN_VERSION = "V26.1"`.
 V26 (01-46-44) and V26.1 (07-08-50) are **separate experiments**: V26 was an exploratory run with uncommitted code;
@@ -83,6 +89,10 @@ V26.1 was designed after analyzing V26 results and committed. The canonical labe
 | 2026-03-14_22-23-04 | **V25** | 400 | v24 | resume=false (fresh start); V25 리워드로 iter 400까지 진행 후 종료 |
 | 2026-03-15_01-46-44 | **V26** | 1000 | v24 | Exploratory V26 run; env_cfg.py TRAIN_VERSION V25→V26 uncommitted (+201 lines to rewards.py); Excel "v24" mislabeled; results used to refine V26.1 |
 | 2026-03-15_07-08-50 | **V26.1** | 1800 | V26.1 | First V26.1 run after 1c242fe commit (+330 lines to rewards.py); first run with correct Excel label |
+| 2026-03-16_xx-xx-xx | **V27** | ~1000 | V27 | V27 run; iter 1000 이후 RL collapse → 실패 |
+| 2026-03-16_xx-xx-xx | **V28** | ~? | V28 | V28 run (재기동 후 RR collapse) → 실패 |
+| 2026-03-16_xx-xx-xx | **V28.2** | ~1703 | V28.2 | rear pair 대칭 달성 (rear_usage_diff=0.012 at iter 1703) → 성공 |
+| 2026-03-17_xx-xx-xx | **V28.3** | ~2200 | V28.3 | front cap 추가; FL/FR contact 0.83~0.88 고착 → 실패 |
 
 ---
 
