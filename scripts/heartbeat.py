@@ -176,6 +176,7 @@ def main() -> None:
     parser.add_argument("--video_iter_step", type=int, default=common.VIDEO_REPORT_ITER_STEP, help="stop training and send video report every N iterations")
     parser.add_argument("--poll", type=int, default=common.HEARTBEAT_POLL_SECONDS, help="poll interval seconds")
     args = parser.parse_args()
+    common.release_pid_lock(common.HEARTBEAT_PID_FILE)  # stale lock 방어
     common.acquire_pid_lock(common.HEARTBEAT_PID_FILE, "heartbeat", common.HEARTBEAT_LOG)
     common.write_log(
         f"Heartbeat started | iter_step={args.iter_step} | video_iter_step={args.video_iter_step} | poll={args.poll}s",

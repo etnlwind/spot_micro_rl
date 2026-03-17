@@ -457,6 +457,8 @@ def _build_listen_command(args: argparse.Namespace) -> list[str]:
         str(args.iter_step),
         "--heartbeat-poll",
         str(args.heartbeat_poll),
+        "--launcher-pid",
+        str(os.getpid()),  # 자식이 런처를 kill 대상에서 제외하도록 전달
     ]
 
 
@@ -706,17 +708,18 @@ def _run_local_action(action: str, args: argparse.Namespace) -> int:
     raise RuntimeError(f"Unsupported action: {action}")
 
 
-def _kill_existing_supervisor_and_heartbeat() -> None:
+def _kill_existing_supervisor_and_heartbeat(exclude_pids: list[int] | None = None) -> None:
     """--listen 시작 전 기존 supervisor/heartbeat 프로세스를 모두 종료.
 
-    자기 자신(현재 PID)은 제외하고 종료하여 중복 실행을 원천 차단.
+    자기 자신(현재 PID)과 exclude_pids(런처 PID 등)는 제외하고 종료.
     """
     my_pid = os.getpid()
+    skip_pids = set(exclude_pids or []) | {my_pid}
     killed = []
 
     for entry in common.list_supervisor_processes():
         pid = int(entry.get("pid") or 0)
-        if pid and pid != my_pid:
+        if pid and pid not in skip_pids:
             try:
                 psutil.Process(pid).kill()
                 killed.append(f"supervisor pid={pid}")
@@ -726,7 +729,7 @@ def _kill_existing_supervisor_and_heartbeat() -> None:
 
     for entry in common.list_heartbeat_processes():
         pid = int(entry.get("pid") or 0)
-        if pid and pid != my_pid:
+        if pid and pid not in skip_pids:
             try:
                 psutil.Process(pid).kill()
                 killed.append(f"heartbeat pid={pid}")
@@ -748,7 +751,8 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
     session_id = uuid.uuid4().hex[:12]
     exit_reason = "loop-returned"
     exit_detail = ""
-    _kill_existing_supervisor_and_heartbeat()  # 기존 supervisor/heartbeat 강제 종료
+    launcher_pid = getattr(args, "launcher_pid", None) or 0
+    _kill_existing_supervisor_and_heartbeat(exclude_pids=[launcher_pid] if launcher_pid else None)
     common.release_pid_lock(common.SUPERVISOR_PID_FILE)  # stale lock 잔존 방어 (Windows PID 재사용 등)
     common.clear_supervisor_shutdown_request()
     common.acquire_pid_lock(common.SUPERVISOR_PID_FILE, "supervisor", common.SUPERVISOR_LOG)
@@ -947,6 +951,7 @@ def _build_parser() -> argparse.ArgumentParser:
     action_group.add_argument("--heartbeat-status", dest="action", action="store_const", const="heartbeat-status", help="heartbeat 상태 출력")
     action_group.add_argument("--v23-backfill", dest="action", action="store_const", const="v23-backfill", help="V23 per-run workbook cache backfill 후 master/review refresh")
     parser.add_argument("--poll", type=int, default=common.SUPERVISOR_POLL_SECONDS, help="Telegram polling interval seconds")
+    parser.add_argument("--launcher-pid", type=int, default=0, dest="launcher_pid", help="background launcher PID — kill 대상에서 제외")
     parser.add_argument("--iter-step", type=int, default=common.HEARTBEAT_ITER_STEP, help="heartbeat report iteration step")
     parser.add_argument("--heartbeat-poll", type=int, default=common.HEARTBEAT_POLL_SECONDS, help="heartbeat polling interval seconds")
     parser.add_argument("--v23-max-runs", type=int, default=20, help="--v23-backfill 시 최근 처리할 최대 run 수 (0 이하이면 전체)")
