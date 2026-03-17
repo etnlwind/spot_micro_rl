@@ -6,6 +6,8 @@ import sys
 import time
 import uuid
 
+import psutil
+
 
 SCRIPT_PATH = os.path.abspath(__file__)
 SCRIPT_DIR = os.path.dirname(SCRIPT_PATH)
@@ -727,6 +729,9 @@ def _kill_existing_supervisor_and_heartbeat() -> None:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
+    # PID lock 해제 — 프로세스를 kill했어도 lock 파일이 남으면
+    # acquire_pid_lock()이 "already running" 오류를 낼 수 있음
+    common.release_pid_lock(common.SUPERVISOR_PID_FILE)
     common.release_pid_lock(common.HEARTBEAT_PID_FILE)
 
     if killed:
