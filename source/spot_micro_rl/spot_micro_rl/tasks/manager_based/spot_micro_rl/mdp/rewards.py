@@ -1741,6 +1741,175 @@ def rear_both_ground_penalty(
     return rear_both * vel_gate
 
 
+# ============================================================
+# V31: Front leg swing rewards (rear 보상의 앞다리 대칭 버전)
+# rear 계열 5개 중 3개를 앞다리에 적용 + min_swing_ratio 공통 패널티
+# ============================================================
+
+
+def front_swing_bonus(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_clearance: float = 0.05,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """앞발 스윙 보너스: 앞발이 공중에 들리면 직접 보상.
+
+    V31: rear_swing_bonus의 앞다리 미러.
+    앞발(FL, FR)이 스윙 중이고 높이 들렸을 때 보상한다.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)  # (num_envs, 4)
+
+    asset = env.scene[foot_cfg.name]
+    foot_z = asset.data.body_pos_w[:, foot_cfg.body_ids, 2]  # (num_envs, 4)
+    env_origins_z = env.scene.env_origins[:, 2].unsqueeze(1)
+    foot_height = foot_z - env_origins_z
+
+    # 앞발(0,1)의 스윙 여부와 높이
+    front_swing = ~contacts[:, :2]  # (num_envs, 2)
+    front_height = foot_height[:, :2]
+
+    height_reward = torch.clamp(front_height / target_clearance, 0.0, 1.0)
+    front_reward = (height_reward * front_swing.float()).sum(dim=1)
+    front_reward = front_reward / 2.0
+
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return front_reward * vel_gate
+
+
+def front_alternation_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """앞다리 교대 보상: FL과 FR이 번갈아 움직이도록 유도.
+
+    V31: rear_alternation_reward의 앞다리 미러.
+    하나는 접지, 하나는 스윙 상태일 때 보상한다.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()  # (num_envs, 4)
+
+    # 앞다리 접촉 상태 차이: 다르면 1.0 (교대 중)
+    front_diff = torch.abs(contacts[:, 0] - contacts[:, 1])
+
+    asset = env.scene[asset_cfg.name]
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return front_diff * vel_gate
+
+
+def front_both_ground_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """앞다리 동시 접지 페널티: 두 앞다리가 동시에 땅에 있으면 페널티.
+
+    V31: rear_both_ground_penalty의 앞다리 미러.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()  # (num_envs, 4)
+
+    # 앞다리 둘 다 접지일 때만 1.0
+    front_both = contacts[:, 0] * contacts[:, 1]
+
+    asset = env.scene[asset_cfg.name]
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return front_both * vel_gate
+
+
+def min_swing_ratio_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_swing: float = 0.20,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """최소 스윙 비율 패널티: 어떤 다리든 swing ratio < min_swing이면 패널티.
+
+    V31: 4발 공통 적용. 특정 다리가 과도하게 접지 유지하는 것을 방지.
+    현재 step의 contact state 기반 (episode-level이 아닌 step-level).
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()  # (num_envs, 4)
+
+    # swing = 1 - contact (step-level)
+    # 접지 중인 다리에 대해서 min_swing만큼의 deficit 계산
+    # contact=1이면 swing=0, deficit=min_swing
+    # contact=0이면 swing=1, deficit=0 (no penalty)
+    deficit = torch.clamp(min_swing - (1.0 - contacts), min=0.0)  # (num_envs, 4)
+    penalty = deficit.sum(dim=1)  # 전체 다리 deficit 합산
+
+    asset = env.scene[asset_cfg.name]
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return penalty * vel_gate
+
+
+def front_joint_velocity_reward(
+    env: ManagerBasedRLEnv,
+    front_joint_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    vel_threshold: float = 0.5,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """앞다리 관절 속도 보상: 앞다리 관절이 실제로 움직여야 보상.
+
+    V31.2: rear_joint_velocity_reward의 앞다리 미러.
+    앞다리 6개 관절(2 shoulder + 2 leg + 2 foot)의 절대 속도 합 기반.
+    joint-level이므로 contact 기반 역할 분리를 방지한다.
+    """
+    asset: Articulation = env.scene[front_joint_cfg.name]
+    joint_vel = torch.abs(asset.data.joint_vel[:, front_joint_cfg.joint_ids])
+    vel_sum = torch.sum(joint_vel, dim=1)
+    reward = torch.clamp(vel_sum / vel_threshold, 0.0, 1.0)
+
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return reward * vel_gate
+
+
+def front_joint_frozen_penalty(
+    env: ManagerBasedRLEnv,
+    front_joint_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    frozen_threshold: float = 0.3,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """앞다리 관절 동결 페널티: 앞다리가 움직이지 않으면 페널티.
+
+    V31.2: rear_joint_frozen_penalty의 앞다리 미러.
+    앞다리 관절 속도 합 < frozen_threshold이면 페널티 1.0.
+    joint-level이므로 contact 기반 역할 분리를 방지한다.
+    """
+    asset: Articulation = env.scene[front_joint_cfg.name]
+    joint_vel = torch.abs(asset.data.joint_vel[:, front_joint_cfg.joint_ids])
+    vel_sum = torch.sum(joint_vel, dim=1)
+    is_frozen = (vel_sum < frozen_threshold).float()
+
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return is_frozen * vel_gate
+
+
 def rear_forward_stride_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
@@ -2512,6 +2681,15 @@ def _curriculum_apply_v281_weights(
     # V29: swing quality gated velocity reward alpha + max
     swing_gate_alpha: float = 0.0,
     swing_gate_max: float = 0.0,
+    # V31: front swing ramp
+    front_swing_alpha: float = 0.0,
+    front_swing_bonus_max: float = 0.0,
+    front_alternation_max: float = 0.0,
+    front_both_ground_max: float = 0.0,
+    min_swing_ratio_max: float = 0.0,
+    # V31.2: front joint-level rewards (same ramp as front_swing)
+    front_joint_velocity_max: float = 0.0,
+    front_joint_frozen_max: float = 0.0,
 ) -> None:
     """V28.1 신규 term들의 가중치를 relay/ramp alpha 기반으로 적용."""
     # 1. Residency rewards (relay: early + late 합산 → 단일 term weight)
@@ -2590,6 +2768,25 @@ def _curriculum_apply_v281_weights(
             cfg = env.reward_manager.get_term_cfg("swing_gate_velocity")
             cfg.weight = swing_gate_w
             env.reward_manager.set_term_cfg("swing_gate_velocity", cfg)
+        except Exception:
+            pass
+
+    # 8. V31: Front swing rewards (simple ramp, 6 terms)
+    _v31_terms: dict[str, float] = {
+        "front_swing": front_swing_alpha * front_swing_bonus_max,
+        "front_alternation": front_swing_alpha * front_alternation_max,
+        "front_both_ground": front_swing_alpha * front_both_ground_max,
+        "min_swing_ratio": front_swing_alpha * min_swing_ratio_max,
+        "front_joint_velocity": front_swing_alpha * front_joint_velocity_max,
+        "front_joint_frozen": front_swing_alpha * front_joint_frozen_max,
+    }
+    for term_name, w in _v31_terms.items():
+        if abs(w) < 1e-9 and abs(front_swing_alpha) < 1e-9:
+            continue
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = w
+            env.reward_manager.set_term_cfg(term_name, cfg)
         except Exception:
             pass
 
@@ -2822,6 +3019,14 @@ _LOG_WEIGHT_TERMS = [
     "usage_residency",
     "rear_pair_residency_symmetry",
     "late_phase_band_exit",
+    # V31 front swing (없으면 skip)
+    "front_swing",
+    "front_alternation",
+    "front_both_ground",
+    "min_swing_ratio",
+    # V31.2 front joint-level (없으면 skip)
+    "front_joint_velocity",
+    "front_joint_frozen",
 ]
 _LOG_RAW_GAIT_TERMS = ["forward_velocity", "trot_gait", "diagonal_coupling", "leg_lift", "foot_clearance"]
 _LOG_RAW_QUALITY_TERMS = ["joint_vel_l2", "dof_acc_l2", "action_rate_l2"]
@@ -2981,6 +3186,16 @@ def reward_weight_curriculum(
     swing_gate_ramp_start: int = 600,
     swing_gate_ramp_end: int = 900,
     swing_gate_max: float = 0.0,
+    # V31: front swing ramp (앞다리 swing 강제)
+    front_swing_ramp_start: int = 100,
+    front_swing_ramp_end: int = 400,
+    front_swing_bonus_max: float = 0.0,
+    front_alternation_max: float = 0.0,
+    front_both_ground_max: float = 0.0,
+    min_swing_ratio_max: float = 0.0,
+    # V31.2: front joint-level rewards (same ramp as front_swing)
+    front_joint_velocity_max: float = 0.0,
+    front_joint_frozen_max: float = 0.0,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -3050,6 +3265,9 @@ def reward_weight_curriculum(
         env._crr_swing_gate_alpha = _curriculum_target_alpha(
             iteration, swing_gate_ramp_start, swing_gate_ramp_end
         )
+        env._crr_front_swing_alpha = _curriculum_target_alpha(
+            iteration, front_swing_ramp_start, front_swing_ramp_end
+        )
         env._crr_last_update = iteration
         env._crr_gate_paused = False
         _curriculum_apply_weights(
@@ -3112,6 +3330,13 @@ def reward_weight_curriculum(
             stride_length_max=stride_length_max,
             swing_gate_alpha=env._crr_swing_gate_alpha,
             swing_gate_max=swing_gate_max,
+            front_swing_alpha=env._crr_front_swing_alpha,
+            front_swing_bonus_max=front_swing_bonus_max,
+            front_alternation_max=front_alternation_max,
+            front_both_ground_max=front_both_ground_max,
+            min_swing_ratio_max=min_swing_ratio_max,
+            front_joint_velocity_max=front_joint_velocity_max,
+            front_joint_frozen_max=front_joint_frozen_max,
         )
         phase_str = _curriculum_phase_str(env._crr_alpha12, env._crr_alpha23)
         print(f"\n{'=' * 60}")
@@ -3130,6 +3355,7 @@ def reward_weight_curriculum(
         print(f"  rear_contact_diff_ramp=[{rear_contact_diff_ramp_start}~{rear_contact_diff_ramp_end}] max={rear_contact_diff_max:.1f} (V28.2)")
         print(f"  stride_length_ramp=[{stride_length_ramp_start}~{stride_length_ramp_end}] max={stride_length_max:.1f} (V29)")
         print(f"  swing_gate_ramp=[{swing_gate_ramp_start}~{swing_gate_ramp_end}] max={swing_gate_max:.1f} (V29)")
+        print(f"  front_swing_ramp=[{front_swing_ramp_start}~{front_swing_ramp_end}] bonus={front_swing_bonus_max:.1f} alt={front_alternation_max:.1f} both={front_both_ground_max:.1f} min_swing={min_swing_ratio_max:.1f} jv={front_joint_velocity_max:.1f} jf={front_joint_frozen_max:.1f} (V31.2)")
         print(f"  gait_gate={'ON' if gait_gate_enabled else 'OFF'} (min_ep_len={gait_gate_min_ep_len})")
         print(f"{'=' * 60}")
         # INIT 시점 key weight 로깅
@@ -3176,6 +3402,7 @@ def reward_weight_curriculum(
     target_rear_contact_diff = _curriculum_target_alpha(iteration, rear_contact_diff_ramp_start, rear_contact_diff_ramp_end)
     target_stride_length = _curriculum_target_alpha(iteration, stride_length_ramp_start, stride_length_ramp_end)
     target_swing_gate = _curriculum_target_alpha(iteration, swing_gate_ramp_start, swing_gate_ramp_end)
+    target_front_swing = _curriculum_target_alpha(iteration, front_swing_ramp_start, front_swing_ramp_end)
 
     # 이미 target에 도달 → 스킵
     if (
@@ -3196,6 +3423,7 @@ def reward_weight_curriculum(
         and abs(env._crr_rear_contact_diff_alpha - target_rear_contact_diff) < 1e-6
         and abs(env._crr_stride_length_alpha - target_stride_length) < 1e-6
         and abs(env._crr_swing_gate_alpha - target_swing_gate) < 1e-6
+        and abs(env._crr_front_swing_alpha - target_front_swing) < 1e-6
     ):
         return None
 
@@ -3231,6 +3459,7 @@ def reward_weight_curriculum(
     max_step_rear_contact_diff = update_interval / max(1, rear_contact_diff_ramp_end - rear_contact_diff_ramp_start)
     max_step_stride_length = update_interval / max(1, stride_length_ramp_end - stride_length_ramp_start)
     max_step_swing_gate = update_interval / max(1, swing_gate_ramp_end - swing_gate_ramp_start)
+    max_step_front_swing = update_interval / max(1, front_swing_ramp_end - front_swing_ramp_start)
 
     new_12 = env._crr_alpha12 if gait_paused else min(target_12, env._crr_alpha12 + max_step_12)
     new_23 = env._crr_alpha23 if gait_paused else min(target_23, env._crr_alpha23 + max_step_23)
@@ -3252,6 +3481,7 @@ def reward_weight_curriculum(
     new_rear_contact_diff = min(target_rear_contact_diff, env._crr_rear_contact_diff_alpha + max_step_rear_contact_diff)
     new_stride_length = min(target_stride_length, env._crr_stride_length_alpha + max_step_stride_length)
     new_swing_gate = min(target_swing_gate, env._crr_swing_gate_alpha + max_step_swing_gate)
+    new_front_swing = min(target_front_swing, env._crr_front_swing_alpha + max_step_front_swing)
 
     # 실제 변화 없으면 스킵
     if (
@@ -3272,6 +3502,7 @@ def reward_weight_curriculum(
         and abs(new_rear_contact_diff - env._crr_rear_contact_diff_alpha) < 1e-6
         and abs(new_stride_length - env._crr_stride_length_alpha) < 1e-6
         and abs(new_swing_gate - env._crr_swing_gate_alpha) < 1e-6
+        and abs(new_front_swing - env._crr_front_swing_alpha) < 1e-6
     ):
         return None
 
@@ -3295,6 +3526,7 @@ def reward_weight_curriculum(
     env._crr_rear_contact_diff_alpha = new_rear_contact_diff
     env._crr_stride_length_alpha = new_stride_length
     env._crr_swing_gate_alpha = new_swing_gate
+    env._crr_front_swing_alpha = new_front_swing
 
     # ── 가중치 적용 ──
     _curriculum_apply_weights(
@@ -3357,6 +3589,11 @@ def reward_weight_curriculum(
         stride_length_max=stride_length_max,
         swing_gate_alpha=new_swing_gate,
         swing_gate_max=swing_gate_max,
+        front_swing_alpha=new_front_swing,
+        front_swing_bonus_max=front_swing_bonus_max,
+        front_alternation_max=front_alternation_max,
+        front_both_ground_max=front_both_ground_max,
+        min_swing_ratio_max=min_swing_ratio_max,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──

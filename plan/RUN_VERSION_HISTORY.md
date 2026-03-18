@@ -50,6 +50,10 @@ regardless of the actual reward design.
 | V29 (reliability) | `f11242e` | 2026-03-17 | TRAIN_VERSION 단일 소스(env_cfg.py 권위), supervisor 중복 프로세스 자동 종료, 알림 버전 표시 |
 | V29.2 | `483c627` | 2026-03-17 | residency band 교정 [0.20,0.85], target_band 0.75/w=3.0, front_rear_balance -4.0, enforce 800→ |
 | V29.2 (docs) | `ff62aff` | 2026-03-17 | V29 analysis + V29.2 plan 문서 추가 |
+| V30 | (uncommitted) | 2026-03-18 | 초기 자세 대칭 교정 (leg=-0.71, foot=1.31); TRAIN_VERSION V29.2→V30 |
+| V31 | (uncommitted) | 2026-03-18 | front swing 강제 4함수 (front_swing_bonus, front_alternation, front_both_ground, min_swing_ratio); TRAIN_VERSION V30→V31 |
+| V31.1 | (uncommitted) | 2026-03-18 | front_alternation 비활성화, front_both_ground -40→-15; TRAIN_VERSION V31→V31.1 |
+| V31.2 | (uncommitted) | 2026-03-18 | front_both_ground/min_swing_ratio 비활성화, front_joint_velocity(+15)/front_joint_frozen(-40) 신규; TRAIN_VERSION V31.1→V31.2 |
 
 **Note (V26 era)**: env_cfg.py had `TRAIN_VERSION = "V26"` (reward design V26.1 base), common.py had `TRAIN_VERSION = "V26.1"`.
 V26 (01-46-44) and V26.1 (07-08-50) are **separate experiments**: V26 was an exploratory run with uncommitted code;
@@ -98,7 +102,11 @@ V26.1 was designed after analyzing V26 results and committed.
 | 2026-03-16_xx-xx-xx | **V28.2** | ~1703 | V28.2 | rear pair 대칭 달성 (rear_usage_diff=0.012 at iter 1703) → 성공 |
 | 2026-03-17_xx-xx-xx | **V28.3** | ~2200 | V28.3 | front cap 추가; FL/FR contact 0.83~0.88 고착 → 실패 |
 | 2026-03-17_18-01-05 | **V29** | ~1000 | V29 | residency band_high=0.65; 전체 4발 band 밖 → gradient 소멸 → 실패 |
-| 2026-03-17_23-06-20 | **V29.2** | 200+ | V29.2 | band 교정 [0.20,0.85]; 🟡 훈련 진행 중 |
+| 2026-03-17_23-06-20 | **V29.2** | 201 | V29.2 | band 교정 [0.20,0.85]; supervisor silent crash로 iter 201 중단 |
+| 2026-03-18_07-29-55 | **V30** | 724 | V30 | 초기 자세 대칭; reward 323 @644, FL/FR lock-in 불변; late_phase 급락으로 조기 종료 |
+| 2026-03-18_11-13-18 | **V31** | ~421 | V31 | front swing 4함수; FL+RR만 접지, FR+RL 붕괴 (대각 2발 고착) → 실패 |
+| 2026-03-18_13-11-59 | **V31.1** | 1001 | V31.1 | front_alternation 비활성화, front_both_ground -15; FL 0.874 lock-in + RL 0.027 붕괴 (대각 역할 분리) → 실패 |
+| 2026-03-18_17-43-22 | **V31.2** | 훈련 중 | V31.2 | contact-level 패널티 전폐, front_joint_velocity(+15)/front_joint_frozen(-40) 신규; 🟡 훈련 진행 중 |
 
 ---
 

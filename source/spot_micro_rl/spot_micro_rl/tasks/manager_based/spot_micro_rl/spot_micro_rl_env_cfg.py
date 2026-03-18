@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V30"
+TRAIN_VERSION = "V31.2"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -245,6 +245,16 @@ class SpotMicroRewardCurriculumCfg:
             "swing_gate_ramp_start": 600,
             "swing_gate_ramp_end": 900,
             "swing_gate_max": 15.0,               # 4발 min swing × 속도 (swing_gate_max=15)
+            # V31: front swing ramp (iter 100~400) — 앞다리 swing 강제
+            "front_swing_ramp_start": 100,
+            "front_swing_ramp_end": 400,
+            "front_swing_bonus_max": 12.0,         # rear_swing(15)의 80%
+            "front_alternation_max": 0.0,          # V31.1: 비활성화 — 고정역할 보상 역효과
+            "front_both_ground_max": 0.0,          # V31.2: 비활성화 — 대각 역할 분리 유발
+            "min_swing_ratio_max": 0.0,            # V31.2: 비활성화 — 대각 역할 분리 유발
+            # V31.2: front joint-level rewards (rear_joint_velocity/frozen 미러)
+            "front_joint_velocity_max": 15.0,      # rear(20)의 75% — 앞다리 보수적
+            "front_joint_frozen_max": -40.0,       # rear(-60)의 67% — 앞다리 동결 처벌
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -706,9 +716,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.front_rear_support_balance_penalty = RewTerm(
             func=custom_mdp.front_rear_support_balance_penalty,
-            weight=-4.0,  # V29.2: 0.0 → -4.0 활성화 (FL/FR 0.84 vs RL/RR 0.49 gap 0.36 직접 패널티)
+            weight=-8.0,  # V31: -4.0 → -8.0 강화 (V30에서 -4.0은 -0.77에 불과)
             params={
-                "max_diff": 0.25,   # V29.2: 0.50 → 0.25 (gap 0.36 즉각 패널티 — front dominance 억제)
+                "max_diff": 0.15,   # V31: 0.25 → 0.15 (더 강한 gradient — front swing 보상이 안정성 보상)
                 "contact_target": 0.5,
                 "propulsion_target": 0.30,
                 "leg_lift_target": 0.18,
@@ -744,7 +754,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             weight=3.0,  # V29.2: 0.5 → 3.0 (RL/RR이 band 안에 있을 때 강한 양의 신호)
             params={
                 "band_low": 0.20,
-                "band_high": 0.75,  # V29.2: 0.45 → 0.75 (RL/RR 0.48~0.53이 band 안에 포함)
+                "band_high": 0.65,  # V31: 0.75 → 0.65 (FL/FR이 내려와야 band 진입 가능)
                 "band_ramp_start": 0.05,
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -796,7 +806,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             weight=0.0,  # curriculum relay ramp으로 제어
             params={
                 "band_low": 0.20,   # V29.2: 0.25 → 0.20 (RL/RR 에피소드 초반 band 진입 가능)
-                "band_high": 0.85,  # V29.2: 0.65 → 0.85 (FL/FR 0.84도 band 포함 → residency reward 활성화)
+                "band_high": 0.70,  # V31: 0.85 → 0.70 (FL/FR 0.82가 band 밖 → 접지 줄이는 인센티브)
                 "ema_alpha": 0.05,
                 "min_vel": 0.05,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -860,6 +870,78 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "asset_cfg": SceneEntityCfg("robot"),
                 "contact_threshold": 1.0,
                 "min_swing_ratio": 0.15,
+                "min_vel": 0.05,
+            },
+        )
+
+        # V31: Front swing rewards (앞다리 swing 강제 — rear 보상의 대칭 버전)
+        self.rewards.front_swing = RewTerm(
+            func=custom_mdp.front_swing_bonus,
+            weight=0.0,  # curriculum이 12.0까지 ramp (iter 100~400)
+            params={
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "foot_cfg": toe_body_cfg,
+                "asset_cfg": SceneEntityCfg("robot"),
+                "target_clearance": 0.05,  # rear(0.08)보다 낮음 — 앞다리는 높이 들 필요 없음
+                "min_vel": 0.05,
+            },
+        )
+        self.rewards.front_alternation = RewTerm(
+            func=custom_mdp.front_alternation_reward,
+            weight=0.0,  # curriculum이 20.0까지 ramp (iter 100~400)
+            params={
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "min_vel": 0.05,
+            },
+        )
+        self.rewards.front_both_ground = RewTerm(
+            func=custom_mdp.front_both_ground_penalty,
+            weight=0.0,  # curriculum이 -40.0까지 ramp (iter 100~400)
+            params={
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "min_vel": 0.05,
+            },
+        )
+        self.rewards.min_swing_ratio = RewTerm(
+            func=custom_mdp.min_swing_ratio_penalty,
+            weight=0.0,  # curriculum이 -20.0까지 ramp (iter 100~400)
+            params={
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "min_swing": 0.20,  # 최소 20% swing 필요
+                "min_vel": 0.05,
+            },
+        )
+
+        # V31.2: Front joint velocity reward (rear_joint_velocity 미러)
+        front_joint_cfg = SceneEntityCfg("robot", joint_names=[
+            "front_left_shoulder", "front_right_shoulder",
+            "front_left_leg", "front_right_leg",
+            "front_left_foot", "front_right_foot",
+        ])
+        self.rewards.front_joint_velocity = RewTerm(
+            func=custom_mdp.front_joint_velocity_reward,
+            weight=0.0,  # curriculum이 15.0까지 ramp (iter 100~400)
+            params={
+                "front_joint_cfg": front_joint_cfg,
+                "asset_cfg": SceneEntityCfg("robot"),
+                "vel_threshold": 0.5,
+                "min_vel": 0.05,
+            },
+        )
+        # V31.2: Front joint frozen penalty (rear_joint_frozen 미러)
+        self.rewards.front_joint_frozen = RewTerm(
+            func=custom_mdp.front_joint_frozen_penalty,
+            weight=0.0,  # curriculum이 -40.0까지 ramp (iter 100~400)
+            params={
+                "front_joint_cfg": front_joint_cfg,
+                "asset_cfg": SceneEntityCfg("robot"),
+                "frozen_threshold": 0.3,
                 "min_vel": 0.05,
             },
         )

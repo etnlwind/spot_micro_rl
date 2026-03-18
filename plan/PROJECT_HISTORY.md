@@ -1,24 +1,24 @@
 # SpotMicro RL Training Project History
 
 **Last Updated**: 2026-03-18
-**Project Status**: V29.2 훈련 진행 중 — Residency band 교정 + Front dominance penalty
-**Current Active Run**: `2026-03-17_23-06-20` / TRAIN_VERSION=”V29.2”
+**Project Status**: V31.2 훈련 진행 중 — Front swing 강제 (Joint-Level 접근)
+**Current Active Run**: `2026-03-18_17-43-22` / TRAIN_VERSION=”V31.2”
 
 > 최신 핸드오프: `plan/HANDOFF.md` 참조
 
 ---
 
-## 📌 Current Status Snapshot (V29.2 active)
+## 📌 Current Status Snapshot (V31.2 active)
 
 | 항목 | 값 |
 |------|-----|
-| TRAIN_VERSION | `”V29.2”` |
-| 상태 | 훈련 진행 중 (iter 200+) |
+| TRAIN_VERSION | `”V31.2”` |
+| 상태 | 훈련 진행 중 (run 2026-03-18_17-43-22) |
 | 진입점 | 프로젝트 루트 `supervisor.cmd` |
-| 핵심 변경 | residency band 확장, front_rear_balance penalty 활성화, enforce 지연 |
-| 이전 버전 | V29 실패 (band_high < 실측 → 전체 gradient 소멸) |
+| 핵심 변경 | contact-level 패널티 전폐, front_joint_velocity(+15) + front_joint_frozen(-40) 신규 |
+| 이전 버전 | V31.1 실패 (front_both_ground + min_swing_ratio도 대각 역할 분리 유발 → RL 붕괴) |
 
-### 학습 버전 요약 (V23~V29.2)
+### 학습 버전 요약 (V23~V31.1)
 
 | 버전 | 판정 | 핵심 교훈 |
 |------|------|-----------|
@@ -32,13 +32,17 @@
 | V28.2 | ✅ | rear 대칭 달성 (rear_usage_diff=0.012) → **front 고착 발견** |
 | V28.3 | 실패 | front cap 패널티 — FL/FR 0.83+ 변화 없음 |
 | V29 | 실패 | residency band_high=0.65 < FL/FR 0.84 → gradient 소멸 |
-| V29.2 | 🟡 훈련 중 | band 파라미터 교정 + front_rear_balance(-4.0) |
-| **V30** | 🔧 **준비 중** | ★ 초기 자세 대칭 교정 — FL/FR 과접지 물리적 근본 원인 제거 |
+| V29.2 | 실패 | supervisor silent crash로 iter 201에서 중단 |
+| V30 | 🟡 부분 성공 | 초기 자세 대칭 → 학습 품질 향상, FL/FR lock-in 방향 불변 |
+| V31 | 실패 | front_alternation이 고정역할 보상 → 대각 2발 고착 |
+| V31.1 | 실패 | front_both_ground + min_swing_ratio도 대각 역할 분리 → RL 완전 붕괴 |
+| **V31.2** | 🟡 **훈련 중** | contact-level 패널티 전폐, joint-level(velocity/frozen) 전환 |
 
 핵심 문서:
 
-- `plan/HANDOFF.md`: 현재 상태 + V30 초기 자세 교정
-- `plan/V29.2_PLAN.md`: V29.2 설계 및 성공 기준
+- `plan/HANDOFF.md`: 현재 상태 + V31.2 핵심
+- `plan/V31_PLAN.md`: V31 설계 + V31/V31.1 실패 분석 + V31.2 수정
+- `plan/V30_ANALYSIS.md`: V30 분석 (학습 품질 향상, lock-in 불변)
 - `plan/V29_ANALYSIS.md`: V29 실패 분석
 - `plan/V28_PLAN.md`: target-band 패러다임 전환 (이정표)
 
@@ -127,13 +131,47 @@
   **전체 4발이 모든 band 밖 → 학습 신호 완전 소멸**
 - 교훈: band threshold는 반드시 **실측 데이터 기반**이어야 함
 
-#### V29.2: Band 파라미터 교정 (2026-03-17~) 🟡 현재
+#### V29.2: Band 파라미터 교정 (2026-03-17~)
 - contact_residency band: [0.25, 0.65] → **[0.20, 0.85]**
 - per_leg_contact_target_band: band_high 0.45 → **0.75**, weight 0.5 → **3.0**
 - front_rear_support_balance_penalty: weight 0.0 → **-4.0**, max_diff 0.25
 - residency enforce: iter 600→**800** 시작
-- **iter 201**: per_leg_contact_target_band TOP5 진입, F-R balance 0.1072
-- 상세: `plan/V29.2_PLAN.md`, `plan/V29_ANALYSIS.md`
+- **실패**: supervisor silent crash로 iter 201에서 중단
+
+#### V30: 초기 자세 대칭 교정 (2026-03-18) 🟡 부분 성공
+- 초기 자세 대칭 (leg=-0.71, foot=1.31, height=0.192) — FL/FR 물리적 비대칭 제거
+- **iter 644**: reward 323 (V29 max 303), episode_length 248/250, velocity_tracking 0.77
+- **결론**: 학습 품질 대폭 향상, 그러나 FL/FR contact lock-in 방향 불변 (0.822)
+- **교훈 #5**: 물리적 비대칭은 촉진 요인이지 근본 원인이 아님 — reward 구조 문제 확정
+- 상세: `plan/V30_ANALYSIS.md`
+
+#### V31: Front Swing 강제 — 구조적 접근 (2026-03-18) ❌ 실패
+- 4개 신규 reward 함수: `front_swing_bonus`(+12), `front_alternation`(+20), `front_both_ground`(-40), `min_swing_ratio`(-20)
+- Curriculum ramp: iter 100~400
+- contact_residency band_high 0.85→**0.70**, front_rear_balance -4.0→**-8.0** (max_diff 0.25→0.15)
+- **iter 421**: FL 0.815 + RR 0.805 접지, FR **0.031** + RL **0.150** 완전 붕괴 — 대각 2발 고착
+- **원인**: `front_alternation`이 `abs(FL-FR)` 차이를 보상 → "고정 역할 분리"가 최적 전략
+- **교훈 #6**: 특정 행동의 부재는 패널티로 해결 불가 — 명시적 보상 필요
+- **교훈 #7**: step-level alternation은 temporal alternation과 다름 — 역할 분리를 보상
+- 상세: `plan/V31_PLAN.md`
+
+#### V31.1: Front Swing 수정판 (2026-03-18) ❌ 실패
+- front_alternation: +20 → **0 (비활성화)** — 고정역할 보상 역효과 제거
+- front_both_ground: -40 → **-15 (완화)** — 강한 패널티가 한 다리 포기 유발
+- front_swing_bonus(+12), min_swing_ratio(-20) 유지
+- **iter 1001**: FL 0.874(lock-in 재발), RL **0.027**(완전 붕괴) — V31과 방향만 바뀐 대각 역할 분리
+- **원인**: `front_both_ground`와 `min_swing_ratio`도 contact-level 패널티 → "어떤 다리를 희생할지" 최적화 유발
+- **교훈 #8**: contact-level 패널티는 모두 대각 역할 분리를 유발 — joint-level 접근이 필요
+
+#### V31.2: Joint-Level 접근 (2026-03-18~) 🟡 현재 훈련 중
+- front_both_ground: -15 → **0 (비활성화)** — 대각 역할 분리 유발
+- min_swing_ratio: -20 → **0 (비활성화)** — 대각 역할 분리 유발
+- **front_joint_velocity**: **+15 ramp (신규)** — rear_joint_velocity(+20) 미러, 앞다리 관절 속도 보상
+- **front_joint_frozen**: **-40 ramp (신규)** — rear_joint_frozen(-60) 미러, 앞다리 관절 동결 처벌
+- front_swing_bonus(+12) 유지
+- **핵심**: joint-level은 개별 관절 단위 → FL이 안 움직이면 FL에 직접 패널티, "FR이 대신" 불가
+- **목표**: FL/FR contact < 0.70, RL/RR > 0.35, F-R gap < 0.20
+- 상세: `plan/V31_PLAN.md` (V31.2 수정 섹션)
 
 ---
 
