@@ -3594,6 +3594,8 @@ def reward_weight_curriculum(
         front_alternation_max=front_alternation_max,
         front_both_ground_max=front_both_ground_max,
         min_swing_ratio_max=min_swing_ratio_max,
+        front_joint_velocity_max=front_joint_velocity_max,
+        front_joint_frozen_max=front_joint_frozen_max,
     )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──
