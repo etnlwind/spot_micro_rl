@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V29 (Residency Band-High + Stride Length + Swing Gate Velocity) 훈련 준비 완료
+**현재 상태**: V31.2 (Joint-Level Front Swing Activation) 훈련 중
 
 ### 기술 스택
 
@@ -40,37 +40,32 @@ spot_micro_rl/
 │   │   ├── spot_micro_rl_env_cfg.py    # 환경 설정, 리워드 가중치, 커리큘럼
 │   │   ├── __init__.py                 # Gymnasium 환경 등록 (4개)
 │   │   ├── mdp/
-│   │   │   ├── rewards.py              # 커스텀 리워드 함수 25+ 개
+│   │   │   ├── rewards.py              # 커스텀 리워드 함수 50+ 개
 │   │   │   └── __init__.py             # MDP 모듈 re-export
 │   │   └── agents/
 │   │       └── rsl_rl_ppo_cfg.py       # PPO 하이퍼파라미터
 │   └── robots/
 │       └── spot_micro.py               # URDF articulation, DC motor 설정
+├── isaac_ops/                          # ★ 독립 운영 패키지 (IsaacOps)
+│   ├── common.py                       # Telegram, process, state, report/video helper, KPI 분석
+│   ├── listener.py                     # 통합 Telegram listener (supervisor + heartbeat)
+│   ├── cli_send.py                     # CLI에서 명령 실행 / 메시지 전송
+│   ├── listen.cmd                      # Windows 런처 (listener)
+│   └── cli.cmd                         # Windows 런처 (CLI)
 ├── scripts/
 │   ├── rsl_rl/
 │   │   ├── train.py                    # 훈련 entry point
 │   │   └── play.py                     # 평가/비디오 entry point (카메라 preset, contact CSV 지원)
-│   ├── common.py                       # Telegram, process, state, report/video helper, limb validity 분석
-│   ├── supervisor.py                   # Telegram command loop
-│   ├── heartbeat.py                    # KPI heartbeat (100 iter) + 자동 영상 리포트 (1000 iter)
+│   ├── common.py                       # scripts용 common (isaac_ops/common.py와 동기화)
 │   ├── utils/
 │   │   ├── evaluate_limb_gate_checkpoint.py  # checkpoint 단위 limb validity 수동 평가
 │   │   └── analyze_training.py         # limb validity 열 추출, collapse 감지, workbook 기록
-│   ├── collect_checkpoint_diagnostics.py    # foot/toe/aggregate contact 진단 패키지
-│   ├── make_multiview_screenshot_pack.py    # 멀티뷰 스크린샷 ZIP 생성
-│   ├── analyze_v19.py                  # V19 훈련 분석 스크립트
-│   ├── analyze_v20.py                  # V20 훈련 분석 스크립트
-│   ├── transfer_flat_to_rough.py       # Flat→Rough 전이학습 (48→102 obs dim)
-│   └── legacy/                         # 구 training_* 운영 코드 참고용 보관
+│   └── legacy/                         # 구 supervisor/heartbeat 코드 참고용 보관
 ├── plan/
-│   ├── MEMORY.md                       # AI 세션 핸드오프 문서
-│   ├── V19_ANALYSIS.md                 # V19 분석 리포트
-│   ├── V20_ANALYSIS.md                 # V20 분석 리포트
-│   ├── V21_ANALYSIS.md                 # V21 운영/관측 체계 리포트
-│   ├── V22_ANALYSIS.md                 # V22 멀티뷰/워크북/ZIP 아티팩트 리포트
-│   ├── V23_PLAN.md                     # V23 posture-first refinement 계획
-│   ├── V24_PLAN.md                     # V24 limb validity gating 설계 및 분석
-│   └── V01-V08_HISTORY.md ~ V18_HISTORY.md  # 버전별 히스토리
+│   ├── HANDOFF.md                      # AI 세션 핸드오프 (최신 상태 요약)
+│   ├── QUADRUPED_RL_RESEARCH.md        # 4족 보행 RL 연구 조사 (legged_gym, Walk These Ways, AllGaits)
+│   ├── V*_ANALYSIS.md / V*_PLAN.md    # 버전별 분석/계획 문서
+│   └── archive/                        # 이전 상태 문서 보관
 ├── assets/robots/spot_micro/           # SpotMicro URDF
 ├── logs/rsl_rl/spot_micro_flat/        # 훈련 로그 + 체크포인트
 └── .env                                # Telegram 인증, 경로 설정
@@ -177,51 +172,44 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
 - `VIDEO_REQUIRE_DISTINCT_VIEWS`: 뷰별 영상 해시가 중복되면 실패 처리 (기본 1)
 - `REPORT_REQUIRE_XLSX`: report ZIP에 `metrics/heartbeat_history.xlsx`를 반드시 포함 (기본 1)
 
-### 모니터링
+### 모니터링 — IsaacOps
+
+`isaac_ops/`는 Telegram 기반 훈련 모니터링 통합 패키지입니다. 기존 `supervisor.py` + `heartbeat.py`를 하나의 listener로 통합했습니다.
 
 ```bash
+# IsaacOps listener 시작 (Telegram 명령 + 100 iter heartbeat + 자동 영상 리포트)
+isaac_ops\listen.cmd
+
+# CLI에서 직접 명령 실행
+isaac_ops\cli.cmd status       # 훈련 상태 조회 → Telegram 전송
+isaac_ops\cli.cmd hb           # heartbeat 리포트 → Telegram 전송
+isaac_ops\cli.cmd stop         # 훈련 중지
+isaac_ops\cli.cmd start        # 새 훈련 시작
+isaac_ops\cli.cmd resume       # 이어서 훈련
+isaac_ops\cli.cmd "메시지"     # 일반 텍스트 → Telegram 전송
+
 # TensorBoard
-python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat_current --port=6006
-
-# Heartbeat (KPI를 100 iter마다 Telegram 리포트 + 1000 iter마다 자동 영상 리포트)
-python scripts/heartbeat.py --iter_step 100 --video_iter_step 1000 --poll 30
-
-# Supervisor (Telegram command loop)
-python scripts/supervisor.py
+python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 ```
 
-### Heartbeat / Supervisor 역할 분담
+**IsaacOps 특징**:
+- **통합 listener**: supervisor(Telegram 명령) + heartbeat(KPI 모니터링) + 자동 영상 리포트를 단일 프로세스로 처리
+- **CLI 도구**: `cli.cmd`로 터미널에서 직접 명령 실행 (Telegram을 거치지 않음)
+- **self-contained**: `isaac_ops/` 폴더만으로 독립 동작 가능, 다른 프로젝트에 재사용 가능
+- **heartbeat 리포트**: raw metric 중심으로 간소화, 자동 판정은 iter 500 이후부터만 활성화
 
-- `heartbeat.py`: TensorBoard 기반 상태 감시. 두 가지 주기로 동작:
-  - **텍스트 heartbeat** (100 iter): `standing_height`, `forward_velocity`, `diagonal_coupling`, `trot_gait`, `rear_joint_velocity`, `foot_clearance` 등 KPI를 Telegram 리포트
-  - **자동 영상 리포트** (1000 iter): 훈련 정지 → 해당 milestone checkpoint(model_1000.pt 등)로 영상 녹화 → Telegram 전송 → 훈련 재개. 누락된 milestone이 복수 개이면 순차 소급 보완.
-  - 환경변수 `VIDEO_REPORT_ITER_STEP=1000`으로 주기 변경 가능
-- `supervisor.py`: Telegram 명령 처리 담당. `start`, `stop`, `status`, `report`, `front`, `rear`, `top`, `side`, `help` 지원
-- active 운영 원칙:
-  - `start` / `stop`만 훈련 상태를 바꿈
-  - `report/front/rear/top/side`는 훈련 중이면 최신 기존 산출물만 전송
-  - `report/front/rear/top/side`는 훈련 정지 상태에서 현재 checkpoint 기준으로 **항상 새 산출물을 생성** (캐시 재사용 안 함)
-  - 새 산출물 생성 시 멀티뷰 해시 중복을 검증하고, 중복이면 실패로 처리 (옵션으로 GUI 재시도 가능)
-  - auto-resume / emergency resume / supervisor-heartbeat 상호복구 루프는 active 경로에서 사용하지 않음
-- 파일명 변경 기록:
-  - `scripts/training_supervisor.py` → `scripts/supervisor.py`
-  - `scripts/training_heartbeat.py` → `scripts/heartbeat.py`
-  - `scripts/training_common.py` / `scripts/v2/common.py` 계열 실험본 → `scripts/common.py`
-  - 구 운영 코드는 `scripts/legacy/` 아래에 참고용으로 남김
+**Telegram 명령** (listener가 실행 중일 때):
+- `start` / `stop` / `resume` — 훈련 제어
+- `status` — 현재 상태 조회
+- `report` / `front` / `rear` / `top` / `side` — 영상 리포트
+- `help` — 명령 목록
 
 ### 현재 운영 기준
 
-- 학습 버전: `V29` (Residency Band-High + Stride Length + Swing Gate Velocity)
-- active 운영 스크립트: `scripts/supervisor.py`, `scripts/heartbeat.py`, `scripts/common.py`
+- 학습 버전: `V31.2` (Joint-Level Front Swing Activation)
+- active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
-- 참고 문서: `plan/V29_PLAN.md` (구현), `plan/V28.3_ANALYSIS.md` (실패 분석)
-- 이전 버전 문서: `plan/V28.3_ANALYSIS.md` (front cap 실패), `plan/V28_HISTORY.md`, `plan/V26_ANALYSIS.md`
-
-#### Supervisor 개선사항 (V28~V29)
-
-- **버전 자동 동기화**: `env_cfg.py`가 TRAIN_VERSION 단일 권위 소스. `.env` 불일치 시 시작 시 자동 동기화 (silent failure 방지)
-- **중복 프로세스 차단**: `--listen` 시 기존 supervisor/heartbeat 자동 종료 후 PID lock 해제
-- **모든 알림에 버전 표시**: Telegram 메시지에 `[V29]` 태그 명시
+- 참고 문서: `plan/HANDOFF.md` (최신 상태), `plan/QUADRUPED_RL_RESEARCH.md` (연구 조사)
 
 ---
 
@@ -241,32 +229,25 @@ python scripts/supervisor.py
 
 **안전장치**: ep_len < 200이면 ramp 일시 정지 (metric gating)
 
-### V29 Reward 3-Layer Architecture (현재)
+### V31.2 Reward Architecture (현재)
 
-**Layer 1: Residency Band** — 4발 contact/propulsion/usage를 [band_low, band_high] 밴드 내 유지
+50+ reward 항목이 있으며, 핵심 구조는 다음과 같습니다:
 
-| reward | curriculum ramp | 역할 |
-|--------|--------|------|
-| `per_leg_contact_band_residency_reward` | curriculum | 4발 contact EMA를 [0.25, 0.65] 밴드 내 유지 |
-| `per_leg_propulsion_band_residency_reward` | curriculum | 4발 propulsion EMA를 [0.15, 0.65] 밴드 내 유지 |
-| `limb_usage_band_residency_reward` | curriculum | 4발 usage EMA를 [0.15, 0.65] 밴드 내 유지 |
+**기본 보상**: velocity tracking, orientation, joint penalties, action rate, base height, collision
 
-**band_high=0.65의 의미**: FL contact > 0.65이면 residency reward = 0 → 앞발 고착이 손해가 되는 reward 내부 구조 (V28.3의 외부 cap 패널티 방식 대비 근본 해결)
+**Residency Band** — 4발 contact/propulsion/usage를 밴드 내 유지 (band_high=0.65로 앞발 고착 억제)
 
-**Layer 2: Symmetry Enforcement** — rear pair 대칭 + front-rear 균형
+**Symmetry Enforcement** — rear pair 대칭 + front-rear 균형
 
-| reward | weight | 역할 |
-|--------|--------|------|
-| `rear_pair_contact_diff_penalty` | -12.0 | rear 좌우 contact 편중 억제 (V28.2 핵심) |
-| `front_rear_support_balance_penalty` | -5.0 | 앞/뒤 전체 지지 편중 억제 (max_diff=0.50) |
-| `diagonal_coupling_soft_gate_reward` | +25.0 | collapse 다리 포함 diagonal 보상 soft gating |
+**Front Swing Activation (V31.2)** — joint-level 접근으로 앞다리 활성화:
+- `front_joint_velocity` (+15.0): 앞다리 관절 움직임 보상
+- `front_joint_frozen` (-40.0): 앞다리 관절 정지 패널티
+- curriculum ramp: iter 100→400
 
-**Layer 3: Gait Quality** — V29 신규 (stride + swing gate)
-
-| reward | curriculum ramp | 역할 |
-|--------|--------|------|
-| `stride_length_reward` | iter 400→700 (max 12.0) | 보폭 0.10m 목표 — 앞발만 접지한 벌레걸음 억제 |
-| `swing_quality_gated_velocity` | iter 600→900 (max 15.0) | 4발 min swing ratio ≥ 0.15일 때만 전진 보상 — 벌레걸음 원천 차단 |
+**향후 계획** (연구 조사 기반):
+- V32: `feet_air_time` 도입 — 4발 공통 체공시간 보상 (legged_gym 표준)
+- V33: gait phase clock — 명시적 trot 패턴 강제
+- V34+: 보상 항목 대폭 축소 (50개 → 20개)
 
 ### 리워드 함수 패턴
 
@@ -285,7 +266,7 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 운영 해석 원칙:
 - 운동학 KPI 우선 확인 (joint velocity 기반)
 - flat 환경 contact 기준: `toe_link` 우선
-- limb validity 4단계: observe → early_warning → lock_warning → enforce (iter 600+)
+- limb validity 4단계: observe(~500) → early_warning(500~800) → lock_warning(800~1200) → enforce(1200+)
 
 ### PPO 하이퍼파라미터
 
@@ -324,7 +305,11 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V28** | **03-16** | **V27 재기동 + 하이퍼파라미터 조정** | ❌ 실패 (RR collapse) |
 | **V28.2** | **03-16** | **rear pair 대칭 강제 (rear_pair_contact_diff_penalty)** | ✅ 성공 (iter 1703 rear_usage_diff=0.012) |
 | **V28.3** | **03-17** | **front contact cap(-10.0) 추가** | ❌ 실패 (FL/FR contact 0.83~0.88 고착) |
-| **V29** | **03-17~** | **Residency band_high=0.65 + stride_length + swing_gate_velocity** | 🔄 훈련 준비 |
+| **V29** | **03-17** | **Residency band_high=0.65 + stride_length + swing_gate_velocity** | ✅ 완료 |
+| **V30** | **03-17** | **Symmetric init pose + supervisor reliability** | ✅ 완료 (FL/FR lock-in 미해결) |
+| **V31** | **03-18** | **Front swing enforcement (mirror rear rewards)** | ❌ 실패 (역할 분리 유발) |
+| **V31.1** | **03-18** | **front_both_ground + min_swing_ratio** | ❌ 실패 (역할 분리) |
+| **V31.2** | **03-18~** | **Joint-level front activation (front_joint_velocity/frozen)** | 🔄 훈련 중 |
 
 ### 핵심 교훈
 
@@ -334,6 +319,9 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 - PPO 안정성은 `gamma × reward_scale`에 좌우됨 (gamma 0.99→0.97로 해결)
 - Critic reset + fine-tune은 큰 리워드 변경에 부적합 → from-scratch 권장
 - 곱셈 리워드 `(A × B)`로 "둘 다 해야" 조건 표현 가능
+- **다리별 전용 보상(front_*, rear_*)은 역할 분리를 유발** → 4발 공통 보상(feet_air_time)이 더 안전
+- **보상 50개+는 항목 간 상호작용 예측 불가** → 성공한 프레임워크는 15~20개 수준
+- **Gait 패턴은 "발견"보다 "지시"가 안정적** → phase clock 또는 CPG 구조적 강제가 효과적
 
 ---
 
@@ -348,11 +336,10 @@ python scripts/analyze_v20.py
 ```
 
 분석/운영 문서:
-- `plan/V19_ANALYSIS.md` ~ `plan/V26_ANALYSIS.md`
-- `plan/V28_HISTORY.md` (V28 series 경과)
-- `plan/V28.3_ANALYSIS.md` (front cap 실패 근본 원인 분석)
-- `plan/V29_PLAN.md` (현재 구현 — active)
-- `plan/HANDOFF.md` (AI 세션 핸드오프 — 최신 상태 요약)
+- `plan/HANDOFF.md` — AI 세션 핸드오프 (최신 상태 요약)
+- `plan/QUADRUPED_RL_RESEARCH.md` — 4족 보행 RL 연구 조사 (legged_gym, Walk These Ways, AllGaits 비교)
+- `plan/V*_ANALYSIS.md` / `plan/V*_PLAN.md` — 버전별 분석/계획
+- `plan/V01-V08_HISTORY.md` ~ `plan/V18_HISTORY.md` — 버전별 히스토리
 
 ---
 
