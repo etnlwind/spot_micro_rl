@@ -803,8 +803,12 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
     try:
         while True:
             try:
+                _t0 = time.time()
                 common.ensure_heartbeat_running(common.SUPERVISOR_LOG, iter_step=args.iter_step, poll=args.heartbeat_poll)
-                for update in common.fetch_updates(timeout_sec=30, log_path=common.SUPERVISOR_LOG):
+                _t1 = time.time()
+                if _t1 - _t0 > 2.0:
+                    common.write_log(f"[PerfDebug] ensure_heartbeat_running took {_t1 - _t0:.1f}s", common.SUPERVISOR_LOG)
+                for update in common.fetch_updates(timeout_sec=0, log_path=common.SUPERVISOR_LOG):
                     update_id = int(update.get("update_id", 0) or 0)
                     if not _remember_update_id(update_id):
                         common.write_log(f"Skipped duplicate Telegram update_id={update_id}", common.SUPERVISOR_LOG)
@@ -921,6 +925,7 @@ def _run_supervisor_loop(args: argparse.Namespace) -> int:
                         parse_mode="HTML",
                     )
                     break
+                time.sleep(1)  # short polling 간격: 1초
             except Exception as err:
                 try:
                     common.update_state(last_error=str(err))

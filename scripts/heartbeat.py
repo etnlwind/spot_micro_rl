@@ -171,6 +171,7 @@ def main() -> None:
     collapse_consecutive_count = 0
     collapse_restart_done = False  # 현재 run에서 이미 restart했으면 중복 방지
     _training_stopped_by_heartbeat = False  # heartbeat가 stop_training 호출했는지 추적
+    _perf_checked = False  # 현재 run에서 perf 체크 완료 여부
     try:
         while True:
             try:
@@ -204,6 +205,33 @@ def main() -> None:
                         last_video_milestone = skip_up_to
                     collapse_consecutive_count = 0
                     collapse_restart_done = False
+                    _perf_checked = False  # 새 run → perf 체크 리셋
+
+                # ── Perf check: 새 run iter 20+ 시점에서 1회 속도 점검 ──
+                if not _perf_checked and current_iter >= 20:
+                    _perf_checked = True
+                    perf_ct = data.get("Perf/collection time", [])
+                    perf_fps = data.get("Perf/total_fps", [])
+                    if perf_ct and len(perf_ct) >= 3:
+                        avg_ct = sum(v for _, v in perf_ct[-5:]) / min(len(perf_ct), 5)
+                        avg_fps = sum(v for _, v in perf_fps[-5:]) / min(len(perf_fps), 5) if perf_fps else 0
+                        common.write_log(
+                            f"[Perf] iter={current_iter} avg_collection_time={avg_ct:.1f}s avg_fps={avg_fps:.0f}",
+                            common.HEARTBEAT_LOG,
+                        )
+                        if avg_ct > 30.0:
+                            common.write_log(
+                                f"[Perf] WARNING: collection_time {avg_ct:.1f}s >> 15s normal — abnormally slow!",
+                                common.HEARTBEAT_LOG,
+                            )
+                            common.send_text(
+                                f"🐢 <b>PERF WARNING</b> — run {run_name}\n"
+                                f"<code>collection_time={avg_ct:.1f}s (normal ~15s)</code>\n"
+                                f"<code>fps={avg_fps:.0f} (normal ~80k)</code>\n"
+                                f"<i>iter {current_iter}: 훈련 속도 비정상 — 코드 또는 환경 점검 필요</i>",
+                                common.HEARTBEAT_LOG,
+                                parse_mode="HTML",
+                            )
 
                 # restart-on-collapse: iter 범위/임계값은 TRAINING_CONFIG["collapse_restart"] 기준
                 if (not collapse_restart_done

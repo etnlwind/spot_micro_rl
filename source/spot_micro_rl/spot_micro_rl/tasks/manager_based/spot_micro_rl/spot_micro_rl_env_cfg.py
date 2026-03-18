@@ -919,16 +919,11 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
 
         # V31.2: Front joint velocity reward (rear_joint_velocity 미러)
-        front_joint_cfg = SceneEntityCfg("robot", joint_names=[
-            "front_left_shoulder", "front_right_shoulder",
-            "front_left_leg", "front_right_leg",
-            "front_left_foot", "front_right_foot",
-        ])
         self.rewards.front_joint_velocity = RewTerm(
             func=custom_mdp.front_joint_velocity_reward,
             weight=0.0,  # curriculum이 15.0까지 ramp (iter 100~400)
             params={
-                "front_joint_cfg": front_joint_cfg,
+                "front_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_shoulder", "front_right_shoulder", "front_left_leg", "front_right_leg", "front_left_foot", "front_right_foot"]),
                 "asset_cfg": SceneEntityCfg("robot"),
                 "vel_threshold": 0.5,
                 "min_vel": 0.05,
@@ -939,7 +934,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             func=custom_mdp.front_joint_frozen_penalty,
             weight=0.0,  # curriculum이 -40.0까지 ramp (iter 100~400)
             params={
-                "front_joint_cfg": front_joint_cfg,
+                "front_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_shoulder", "front_right_shoulder", "front_left_leg", "front_right_leg", "front_left_foot", "front_right_foot"]),
                 "asset_cfg": SceneEntityCfg("robot"),
                 "frozen_threshold": 0.3,
                 "min_vel": 0.05,

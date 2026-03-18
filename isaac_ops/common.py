@@ -1403,6 +1403,11 @@ def _looks_like_supervisor_command(name: str, cmdline: str) -> bool:
     return "scripts\\supervisor.py" in cmdline_l or "scripts/supervisor.py" in cmdline_l
 
 
+def _looks_like_listener_command(name: str, cmdline: str) -> bool:
+    cmdline_l = cmdline.lower()
+    return "isaac_ops\\listener.py" in cmdline_l or "isaac_ops/listener.py" in cmdline_l
+
+
 def _list_matching_processes(match_fn) -> list[dict]:
     processes = []
     for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
@@ -1426,9 +1431,9 @@ def _list_matching_processes(match_fn) -> list[dict]:
     return sorted(deduped.values(), key=lambda item: item["pid"])
 
 
-def _scan_all_managed_processes() -> tuple[list[dict], list[dict], list[dict]]:
-    """training / heartbeat / supervisor 프로세스를 psutil 1회 스캔으로 동시 수집."""
-    training, heartbeat, supervisor = [], [], []
+def _scan_all_managed_processes() -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """training / heartbeat / supervisor / listener 프로세스를 psutil 1회 스캔으로 동시 수집."""
+    training, heartbeat, supervisor, listener = [], [], [], []
     for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
         try:
             cmdline = " ".join(proc.info["cmdline"] or [])
@@ -1447,13 +1452,16 @@ def _scan_all_managed_processes() -> tuple[list[dict], list[dict], list[dict]]:
                 heartbeat.append(entry)
             if _looks_like_supervisor_command(name, cmdline):
                 supervisor.append(entry)
+            if _looks_like_listener_command(name, cmdline):
+                listener.append(entry)
         except (psutil.Error, PermissionError, OSError):
             pass
     key = "pid"
     training = sorted({e[key]: e for e in training}.values(), key=lambda x: x[key])
     heartbeat = sorted({e[key]: e for e in heartbeat}.values(), key=lambda x: x[key])
     supervisor = sorted({e[key]: e for e in supervisor}.values(), key=lambda x: x[key])
-    return training, heartbeat, supervisor
+    listener = sorted({e[key]: e for e in listener}.values(), key=lambda x: x[key])
+    return training, heartbeat, supervisor, listener
 
 
 def list_heartbeat_processes() -> list[dict]:
@@ -2523,11 +2531,14 @@ def _build_status_snapshot(use_cache: bool = True) -> dict:
     if use_cache and _status_snapshot_cache is not None and now - _status_snapshot_cache_time < _STATUS_SNAPSHOT_TTL_SEC:
         return _status_snapshot_cache
     state = load_state()
-    # 프로세스 스캔 1회로 training / heartbeat / supervisor 동시 수집 — run_dir/checkpoint 해석에도 재사용
-    training_procs, heartbeat_procs, supervisor_procs = _scan_all_managed_processes()
+    # 프로세스 스캔 1회로 training / heartbeat / supervisor / listener 동시 수집
+    training_procs, heartbeat_procs, supervisor_procs, listener_procs = _scan_all_managed_processes()
     run_dir = resolve_active_run_dir(training_procs=training_procs)
     checkpoint = resolve_active_checkpoint(run_dir, training_procs=training_procs)
     training_alive = bool(training_procs)
+    listener_alive = bool(listener_procs) or bool(_read_live_pid_lock(
+        os.path.join(PROJECT_ROOT, "logs", "listener.pid")))
+    # Legacy: heartbeat/supervisor 프로세스가 별도로 살아있을 수도 있음
     heartbeat_alive = bool(heartbeat_procs) or bool(_read_live_pid_lock(HEARTBEAT_PID_FILE))
     supervisor_alive = bool(supervisor_procs)
     kpi_snapshot = build_supervisor_kpi_snapshot(run_dir) if run_dir and os.path.isdir(run_dir) else {}
@@ -2545,28 +2556,25 @@ def _build_status_snapshot(use_cache: bool = True) -> dict:
     if not _path_matches_run(last_report_zip, run_dir):
         last_report_zip = find_latest_report_zip(run_dir) or ""
     last_heartbeat_report_text = _get_last_heartbeat_age(run_dir)
-    if heartbeat_alive:
-        last_heartbeat_text = f"alive | report {last_heartbeat_report_text}"
+    # monitor 상태: listener가 살아있으면 monitor도 활성
+    monitor_alive = listener_alive or heartbeat_alive
+    if monitor_alive:
+        last_monitor_text = f"alive | report {last_heartbeat_report_text}"
     elif last_heartbeat_report_text != "N/A":
-        last_heartbeat_text = f"stopped | report {last_heartbeat_report_text}"
+        last_monitor_text = f"stopped | report {last_heartbeat_report_text}"
     else:
-        last_heartbeat_text = "stopped"
-    supervisor_version_text = _process_status_version_text(
-        supervisor_procs,
-        [SUPERVISOR_SCRIPT, __file__],
-        pid_file=SUPERVISOR_PID_FILE,
-    )
-    heartbeat_version_text = _process_status_version_text(
-        heartbeat_procs,
-        [HEARTBEAT_SCRIPT, __file__],
-        pid_file=HEARTBEAT_PID_FILE,
+        last_monitor_text = "stopped"
+    listener_version_text = _process_status_version_text(
+        listener_procs,
+        [os.path.join(PROJECT_ROOT, "isaac_ops", "listener.py"), __file__],
+        pid_file=os.path.join(PROJECT_ROOT, "logs", "listener.pid"),
     )
     cached_mode = str(state.get("mode", "idle"))
     if cached_mode in {"reporting", "rendering"}:
         mode = cached_mode
     elif training_alive:
         mode = "training"
-    elif supervisor_alive or heartbeat_alive:
+    elif listener_alive or supervisor_alive or heartbeat_alive:
         mode = "idle"
     else:
         mode = cached_mode
@@ -2576,6 +2584,7 @@ def _build_status_snapshot(use_cache: bool = True) -> dict:
         "checkpoint": checkpoint,
         "iter_num": iter_num,
         "training_alive": training_alive,
+        "listener_alive": listener_alive,
         "heartbeat_alive": heartbeat_alive,
         "mode": mode,
         "progress_text": f"{iter_num:,}/{MAX_ITERATIONS:,} ({progress_pct:.1f}%)",
@@ -2583,11 +2592,10 @@ def _build_status_snapshot(use_cache: bool = True) -> dict:
         "ep_len_text": f"{float(kpi_snapshot.get('ep_len') or 0.0):.1f}" if kpi_snapshot else "N/A",
         "verdict_text": str(kpi_snapshot.get("verdict") or "N/A") if kpi_snapshot else "N/A",
         "kpi_text": str(kpi_snapshot.get("kpi_line") or "N/A") if kpi_snapshot else "N/A",
-        "last_heartbeat_text": last_heartbeat_text,
+        "last_monitor_text": last_monitor_text,
         "last_report_zip_name": os.path.basename(last_report_zip) if last_report_zip else "N/A",
         "available_views": available_views,
-        "supervisor_version_text": supervisor_version_text,
-        "heartbeat_version_text": heartbeat_version_text,
+        "listener_version_text": listener_version_text,
     }
     _status_snapshot_cache = result
     _status_snapshot_cache_time = now
@@ -3887,9 +3895,6 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
     if trend_lines:
         lines.extend(["", "- 핵심 추세"])
         lines.extend(f"  {line}" for line in trend_lines)
-    if False:  # penalty_trend_lines removed — redundant with TOP5 패널티
-        pass
-        lines.extend(f"  {html.escape(text)}" for text in penalty_trend_lines)
     lines.extend(
         [
             "",
@@ -4808,13 +4813,13 @@ def build_status_text() -> str:
     def _status_light(value: str, mapping: dict[str, str], default: str) -> str:
         return f"{mapping.get(value, default)}{value}"
 
+    listener_alive = snapshot.get("listener_alive", False)
     lines = [
-        "👮 SUPERVISOR STATUS",
+        "👮 IsaacOps STATUS",
         f"• mode: {_status_light(mode, {'idle': '🔴', 'training': '🟢', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}",
         f"• training: {_status_light('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
-        f"• heartbeat: {_status_light('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
-        f"• supervisor_version: {snapshot['supervisor_version_text']}",
-        f"• heartbeat_version: {snapshot['heartbeat_version_text']}",
+        f"• listener: {_status_light('alive' if listener_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}",
+        f"• listener_version: {snapshot['listener_version_text']}",
         f"• train_version: {TRAIN_VERSION}",
         f"• run: {os.path.basename(run_dir) if run_dir else 'N/A'}",
         f"• checkpoint: {os.path.basename(checkpoint) if checkpoint else 'N/A'}",
@@ -4824,7 +4829,7 @@ def build_status_text() -> str:
         f"• ep_len: {snapshot['ep_len_text']}",
         f"• verdict: {snapshot['verdict_text']}",
         f"• kpi: {snapshot['kpi_text']}",
-        f"• last_heartbeat: {snapshot['last_heartbeat_text']}",
+        f"• last_monitor: {snapshot['last_monitor_text']}",
         f"• last_report_zip: {snapshot['last_report_zip_name']}",
     ]
     available_views = snapshot["available_views"]
@@ -4847,13 +4852,13 @@ def format_status_html() -> str:
     def _status_light_html(value: str, mapping: dict[str, str], default: str) -> str:
         return f"{mapping.get(value, default)}{html.escape(value)}"
 
+    listener_alive = snapshot.get("listener_alive", False)
     lines = [
-        "👮 <b>SUPERVISOR STATUS</b>",
+        "👮 <b>IsaacOps STATUS</b>",
         f"• mode: <code>{_status_light_html(mode, {'idle': '🔴', 'training': '🟢', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}</code>",
         f"• training: <code>{_status_light_html('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
-        f"• heartbeat: <code>{_status_light_html('alive' if heartbeat_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
-        f"• supervisor_version: <code>{html.escape(snapshot['supervisor_version_text'])}</code>",
-        f"• heartbeat_version: <code>{html.escape(snapshot['heartbeat_version_text'])}</code>",
+        f"• listener: <code>{_status_light_html('alive' if listener_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
+        f"• listener_version: <code>{html.escape(snapshot['listener_version_text'])}</code>",
         f"• train_version: <code>{html.escape(TRAIN_VERSION)}</code>",
         f"• run: <code>{html.escape(os.path.basename(run_dir) if run_dir else 'N/A')}</code>",
         f"• checkpoint: <code>{html.escape(os.path.basename(checkpoint) if checkpoint else 'N/A')}</code>",
@@ -4863,7 +4868,7 @@ def format_status_html() -> str:
         f"• ep_len: <code>{html.escape(snapshot['ep_len_text'])}</code>",
         f"• verdict: <code>{html.escape(snapshot['verdict_text'])}</code>",
         f"• kpi: <code>{html.escape(snapshot['kpi_text'])}</code>",
-        f"• last_heartbeat: <code>{html.escape(snapshot['last_heartbeat_text'])}</code>",
+        f"• last_monitor: <code>{html.escape(snapshot['last_monitor_text'])}</code>",
         f"• last_report_zip: <code>{html.escape(snapshot['last_report_zip_name'])}</code>",
     ]
     available_views = snapshot["available_views"]
