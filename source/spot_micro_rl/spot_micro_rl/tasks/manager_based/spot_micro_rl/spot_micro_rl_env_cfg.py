@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V31.2"
+TRAIN_VERSION = "V32"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -248,13 +248,13 @@ class SpotMicroRewardCurriculumCfg:
             # V31: front swing ramp (iter 100~400) — 앞다리 swing 강제
             "front_swing_ramp_start": 100,
             "front_swing_ramp_end": 400,
-            "front_swing_bonus_max": 12.0,         # rear_swing(15)의 80%
-            "front_alternation_max": 0.0,          # V31.1: 비활성화 — 고정역할 보상 역효과
-            "front_both_ground_max": 0.0,          # V31.2: 비활성화 — 대각 역할 분리 유발
-            "min_swing_ratio_max": 0.0,            # V31.2: 비활성화 — 대각 역할 분리 유발
-            # V31.2: front joint-level rewards (rear_joint_velocity/frozen 미러)
-            "front_joint_velocity_max": 15.0,      # rear(20)의 75% — 앞다리 보수적
-            "front_joint_frozen_max": -40.0,       # rear(-60)의 67% — 앞다리 동결 처벌
+            "front_swing_bonus_max": 0.0,          # V32: 비활성화 — feet_air_time으로 대체
+            "front_alternation_max": 0.0,          # V31.1: 비활성화
+            "front_both_ground_max": 0.0,          # V31.2: 비활성화
+            "min_swing_ratio_max": 0.0,            # V31.2: 비활성화
+            # V32: front joint-level 비활성화 — feet_air_time이 4발 공통 swing 유도
+            "front_joint_velocity_max": 0.0,       # V32: 비활성화
+            "front_joint_frozen_max": 0.0,         # V32: 비활성화
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -357,9 +357,11 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             weight=-3.0,  # V17: -0.1→-3.0 (빠른 떨림 억제)
             params={"max_value": 50.0},
         )
-        # V17.1: feet_air_time 문턱값 완화 (0.25s는 점프 유발)
-        self.rewards.feet_air_time.weight = 8.0   # V17 유지
-        self.rewards.feet_air_time.params["threshold"] = 0.1  # V17.1: 0.25→0.1s (솟구침 방지)
+        # V32: feet_air_time을 4발 공통 swing 유도의 핵심 보상으로 강화
+        # legged_gym 표준: threshold=0.5, weight=1.0 (15개 보상 기준)
+        # 우리: 50+ 보상이므로 weight를 높여야 경쟁 가능
+        self.rewards.feet_air_time.weight = 30.0   # V17: 8.0 → V32: 30.0
+        self.rewards.feet_air_time.params["threshold"] = 0.3  # V17.1: 0.1 → V32: 0.3 (0.3초 이상 체공 유도)
 
         # V17: 관절 속도 억제 대폭 강화 (빠른 진동 차단)
         self.rewards.joint_vel_l2 = RewTerm(
@@ -546,10 +548,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V16: 뒷발 스윙 보너스 (강화 — 뒷다리 높이 들기 유도)
+        # V16: 뒷발 스윙 보너스 (V32: feet_air_time이 공통 swing 유도하므로 축소)
         self.rewards.rear_swing = RewTerm(
             func=custom_mdp.rear_swing_bonus,
-            weight=15.0,  # V16: 7→15 (뒷발 리프트 강화)
+            weight=8.0,  # V32: 15→8 (feet_air_time 30.0이 주도, rear bias 축소)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "foot_cfg": toe_body_cfg,
@@ -581,10 +583,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V15: 뒷다리 활성화 보상 (from-scratch 학습에 맞는 보수적 가중치)
         # ============================================================
 
-        # V16: 뒷다리 관절 속도 보상 (강화)
+        # V16: 뒷다리 관절 속도 보상 (V32: feet_air_time이 주도하므로 축소)
         self.rewards.rear_joint_velocity = RewTerm(
             func=custom_mdp.rear_joint_velocity_reward,
-            weight=20.0,  # V16: 15→20 (뒷다리 활성화 강화)
+            weight=12.0,  # V32: 20→12 (rear bias 축소, feet_air_time이 4발 공통 유도)
             params={
                 "rear_joint_cfg": SceneEntityCfg("robot", joint_names=["rear_left_shoulder", "rear_right_shoulder", "rear_left_leg", "rear_right_leg", "rear_left_foot", "rear_right_foot"]),
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -605,10 +607,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V16: 뒷다리 교대 보상 (강화)
+        # V16: 뒷다리 교대 보상 (V32: feet_air_time이 공통 swing 유도하므로 축소)
         self.rewards.rear_alternation = RewTerm(
             func=custom_mdp.rear_alternation_reward,
-            weight=30.0,  # V16: 20→30 (뒷다리 교대 강화)
+            weight=15.0,  # V32: 30→15 (feet_air_time이 4발 교대를 유도, rear 독점 축소)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
