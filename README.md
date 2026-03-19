@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V31.2 (Joint-Level Front Swing Activation) 훈련 중
+**현재 상태**: V34 (rel_standing_envs 기반 3-Phase 커리큘럼: 서기→걷기) 훈련 준비
 
 ### 기술 스택
 
@@ -17,7 +17,7 @@ NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈
 | Python | 3.10 (conda env `env_isaaclab`) |
 | 알고리즘 | PPO ([RSL-RL](https://github.com/leggedrobotics/rsl_rl)) |
 | GPU | NVIDIA RTX 5080 Laptop 16GB |
-| 병렬 환경 수 | 24,576 |
+| 병렬 환경 수 | 20,480 |
 | 최대 iteration | 15,000 |
 
 ### 등록된 환경
@@ -206,48 +206,41 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V31.2` (Joint-Level Front Swing Activation)
+- 학습 버전: `V34` (rel_standing_envs 기반 3-Phase Stand→Walk 커리큘럼)
 - active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
-- 참고 문서: `plan/HANDOFF.md` (최신 상태), `plan/QUADRUPED_RL_RESEARCH.md` (연구 조사)
+- 참고 문서: `plan/V34_PLAN.md` (현재), `plan/HANDOFF.md`, `plan/QUADRUPED_RL_RESEARCH.md`
 
 ---
 
 ## Reward Design
 
-### Soft-Ramp Curriculum (V20~)
+### V34 Stand→Walk 커리큘럼 (현재)
 
-하드 phase switch 대신 **선형 보간**으로 가중치를 점진적으로 전환:
+Isaac Lab 내장 `rel_standing_envs` + command range 커리큘럼으로 **서기→걷기** 3-Phase 전환:
 
 | 구간 | Iteration 범위 | 내용 |
 |------|----------------|------|
-| Phase 1 (STAND) | 0 ~ 1,500 | 서기 안정화, 약한 페널티 |
-| Ramp 1→2 | 1,500 ~ 3,000 | STAND→WALK 선형 보간 |
-| Phase 2 (WALK) | 3,000 ~ 5,500 | 전진 보행, gait 도입 |
-| Ramp 2→3 | 5,500 ~ 8,000 | WALK→TROT 선형 보간 |
-| Phase 3 (TROT) | 8,000 ~ 15,000 | trot gait 완성 |
+| Phase 1 (STAND) | 0 ~ 200 | 80% env standing, 극저속 command, 자세 안정화 |
+| Phase 2 (TRANSITION) | 200 ~ 500 | standing 비율/command range/reward weight 선형 ramp |
+| Phase 3 (WALK) | 500+ | 10% standing, 본격 보행, 전체 reward 활성 |
 
-**안전장치**: ep_len < 200이면 ramp 일시 정지 (metric gating)
+**핵심 메커니즘**:
+- `rel_standing_envs=0.8`: standing env에 command=0 자동 할당 (Isaac Lab 내장)
+- `track_lin_vel_xy_exp=1.5` 처음부터 ON → standing env에서 "0 추적 성공" = 서기 보상
+- Command range: (0.01, 0.15) → (0.1, 0.5) 점진 확대
 
-### V31.2 Reward Architecture (현재)
+### V34 Reward Architecture
 
-50+ reward 항목이 있으며, 핵심 구조는 다음과 같습니다:
+V33 근본 재설계(122→28개) 기반, ~28개 핵심 보상:
 
-**기본 보상**: velocity tracking, orientation, joint penalties, action rate, base height, collision
+**자세 제어** (처음부터 활성): `shoulder_neutral(-15)`, `joint_deviation(-1)`, `standing_height(+15)`, `base_height_l2(-15)`, `flat_orientation_l2(-5)`
 
-**Residency Band** — 4발 contact/propulsion/usage를 밴드 내 유지 (band_high=0.65로 앞발 고착 억제)
+**Gait 패턴** (4발 공통, 처음부터 활성): `feet_air_time(+20)`, `trot_gait(+40)`, `same_side_penalty(-30)`, `diagonal_coupling(+25)`
 
-**Symmetry Enforcement** — rear pair 대칭 + front-rear 균형
+**전진/보행** (Phase 2 커리큘럼): `forward_velocity(0→5)`, `stationary_penalty(0→-3)`, `min_swing_ratio(0→-15)`, `rear_both_ground(0→-60)`
 
-**Front Swing Activation (V31.2)** — joint-level 접근으로 앞다리 활성화:
-- `front_joint_velocity` (+15.0): 앞다리 관절 움직임 보상
-- `front_joint_frozen` (-40.0): 앞다리 관절 정지 패널티
-- curriculum ramp: iter 100→400
-
-**향후 계획** (연구 조사 기반):
-- V32: `feet_air_time` 도입 — 4발 공통 체공시간 보상 (legged_gym 표준)
-- V33: gait phase clock — 명시적 trot 패턴 강제
-- V34+: 보상 항목 대폭 축소 (50개 → 20개)
+**Rear 부팅 신호** (처음부터 활성): `rear_joint_frozen(-60)`, `rear_joint_velocity(+10)`, `rear_alternation(+15)`
 
 ### 리워드 함수 패턴
 
@@ -309,7 +302,13 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V30** | **03-17** | **Symmetric init pose + supervisor reliability** | ✅ 완료 (FL/FR lock-in 미해결) |
 | **V31** | **03-18** | **Front swing enforcement (mirror rear rewards)** | ❌ 실패 (역할 분리 유발) |
 | **V31.1** | **03-18** | **front_both_ground + min_swing_ratio** | ❌ 실패 (역할 분리) |
-| **V31.2** | **03-18~** | **Joint-level front activation (front_joint_velocity/frozen)** | 🔄 훈련 중 |
+| **V31.2** | **03-18** | **Joint-level front activation (front_joint_velocity/frozen)** | ✅ 완료 |
+| **V32** | **03-18~03-19** | **feet_air_time core transition + rear bias reduction** | ✅ 완료 |
+| **V33** | **03-19** | **근본 재설계 (122→28개, anti-splay, 4발 공통)** | ❌ 실패 (붕괴) |
+| **V33.1** | **03-19** | **standing_height 강화** | ❌ 실패 (동일 붕괴) |
+| **V33.2** | **03-19** | **rear 절반 복구 (부팅 신호)** | ❌ 실패 (3발 exploit) |
+| **V33.3** | **03-19** | **per-limb penalty (min_swing, limb_usage, validity)** | ❌ 실패 (학습 억제) |
+| **V34** | **03-19~** | **rel_standing_envs 기반 3-Phase Stand→Walk 커리큘럼** | 🔄 훈련 준비 |
 
 ### 핵심 교훈
 
@@ -322,6 +321,8 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 - **다리별 전용 보상(front_*, rear_*)은 역할 분리를 유발** → 4발 공통 보상(feet_air_time)이 더 안전
 - **보상 50개+는 항목 간 상호작용 예측 불가** → 성공한 프레임워크는 15~20개 수준
 - **Gait 패턴은 "발견"보다 "지시"가 안정적** → phase clock 또는 CPG 구조적 강제가 효과적
+- **서기도 못 하는데 보행+전진 동시 요구는 불가** → 단계적 학습(서기→걷기) 필요
+- **reward weight=0으로 Phase 분리하면 관측-보상 불일치** → Isaac Lab `rel_standing_envs` 사용이 정석
 
 ---
 

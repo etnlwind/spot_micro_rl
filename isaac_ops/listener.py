@@ -24,8 +24,9 @@ if SCRIPT_DIR not in sys.path:
 import common  # noqa: E402
 
 # ── Constants ──
-LOG = os.path.join(PROJECT_ROOT, "logs", "listener.log")
-PID_FILE = os.path.join(PROJECT_ROOT, "logs", "listener.pid")
+_OPS_LOG_DIR = os.path.join(SCRIPT_DIR, "log")
+LOG = os.path.join(_OPS_LOG_DIR, "listener.log")
+PID_FILE = os.path.join(_OPS_LOG_DIR, "listener.pid")
 _CONFIRM_TIMEOUT_SEC = 60.0
 
 # Collapse detection config (from TRAINING_CONFIG)
@@ -74,8 +75,8 @@ def _safe_basename(path: str | None) -> str:
     return os.path.basename(path) if path else "N/A"
 
 
-def _send_notice(title: str, body: str, icon: str = "👮") -> None:
-    ver = common.TRAIN_VERSION or "?"
+def _send_notice(title: str, body: str, icon: str = "👮", version: str | None = None) -> None:
+    ver = version or common.TRAIN_VERSION or "?"
     common.send_text(
         f"{icon} <b>IsaacOps — {title}</b>  <code>[{ver}]</code>\n<i>{body}</i>",
         LOG, parse_mode="HTML",
@@ -208,7 +209,8 @@ def _handle_start(pending_confirm_ref: list) -> None:
 def _handle_stop() -> None:
     result = common.stop_training(LOG)
     checkpoint_name = _safe_basename(result["checkpoint"])
-    _send_notice("TRAINING STOPPED", f"killed: {len(result['killed'])}\ncheckpoint: {checkpoint_name}", icon="⏹️")
+    run_version = common.get_run_version(result.get("run_dir", ""))
+    _send_notice("TRAINING STOPPED", f"killed: {len(result['killed'])}\ncheckpoint: {checkpoint_name}", icon="⏹️", version=run_version)
 
 
 def _handle_resume() -> None:
@@ -216,11 +218,12 @@ def _handle_resume() -> None:
     result = common.launch_training(LOG, fresh=False)
     run_name = _safe_basename(result["run_dir"])
     checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A (fresh)"
+    run_version = common.get_run_version(result.get("run_dir", ""))
     icon = "▶️"
     if result["mode"] == "already-running":
-        _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon=icon)
+        _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon=icon, version=run_version)
     else:
-        _send_notice("TRAINING RESUME", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon=icon)
+        _send_notice("TRAINING RESUME", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon=icon, version=run_version)
 
 
 def _handle_report(run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
@@ -441,6 +444,7 @@ def _run_video_report(run_dir: str, milestone: int, current_iter: int, total_mis
         return
 
     common.write_log(f"[VideoReport] iter {milestone} (current={current_iter})", LOG)
+    common.log_event("HB", "VIDEO_REPORT", f"iter={milestone} current={current_iter} catchup={is_catchup}")
     notice_lines = [f"🎬 <b>AUTO VIDEO REPORT — iter {milestone:,}{catchup_label}</b>"]
     if is_catchup:
         notice_lines.append(f"<i>현재 iter {current_iter:,}, iter {milestone:,} 소급 생성</i>")
@@ -576,6 +580,7 @@ class Monitor:
                     if self.collapse_consecutive >= _COLLAPSE_CONSECUTIVE_REQUIRED:
                         self.collapse_restart_done = True
                         common.write_log(f"[Collapse] RESTART triggered @ iter {current_iter}", LOG)
+                        common.log_event("TRAIN", "COLLAPSE_RESTART", f"iter={current_iter} leg={leg}")
                         common.stop_training(LOG)
                         common.send_text(
                             f"🚨 <b>COLLAPSE RESTART — iter {current_iter:,}</b>\n"
@@ -620,6 +625,9 @@ class Monitor:
             common.append_report_record(run_dir, record)
             common.send_text(report_text, LOG, parse_mode="HTML")
             self.last_sent_milestone = milestone
+            rw = float(record.get("mean_reward", 0)) if record else 0
+            el = float(record.get("mean_episode_length", 0)) if record else 0
+            common.log_event("HB", "MILESTONE", f"iter={milestone}", version=common.get_run_version(run_dir), reward=f"{rw:.1f}", ep_len=f"{el:.1f}")
 
         except Exception as err:
             try:
@@ -638,17 +646,52 @@ def main() -> int:
     parser.add_argument("--video-iter-step", type=int, default=common.VIDEO_REPORT_ITER_STEP, help="video report interval")
     args = parser.parse_args()
 
-    # PID lock
+    # PID lock — 기존 listener가 있으면 graceful shutdown 요청 → 대기 → 타임아웃 시 kill
+    old_pid = 0
+    try:
+        if os.path.isfile(PID_FILE):
+            with open(PID_FILE, "r", encoding="utf-8") as f:
+                old_pid = int(f.read().strip())
+    except Exception:
+        old_pid = 0
+    if old_pid and old_pid != os.getpid():
+        import psutil
+        if psutil.pid_exists(old_pid):
+            print(f"[listener] Previous listener found (PID {old_pid}), requesting graceful shutdown...")
+            common.request_supervisor_shutdown("listener-restart")
+            common.log_event("LISTEN", "GRACEFUL_REQ", f"pid={old_pid}")
+            deadline = time.time() + 3
+            while time.time() < deadline and psutil.pid_exists(old_pid):
+                time.sleep(0.5)
+            if psutil.pid_exists(old_pid):
+                print(f"[listener] PID {old_pid} did not exit in 3s, force killing...")
+                try:
+                    psutil.Process(old_pid).kill()
+                    common.log_event("LISTEN", "FORCE_KILLED", f"pid={old_pid} (graceful timeout)")
+                    time.sleep(1)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            else:
+                print(f"[listener] Previous listener (PID {old_pid}) exited cleanly")
+                common.log_event("LISTEN", "GRACEFUL_OK", f"pid={old_pid} exited cleanly")
+            common.clear_supervisor_shutdown_request()
+        else:
+            print(f"[listener] Stale PID file (PID {old_pid} not running), cleaning up")
+    else:
+        print("[listener] No previous listener found")
     common.release_pid_lock(PID_FILE)
     common.acquire_pid_lock(PID_FILE, "isaac_ops", LOG)
+    print(f"[listener] PID lock acquired (PID {os.getpid()})")
     common.write_log(
         f"IsaacOps started | iter_step={args.iter_step} | video_iter_step={args.video_iter_step} | pid={os.getpid()}",
         LOG,
     )
+    common.log_event("LISTEN", "STARTED", f"pid={os.getpid()} iter_step={args.iter_step} video_step={args.video_iter_step}")
 
     # Start receiver thread
     receiver = threading.Thread(target=_telegram_receiver, daemon=True, name="tg-receiver")
     receiver.start()
+    print("[listener] Telegram receiver thread started")
     common.write_log("Telegram receiver thread started", LOG)
 
     # Startup notification
@@ -657,6 +700,7 @@ def main() -> int:
         f"<i>pid={os.getpid()} | iter_step={args.iter_step} | video={args.video_iter_step}</i>",
         LOG, parse_mode="HTML",
     )
+    print(f"[listener] IsaacOps ACTIVE [{common.TRAIN_VERSION}] — monitoring started")
 
     monitor = Monitor(args.iter_step, args.video_iter_step)
     pending_confirm: list = []  # mutable container for confirmation state
@@ -701,6 +745,7 @@ def main() -> int:
                         if command in common.command_variants():
                             command_key = f"{command} {arg_text}".strip()
                             if not _is_duplicate_command(chat_id, user_id, command_key):
+                                common.log_event("CMD", "RECEIVED", f"{command} {arg_text}".strip())
                                 # Immediate ACK
                                 common.send_text(
                                     f"🎛️ <b>{command.upper()} — 요청 수신</b>",
@@ -708,8 +753,10 @@ def main() -> int:
                                 )
                                 try:
                                     _dispatch_command(command, arg_text, pending_confirm)
+                                    common.log_event("CMD", "COMPLETED", command)
                                 except Exception as err:
                                     common.write_log(f"Command error: {err}\n{common.capture_exception()}", LOG)
+                                    common.log_event("ERROR", "CMD_FAILED", f"{command}: {err}")
                                     _send_notice("ERROR", str(err), icon="⚠️")
 
             # ── 2. Check shutdown ──
@@ -717,6 +764,7 @@ def main() -> int:
             if shutdown_source:
                 exit_reason = f"shutdown:{shutdown_source}"
                 common.write_log(f"Shutdown requested by {shutdown_source}", LOG)
+                common.log_event("LISTEN", "SHUTDOWN", shutdown_source)
                 common.send_text(
                     f"👮 <b>IsaacOps STOPPED — {shutdown_source}</b>",
                     LOG, parse_mode="HTML",

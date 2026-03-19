@@ -10,7 +10,7 @@ if SCRIPT_DIR not in sys.path:
 
 import common  # noqa: E402
 
-LOG = os.path.join(common.PROJECT_ROOT, "logs", "cli.log")
+LOG = os.path.join(common._OPS_LOG_DIR, "listener.log")
 
 # Known commands that should be executed directly (not just sent as text)
 _COMMANDS = common.command_variants()
@@ -56,8 +56,9 @@ def _exec_help() -> None:
 def _exec_stop() -> None:
     result = common.stop_training(LOG)
     checkpoint_name = os.path.basename(result["checkpoint"]) if result.get("checkpoint") else "N/A"
+    run_version = common.get_run_version(result.get("run_dir", ""))
     common.send_text(
-        f"⏹️ <b>IsaacOps — TRAINING STOPPED</b>  <code>[{common.TRAIN_VERSION}]</code>\n"
+        f"⏹️ <b>IsaacOps — TRAINING STOPPED</b>  <code>[{run_version}]</code>\n"
         f"<i>killed: {len(result['killed'])}\ncheckpoint: {checkpoint_name}</i>",
         LOG, parse_mode="HTML",
     )
@@ -69,8 +70,9 @@ def _exec_resume() -> None:
     result = common.launch_training(LOG, fresh=False)
     run_name = os.path.basename(result["run_dir"]) if result.get("run_dir") else "N/A"
     checkpoint_name = os.path.basename(result["checkpoint"]) if result.get("checkpoint") else "N/A (fresh)"
+    run_version = common.get_run_version(result.get("run_dir", ""))
     common.send_text(
-        f"▶️ <b>IsaacOps — TRAINING RESUME</b>  <code>[{common.TRAIN_VERSION}]</code>\n"
+        f"▶️ <b>IsaacOps — TRAINING RESUME</b>  <code>[{run_version}]</code>\n"
         f"<i>run: {run_name}\ncheckpoint: {checkpoint_name}</i>",
         LOG, parse_mode="HTML",
     )
@@ -109,32 +111,51 @@ def main() -> int:
     text = " ".join(sys.argv[1:])
     cmd = _normalize(text)
 
+    # Training commands that require Windows (Isaac Lab GPU access)
+    _TRAINING_CMDS = {"start", "stop", "resume"}
+
     try:
-        if cmd == "status":
+        # WSL에서 training 명령은 cmd.exe로 Windows CLI 직접 실행 (로그는 Windows 쪽에서 기록)
+        if cmd in _TRAINING_CMDS and common._IS_WSL:
+            win_root = common._to_win_path(common.PROJECT_ROOT)
+            win_cmd = f'cmd.exe /c "cd /d {win_root} && isaac_ops\\cli.cmd {cmd}"'
+            print(f"[INFO] WSL detected — executing via cmd.exe: {cmd}")
+            os.system(win_cmd)
+        elif cmd == "status":
+            common.log_event("CMD", "CLI_EXEC", cmd)
             _exec_status()
         elif cmd == "hb":
+            common.log_event("CMD", "CLI_EXEC", cmd)
             _exec_hb(text)
         elif cmd == "selfcheck":
+            common.log_event("CMD", "CLI_EXEC", cmd)
             _exec_selfcheck()
         elif cmd == "help":
+            common.log_event("CMD", "CLI_EXEC", cmd)
             _exec_help()
         elif cmd == "stop":
+            common.log_event("CMD", "CLI_EXEC", cmd)
             _exec_stop()
         elif cmd == "resume":
+            common.log_event("CMD", "CLI_EXEC", cmd)
             _exec_resume()
         elif cmd == "start":
+            common.log_event("CMD", "CLI_EXEC", cmd)
             _exec_start()
         elif cmd in _COMMANDS:
             # report, front, rear, top, side, shutdown — 이것들은 listener에서만 실행
+            common.log_event("CMD", "CLI_EXEC", cmd)
             print(f"[INFO] '{cmd}' requires listener. Sending to Telegram chat.")
             common.send_text(text, LOG, parse_mode=None)
             print(f"[OK] sent: {text}")
         else:
             # Plain message
+            common.log_event("CMD", "CLI_SEND", text[:50])
             common.send_text(text, LOG, parse_mode=None)
             print(f"[OK] sent: {text}")
     except Exception as e:
         print(f"[ERR] {e}")
+        common.log_event("ERROR", "CLI_FAILED", f"{cmd}: {e}")
         return 1
     return 0
 

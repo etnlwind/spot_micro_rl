@@ -3625,6 +3625,107 @@ def reward_weight_curriculum(
     return None
 
 
+def stand_walk_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    num_steps_per_env: int = 48,
+    # Phase boundaries (iterations)
+    walk_ramp_start: int = 200,
+    walk_ramp_end: int = 500,
+    # Standing ratio ramp
+    standing_ratio_initial: float = 0.8,
+    standing_ratio_final: float = 0.1,
+    # Command range ramp (tuples)
+    lin_vel_x_initial: tuple = (0.01, 0.15),
+    lin_vel_x_final: tuple = (0.1, 0.5),
+    ang_vel_z_initial: tuple = (-0.15, 0.15),
+    ang_vel_z_final: tuple = (-0.5, 0.5),
+    # Reward weight targets (ramp from 0 to target)
+    forward_velocity_target: float = 5.0,
+    stationary_penalty_target: float = -3.0,
+    min_swing_ratio_target: float = -15.0,
+    limb_usage_min_target: float = -5.0,
+    single_limb_validity_target: float = -5.0,
+    rear_both_ground_target: float = -60.0,
+    # Logging
+    log_interval: int = 50,
+):
+    """V34: rel_standing_envs + command range + reward weight 통합 커리큘럼.
+
+    Phase 1 (iter 0~walk_ramp_start): 80% standing, 극저속 command, 서기 집중
+    Phase 2 (iter walk_ramp_start~walk_ramp_end): standing 비율/command/reward 선형 ramp
+    Phase 3 (iter walk_ramp_end~): 최종 값으로 안정, 본격 보행
+    """
+    iteration = env.common_step_counter // num_steps_per_env
+
+    # alpha: 0 (Phase 1) → 1 (Phase 3)
+    if walk_ramp_end <= walk_ramp_start:
+        alpha = 1.0 if iteration >= walk_ramp_start else 0.0
+    else:
+        alpha = float(max(0.0, min(1.0, (iteration - walk_ramp_start) / (walk_ramp_end - walk_ramp_start))))
+
+    # --- 1. Command manager 조정 ---
+    try:
+        cmd_term = env.command_manager.get_term("base_velocity")
+        # Standing ratio ramp
+        cmd_term.cfg.rel_standing_envs = standing_ratio_initial + alpha * (standing_ratio_final - standing_ratio_initial)
+        # Command range ramp (linear interpolation)
+        cmd_term.cfg.ranges.lin_vel_x = (
+            lin_vel_x_initial[0] + alpha * (lin_vel_x_final[0] - lin_vel_x_initial[0]),
+            lin_vel_x_initial[1] + alpha * (lin_vel_x_final[1] - lin_vel_x_initial[1]),
+        )
+        cmd_term.cfg.ranges.ang_vel_z = (
+            ang_vel_z_initial[0] + alpha * (ang_vel_z_final[0] - ang_vel_z_initial[0]),
+            ang_vel_z_initial[1] + alpha * (ang_vel_z_final[1] - ang_vel_z_initial[1]),
+        )
+    except Exception as e:
+        if not hasattr(env, "_swc_cmd_warn"):
+            print(f"[StandWalk] WARNING: command manager access failed: {e}")
+            env._swc_cmd_warn = True
+
+    # --- 2. Reward weight 조정 ---
+    ramp_terms = {
+        "forward_velocity": forward_velocity_target,
+        "stationary_penalty": stationary_penalty_target,
+        "min_swing_ratio": min_swing_ratio_target,
+        "limb_usage_min_penalty": limb_usage_min_target,
+        "single_limb_validity_penalty": single_limb_validity_target,
+        "rear_both_ground": rear_both_ground_target,
+    }
+
+    for term_name, target_w in ramp_terms.items():
+        new_w = alpha * target_w
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = new_w
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+    # --- 3. Logging ---
+    if log_interval > 0 and iteration % log_interval == 0:
+        if alpha < 1e-6:
+            phase_str = "Phase 1 (STAND)"
+        elif alpha < 1.0 - 1e-6:
+            phase_str = f"Phase 2 (TRANSITION {alpha:.0%})"
+        else:
+            phase_str = "Phase 3 (WALK)"
+        standing_now = standing_ratio_initial + alpha * (standing_ratio_final - standing_ratio_initial)
+        vel_x_now = (
+            lin_vel_x_initial[0] + alpha * (lin_vel_x_final[0] - lin_vel_x_initial[0]),
+            lin_vel_x_initial[1] + alpha * (lin_vel_x_final[1] - lin_vel_x_initial[1]),
+        )
+        print(f"\n{'─' * 60}")
+        print(f"[StandWalk] iter {iteration} | {phase_str} | alpha={alpha:.3f}")
+        print(f"  rel_standing_envs: {standing_now:.2f}")
+        print(f"  lin_vel_x: ({vel_x_now[0]:.3f}, {vel_x_now[1]:.3f})")
+        for term_name, target_w in ramp_terms.items():
+            print(f"  {term_name}: {alpha * target_w:.2f} (target={target_w:.1f})")
+        print(f"{'─' * 60}")
+
+    return None
+
+
 def _curriculum_phase_str(alpha12: float, alpha23: float) -> str:
     """현재 커리큘럼 상태를 문자열로 반환."""
     if alpha12 < 1e-6:

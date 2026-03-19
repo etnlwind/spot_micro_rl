@@ -27,5 +27,8 @@ if not defined PY_EXE (
     exit /b 1
 )
 
-"%PY_EXE%" "%SCRIPT_PATH%" %*
-exit /b %ERRORLEVEL%
+set "LOG_FILE=%SCRIPT_DIR%log\listener.log"
+if not exist "%SCRIPT_DIR%log" mkdir "%SCRIPT_DIR%log"
+start /b "" "%PY_EXE%" "%SCRIPT_PATH%" %* > "%LOG_FILE%" 2>&1
+echo [OK] listener started in background (log: %LOG_FILE%)
+exit /b 0

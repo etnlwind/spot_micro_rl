@@ -31,6 +31,21 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+# WSL 환경 감지 및 경로 변환
+_IS_WSL = sys.platform == "linux" and "microsoft" in (os.uname().release or "").lower()
+
+
+def _to_win_path(path: str) -> str:
+    """WSL 경로(/mnt/d/...)를 Windows 경로(D:\\...)로 변환. 비WSL이면 그대로 반환."""
+    if not _IS_WSL:
+        return path
+    import re
+    m = re.match(r"^/mnt/([a-zA-Z])/(.*)$", path)
+    if m:
+        bslash = "\\"
+        return f"{m.group(1).upper()}:{bslash}{m.group(2).replace('/', bslash)}"
+    return path
+
 ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 HEARTBEAT_HISTORY_JSONL = "heartbeat_reports.jsonl"
 
@@ -264,18 +279,23 @@ ZIP_IMAGE_QUALITY = int(_env.get("ZIP_IMAGE_QUALITY", "78"))
 CACHE_SCHEMA_VERSION = 3
 
 LOG_BASE = os.path.join(PROJECT_ROOT, "logs", "rsl_rl", LOG_SUBDIR)
-STATE_FILE = os.path.join(PROJECT_ROOT, "logs", "state.json")
-SUPERVISOR_LOG = os.path.join(PROJECT_ROOT, "logs", "supervisor.log")
-HEARTBEAT_LOG = os.path.join(PROJECT_ROOT, "logs", "heartbeat.log")
-SUPERVISOR_STDOUT_LOG = os.path.join(PROJECT_ROOT, "logs", "supervisor_stdout.log")
-SUPERVISOR_STDERR_LOG = os.path.join(PROJECT_ROOT, "logs", "supervisor_stderr.log")
-SUPERVISOR_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "supervisor.pid")
-HEARTBEAT_PID_FILE = os.path.join(PROJECT_ROOT, "logs", "heartbeat.pid")
-SUPERVISOR_SHUTDOWN_FLAG = os.path.join(PROJECT_ROOT, "logs", "supervisor.shutdown.flag")
-BUSY_LOCK_FILE = os.path.join(PROJECT_ROOT, "logs", "ops.lock")
-TRAINING_LOG = os.path.join(PROJECT_ROOT, "logs", "training_launch.log")
+# ops 로그 — 모두 isaac_ops/log/ 에 통합
+_OPS_LOG_DIR = os.path.join(SCRIPT_DIR, "log")
+STATE_FILE = os.path.join(_OPS_LOG_DIR, "state.json")
+# SUPERVISOR_LOG: listener.log로 통합 (구 supervisor 시절 잔재)
+SUPERVISOR_LOG = os.path.join(_OPS_LOG_DIR, "listener.log")
+# HEARTBEAT_LOG: training_launch.log로 통합
+HEARTBEAT_LOG = os.path.join(_OPS_LOG_DIR, "training_launch.log")
+SUPERVISOR_PID_FILE = os.path.join(_OPS_LOG_DIR, "supervisor.pid")
+HEARTBEAT_PID_FILE = os.path.join(_OPS_LOG_DIR, "heartbeat.pid")
+SUPERVISOR_SHUTDOWN_FLAG = os.path.join(_OPS_LOG_DIR, "supervisor.shutdown.flag")
+BUSY_LOCK_FILE = os.path.join(_OPS_LOG_DIR, "ops.lock")
+TRAINING_LOG = os.path.join(_OPS_LOG_DIR, "training_launch.log")
+EVENTS_LOG = os.path.join(_OPS_LOG_DIR, "events.log")
+EVENTS_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5MB
+EVENTS_LOG_BACKUP_COUNT = 3  # events.log.1, .2, .3
 ANALYZE_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "utils", "analyze_training.py")
-TG_OFFSET_FILE = os.path.join(PROJECT_ROOT, "logs", "telegram_offset.json")
+TG_OFFSET_FILE = os.path.join(_OPS_LOG_DIR, "telegram_offset.json")
 HEARTBEAT_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "heartbeat.py")
 SUPERVISOR_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "supervisor.py")
 
@@ -394,6 +414,7 @@ def _running_in_target_conda_env() -> bool:
 
 def _ensure_logs_dir() -> None:
     os.makedirs(os.path.join(PROJECT_ROOT, "logs"), exist_ok=True)
+    os.makedirs(_OPS_LOG_DIR, exist_ok=True)
 
 
 def _now() -> str:
@@ -412,6 +433,54 @@ def write_log(message: str, log_path: str) -> None:
             file.write(line + "\n")
     except OSError:
         pass  # 디스크 풀/권한 오류 시 silent fail (로그 실패로 프로세스 죽이지 않음)
+
+
+def _rotate_events_log() -> None:
+    """events.log가 EVENTS_LOG_MAX_BYTES 초과 시 로테이션.
+    events.log → events.log.1 → events.log.2 → events.log.3 (삭제)"""
+    try:
+        if not os.path.isfile(EVENTS_LOG):
+            return
+        if os.path.getsize(EVENTS_LOG) < EVENTS_LOG_MAX_BYTES:
+            return
+        for i in range(EVENTS_LOG_BACKUP_COUNT, 0, -1):
+            src = f"{EVENTS_LOG}.{i}" if i > 1 else EVENTS_LOG
+            dst = f"{EVENTS_LOG}.{i}" if i == 1 else f"{EVENTS_LOG}.{i}"
+        # shift: .2→.3, .1→.2, current→.1
+        for i in range(EVENTS_LOG_BACKUP_COUNT, 0, -1):
+            dst = f"{EVENTS_LOG}.{i}"
+            src = f"{EVENTS_LOG}.{i - 1}" if i > 1 else EVENTS_LOG
+            try:
+                if os.path.isfile(dst):
+                    os.remove(dst)
+                if os.path.isfile(src):
+                    os.rename(src, dst)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def log_event(category: str, action: str, detail: str = "", **kv) -> None:
+    """통합 이벤트 로그 — isaac_ops/log/events.log에 시간순 기록.
+
+    카테고리: TRAIN, LISTEN, CMD, TG, HB, STATE, ERROR, SYSTEM, MANIFEST
+    5MB 초과 시 자동 로테이션 (최대 3개 백업)
+    """
+    extra = " ".join(f"{k}={v}" for k, v in kv.items() if v) if kv else ""
+    parts = [f"[{category}]", action]
+    if detail:
+        parts.append(f"| {detail}")
+    if extra:
+        parts.append(f"| {extra}")
+    line = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {' '.join(parts)}"
+    try:
+        os.makedirs(os.path.dirname(EVENTS_LOG), exist_ok=True)
+        _rotate_events_log()
+        with open(EVENTS_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def _read_text_tail(path: str, max_chars: int = 1200) -> str:
@@ -498,6 +567,11 @@ def save_state(state: dict) -> dict:
 
 def update_state(**changes) -> dict:
     state = load_state()
+    # 주요 상태 변경을 이벤트 로그에 기록
+    tracked = ("mode", "active_run", "last_command", "train_version")
+    diffs = {k: changes[k] for k in tracked if k in changes and state.get(k) != changes[k]}
+    if diffs:
+        log_event("STATE", "UPDATE", " ".join(f"{k}={v}" for k, v in diffs.items()))
     state.update(changes)
     return save_state(state)
 
@@ -629,10 +703,9 @@ def busy_lock(label: str):
                 os.remove(BUSY_LOCK_FILE)
             except OSError:
                 raise RuntimeError("Another operation is already running.")
-            write_log(
-                f"Removed stale ops lock label={owner_label or 'unknown'} pid={owner_pid or 0} created_at={owner_created_at or 'unknown'}",
-                SUPERVISOR_LOG,
-            )
+            msg = f"Removed stale ops lock label={owner_label or 'unknown'} pid={owner_pid or 0} created_at={owner_created_at or 'unknown'}"
+            write_log(msg, SUPERVISOR_LOG)
+            log_event("SYSTEM", "STALE_LOCK", msg)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             file.write(f"{label}\n{os.getpid()}\n{_now()}\n")
@@ -654,8 +727,11 @@ def send_text(text: str, log_path: str, parse_mode: str | None = None) -> None:
         urllib.request.urlopen(request, timeout=15)
     except (urllib.error.URLError, TimeoutError, OSError) as err:
         write_log(f"[TG] Failed to send text: {err}", log_path)
+        log_event("TG", "SEND_FAIL", str(err))
         return
-    write_log(f"[TG] Sent text: {text[:80].replace(chr(10), ' ')}", log_path)
+    preview = text[:100].replace(chr(10), ' ')
+    write_log(f"[TG] Sent text: {preview}", log_path)
+    log_event("TG", "SENT", preview)
 
 
 def _multipart_request(url: str, fields: dict[str, str], file_field: str, filename: str, content_type: str, payload: bytes):
@@ -689,8 +765,10 @@ def send_video(video_path: str, caption: str, log_path: str) -> None:
         urllib.request.urlopen(request, timeout=180)
     except (urllib.error.URLError, TimeoutError, OSError) as err:
         write_log(f"[TG] Failed to send video {os.path.basename(video_path)}: {err}", log_path)
+        log_event("TG", "VIDEO_FAIL", os.path.basename(video_path))
         return
     write_log(f"[TG] Sent video: {os.path.basename(video_path)}", log_path)
+    log_event("TG", "VIDEO_SENT", os.path.basename(video_path))
 
 
 def send_document(file_path: str, caption: str, log_path: str) -> None:
@@ -709,8 +787,10 @@ def send_document(file_path: str, caption: str, log_path: str) -> None:
         urllib.request.urlopen(request, timeout=180)
     except (urllib.error.URLError, TimeoutError, OSError) as err:
         write_log(f"[TG] Failed to send document {os.path.basename(file_path)}: {err}", log_path)
+        log_event("TG", "DOC_FAIL", os.path.basename(file_path))
         return
     write_log(f"[TG] Sent document: {os.path.basename(file_path)}", log_path)
+    log_event("TG", "DOC_SENT", os.path.basename(file_path))
 
 
 def _telegram_get_updates(offset: int, timeout_sec: int = 0, log_path: str | None = None) -> list[dict] | None:
@@ -1073,6 +1153,72 @@ def _read_run_train_version(run_dir: str) -> str | None:
             pass
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Run Manifest — 런의 불변 정체성 (single source of truth)
+# ---------------------------------------------------------------------------
+_MANIFEST_FILE = "run_manifest.json"
+
+
+def write_run_manifest(run_dir: str) -> dict:
+    """런 시작 시 1회만 호출. run_manifest.json이 이미 있으면 기존 값 반환 (불변 보장)."""
+    manifest_path = os.path.join(run_dir, _MANIFEST_FILE)
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                return json.loads(f.read())
+        except Exception:
+            pass
+    manifest = {
+        "train_version": TRAIN_VERSION,
+        "run_dir": os.path.basename(run_dir),
+        "started_at": _now(),
+        "num_envs": TRAIN_ENVS,
+        "max_iterations": MAX_ITERATIONS,
+        "task": os.environ.get("TASK", _env.get("TASK", "")),
+    }
+    try:
+        os.makedirs(run_dir, exist_ok=True)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        write_log(f"Run manifest written: {manifest_path} [{TRAIN_VERSION}]", SUPERVISOR_LOG)
+        log_event("MANIFEST", "CREATED", version=TRAIN_VERSION, run=os.path.basename(run_dir))
+    except Exception as err:
+        write_log(f"Failed to write run manifest: {err}", SUPERVISOR_LOG)
+        log_event("ERROR", "MANIFEST_FAIL", str(err))
+    return manifest
+
+
+def read_run_manifest(run_dir: str) -> dict | None:
+    """런 매니페스트 읽기. 없으면 None."""
+    if not run_dir:
+        return None
+    manifest_path = os.path.join(run_dir, _MANIFEST_FILE)
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                return json.loads(f.read())
+        except Exception:
+            pass
+    return None
+
+
+def get_run_version(run_dir: str) -> str:
+    """런의 버전을 반환. 우선순위: manifest > train_version.txt > .env fallback.
+    모든 버전 표시 코드는 이 함수를 사용해야 합니다."""
+    if not run_dir:
+        return TRAIN_VERSION
+    # 1. manifest (불변, 최우선)
+    manifest = read_run_manifest(run_dir)
+    if manifest and manifest.get("train_version"):
+        return manifest["train_version"]
+    # 2. train_version.txt (레거시 호환)
+    ver = _read_run_train_version(run_dir)
+    if ver:
+        return ver
+    # 3. fallback
+    return TRAIN_VERSION
 
 
 def resolve_run_dir_for_version(version: str) -> str | None:
@@ -1583,7 +1729,9 @@ def launch_training(log_path: str, fresh: bool = False) -> dict:
     fresh=False: 기존 active_checkpoint에서 재개 (이전 동작 유지).
     """
     if is_training_running():
+        log_event("TRAIN", "ALREADY_RUNNING", version=TRAIN_VERSION)
         return {"mode": "already-running", "run_dir": resolve_active_run_dir(), "checkpoint": resolve_active_checkpoint()}
+    log_event("TRAIN", "LAUNCHING", f"fresh={fresh}", version=TRAIN_VERSION, envs=str(TRAIN_ENVS))
     if fresh:
         update_state(active_run="", active_checkpoint="", last_command="start-fresh")
         baseline_run = get_latest_run_dir()
@@ -1626,6 +1774,9 @@ def launch_training(log_path: str, fresh: bool = False) -> dict:
         if baseline_run and active_run and os.path.basename(active_run) <= os.path.basename(baseline_run):
             active_run = resume_run or active_run
         active_checkpoint = resolve_active_checkpoint(active_run)
+    # 런 매니페스트 기록 (불변 — 이미 있으면 기존 값 유지)
+    if active_run:
+        write_run_manifest(active_run)
     update_state(
         mode="training",
         active_run=os.path.basename(active_run) if active_run else "",
@@ -1638,6 +1789,8 @@ def launch_training(log_path: str, fresh: bool = False) -> dict:
         last_command="start-fresh" if fresh else "start",
         last_error="",
     )
+    run_name = os.path.basename(active_run) if active_run else "?"
+    log_event("TRAIN", "STARTED", f"fresh={fresh}", version=TRAIN_VERSION, run=run_name)
     return {"mode": "started", "run_dir": active_run, "checkpoint": active_checkpoint}
 
 
@@ -1653,6 +1806,9 @@ def stop_training(log_path: str) -> dict:
         last_command="stop",
         last_error="",
     )
+    run_ver = get_run_version(active_run) if active_run else TRAIN_VERSION
+    ckpt_name = os.path.basename(active_checkpoint) if active_checkpoint else "N/A"
+    log_event("TRAIN", "STOPPED", f"killed={len(killed)}", version=run_ver, checkpoint=ckpt_name)
     return {"killed": killed, "run_dir": active_run, "checkpoint": active_checkpoint}
 
 
@@ -1838,6 +1994,7 @@ def load_report_history(run_dir: str) -> list[dict]:
                     continue
     except Exception as err:
         write_log(f"Failed to read heartbeat history: {err}", SUPERVISOR_LOG)
+        log_event("ERROR", "HB_HISTORY_READ", str(err))
     return records
 
 
@@ -2443,7 +2600,7 @@ def build_report_record(data: dict, run_name: str, cycle_num: int, report_kind: 
     current_iter = int(reward_vals[-1][0])
     return {
         "run_name": run_name,
-        "train_version": TRAIN_VERSION,
+        "train_version": get_run_version(run_dir),
         "report_kind": report_kind,
         "cycle_num": int(cycle_num),
         "iteration": current_iter,
@@ -2463,22 +2620,22 @@ def append_report_record(run_dir: str, record: dict | None) -> None:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as err:
         write_log(f"append_report_record: failed to write heartbeat history: {err}", SUPERVISOR_LOG)
-    # train_version.txt — 버전 조회 fallback용 마커 파일 (버전 변경 시 즉시 갱신)
+        log_event("ERROR", "HB_WRITE", str(err))
+    # train_version.txt — 런 시작 시 1회만 기록, 이후 절대 덮어쓰지 않음
+    # (.env 변경 시 기존 런의 버전이 오염되는 버그 방지)
     try:
         ver_path = os.path.join(run_dir, "train_version.txt")
-        existing_ver = ""
-        if os.path.isfile(ver_path):
-            with open(ver_path, "r", encoding="utf-8") as f:
-                existing_ver = f.read().strip()
-        if existing_ver != TRAIN_VERSION:
+        if not os.path.isfile(ver_path):
             with open(ver_path, "w", encoding="utf-8") as f:
                 f.write(TRAIN_VERSION)
     except Exception as err:
         write_log(f"append_report_record: failed to write train_version.txt: {err}", SUPERVISOR_LOG)
+        log_event("ERROR", "VERSION_WRITE", str(err))
     try:
         refresh_training_logs(run_dir, SUPERVISOR_LOG)
     except Exception as err:
         write_log(f"Runlog workbook refresh failed: {err}", SUPERVISOR_LOG)
+        log_event("ERROR", "RUNLOG_REFRESH", str(err))
 
 
 def _format_relative_age(timestamp_text: str | None) -> str:
@@ -3439,6 +3596,7 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
         return f"⚠️ <b>HEARTBEAT</b> ({run_label})\n- metrics unavailable"
     current_iter = int(reward_vals[-1][0])
     run_dir = os.path.join(LOG_BASE, run_name)
+    _run_version = get_run_version(run_dir)
     if iteration is not None:
         kpi = build_supervisor_kpi_snapshot_for_iteration(run_dir, current_iter) if os.path.isdir(run_dir) else build_supervisor_kpi_snapshot_for_iteration(resolve_active_run_dir() or "", current_iter)
     else:
@@ -3757,7 +3915,7 @@ def format_report(data: dict, run_name: str, cycle_num: int, iteration: int | No
         perf_line = f"- {perf_icon} speed: {avg5_ct:.1f}s/iter | {avg5_fps:.0f} fps | drift x{ratio:.2f}"
 
     lines = [
-        f"💓 <b>HEARTBEAT — {run_label}</b>  <code>[{TRAIN_VERSION}]</code>",
+        f"💓 <b>HEARTBEAT — {run_label}</b>  <code>[{_run_version}]</code>",
         "",
         f"- iter: {current_iter:,} / {MAX_ITERATIONS:,} ({progress_pct:.1f}%)",
         f"- reward: {current_reward:.3f} (avg10: {reward_avg10:.3f})",
@@ -4577,9 +4735,11 @@ def run_detailed_analysis(run_dir: str, checkpoint_path: str, clip_num: int, vid
         text = proc.stdout or ""
         if proc.stderr.strip():
             write_log(f"Analysis stderr: {proc.stderr[:500]}", SUPERVISOR_LOG)
+            log_event("ERROR", "ANALYSIS_STDERR", proc.stderr[:200])
         return text
     except Exception as err:
         write_log(f"Analysis error: {err}", SUPERVISOR_LOG)
+        log_event("ERROR", "ANALYSIS_FAIL", str(err))
         return ""
 
 
@@ -4853,13 +5013,15 @@ def format_status_html() -> str:
         return f"{mapping.get(value, default)}{html.escape(value)}"
 
     listener_alive = snapshot.get("listener_alive", False)
+    _run_ver = get_run_version(run_dir) if run_dir else "N/A"
     lines = [
         "👮 <b>IsaacOps STATUS</b>",
         f"• mode: <code>{_status_light_html(mode, {'idle': '🔴', 'training': '🟢', 'reporting': '🟡', 'rendering': '🟡', 'stopped': '🔴'}, '⚪')}</code>",
         f"• training: <code>{_status_light_html('alive' if training_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
         f"• listener: <code>{_status_light_html('alive' if listener_alive else 'stopped', {'alive': '🟢', 'stopped': '🔴'}, '⚪')}</code>",
         f"• listener_version: <code>{html.escape(snapshot['listener_version_text'])}</code>",
-        f"• train_version: <code>{html.escape(TRAIN_VERSION)}</code>",
+        f"• train_version(.env): <code>{html.escape(TRAIN_VERSION)}</code>",
+        f"• run_version: <code>{html.escape(_run_ver)}</code>",
         f"• run: <code>{html.escape(os.path.basename(run_dir) if run_dir else 'N/A')}</code>",
         f"• checkpoint: <code>{html.escape(os.path.basename(checkpoint) if checkpoint else 'N/A')}</code>",
         f"• iter: <code>{iter_num:,}</code>",
