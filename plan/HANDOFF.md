@@ -1,56 +1,43 @@
 # HANDOFF.md
 
-> 마지막 업데이트: 2026-03-20
+> 마지막 업데이트: 2026-03-21
 > 최신 커밋: develop 브랜치
 
 ---
 
 ## 1. 현재 목표
 
-**V37 Anti-Splay 강화 — shoulder_neutral 커리큘럼(-6 → -15)으로 벌레보행 제거**
+**Anti-Splay 해결 — L2 penalty 커리큘럼 한계 확인, Barrier/CaT 전환 준비**
 
 | 버전 | 결과 | 비고 |
 |------|------|------|
 | V32.1 | 🟡 부분 성공 | front lock-in 해소, 하지만 거미형 벌어짐 + 셔플링 |
 | V33~V34 | ❌ 실패 | 근본 재설계/커리큘럼 시도, 부팅 불가 |
-| V35~V35.4 | ❌ 실패 | 재현성 문제 발견, alive_bonus 도입 과정 |
-| V35.5 | ✅ 부팅 성공 | alive_bonus(10) + contacts 램프 + 저속 command 3결합 |
+| V35~V35.5 | ✅ 부팅 성공 | alive_bonus(10) + contacts 램프 + 저속 command 3결합, 100% 재현 |
 | V36 | 🟡 부분 성공 | anti-shuffle 성공(stride +34%), **anti-splay 실패**(shoulder_dev 0.54 고착) |
-| **V37** | 🔄 **훈련 중** | anti-splay 커리큘럼: shoulder -6→-15, stance -3→-8 (iter 500~1000) |
+| V37 | ❌ 실패 | 3변수 동시 변경(shoulder -15, stance -8, height 0.22) → iter 600 보행 붕괴 |
+| **V37.2** | 🟡 **한계 확인** | shoulder만 -6→-10 단일 변경, 보행 유지하나 splay 개선 없음 (0.532 vs 0.543) |
 
 ---
 
-## 2. V37 설계
+## 2. V37 → V37.2 경과
 
-### 핵심 가설
-V36에서 anti-splay penalty가 전체 reward의 0.6%에 불과하여 무시됨. **5~10%까지 올려야 행동 변경 유도 가능**.
+### V37 (실패)
+- **설계**: shoulder -6→-15, stance -3→-8, height 0.23→0.22 동시 커리큘럼 (iter 500~1000)
+- **결과**: iter 600에서 보행 붕괴 (reward 181→-92, ep_len 250→6)
+- **원인**: 교훈 #12 위반 — 3변수 동시 변경이 학습 안정성 파괴
+- **교훈**: splay_ramp 시작 직후 100 iter 이내 급격한 reward 하락은 커리큘럼 과도 신호
 
-### Anti-Splay 커리큘럼 (splay_ramp, iter 500~1000)
-| 파라미터 | iter 0~500 | iter 500~1000 | iter 1000+ |
-|---------|-----------|--------------|-----------|
-| shoulder_neutral | -6.0 | -6.0 → -15.0 | -15.0 |
-| stance_width_penalty | -3.0 | -3.0 → -8.0 | -8.0 |
-| height target | 0.23 | 0.23 → 0.22 | 0.22 |
+### V37.2 (L2 한계 확인)
+- **설계**: shoulder만 -6→-10 단일 변경, 느린 ramp (iter 500~1500), stance/height 고정
+- **결과**: 보행 완벽 유지 (ep_len 247-250), reward 회복 중, **BUT shoulder_dev 0.532 (V36: 0.543)**
+- **결론**: L2 penalty를 -10까지 올려도 splay 행동 변화 없음. 보행 보상(+180) 대비 penalty 비율이 구조적으로 부족
 
-### Anti-Shuffle (V36 유지)
-stride_length ramp 200~500, feet_air_time threshold 0.25, swing_stride 4.0
-
-### 부팅 안정화 (V35.5 유지)
-alive_bonus=10.0, boot_ramp_end=300, contacts -20→-100, 저속 command
-
-### 체크포인트 기준
-| iter | 확인 | 판정 |
-|------|------|------|
-| 100 | ep_len > 30 | 부팅 확인 |
-| 400 | ep_len > 200 | 부팅 완료 |
-| 500 | shoulder_dev < 0.5 | splay_ramp 시작 전 기준값 |
-| 700 | shoulder_dev < 0.4 | splay_ramp 중간 효과 |
-| 1000 | shoulder_dev < 0.3, stride > 6.0 | splay_ramp 완료 + shuffle 유지 |
-
-### 리스크
-1. shoulder=-15.0이 보행을 억제 → ep_len 하락 시 final 완화
-2. height 0.22가 기구학적 한계 근접 (init pos 0.192m)
-3. anti-splay와 anti-shuffle 상호작용 (다리 모으면 stride 감소 가능)
+### 핵심 발견
+**L2 penalty 커리큘럼 방식의 근본 한계 확인**:
+- 약하게 주면(-6~-10) 무시됨 (전체 reward의 1% 미만)
+- 강하게 주면(-15) 보행 자체가 붕괴
+- → Barrier 함수 또는 CaT(Constraints as Terminations) 같은 구조적 접근 필요
 
 ---
 
@@ -76,16 +63,16 @@ iter 100: 0.091 → iter 300: 0.184 → iter 500: 0.529 → iter 800: 0.543 (고
 ### 코드
 ```
 브랜치: develop
-상태: V37 env_cfg/rewards.py 변경 완료 (uncommitted)
-훈련: V37 진행 중 (iter ~100, 2026-03-20 15:28 시작)
+상태: V37.2 env_cfg/rewards.py 변경 완료
+훈련: V37.2 완료 — L2 penalty 한계 확인, 다음 단계(V38 Barrier/CaT) 준비
 ```
 
 ### 주요 파일
 | 파일 | 내용 |
 |------|------|
-| `source/.../spot_micro_rl_env_cfg.py` | V37 환경 설정 (splay_ramp 커리큘럼 추가) |
-| `source/.../mdp/rewards.py` | V37 보상 함수 (splay_ramp 로직 추가) |
-| `plan/V37_PLAN.md` | V37 설계 문서 |
+| `source/.../spot_micro_rl_env_cfg.py` | V37.2 환경 설정 (splay_ramp 커리큘럼) |
+| `source/.../mdp/rewards.py` | V37.2 보상 함수 (splay_ramp 로직) |
+| `plan/V37_PLAN.md` | V37~V37.2 설계 + 결과 문서 |
 | `plan/V36_PLAN.md` | V36 설계 + 결과 |
 | `plan/V35_PLAN.md` | V35 시리즈 전체 경과 |
 | `plan/QUADRUPED_RL_RESEARCH.md` | 연구 조사 (최신 논문 포함) |
@@ -123,11 +110,10 @@ iter 100: 0.091 → iter 300: 0.184 → iter 500: 0.529 → iter 800: 0.543 (고
 
 ## 6. 향후 로드맵
 
-### 단기 (V37~V38)
+### 단기 (V38)
 | 단계 | 핵심 변경 | 목표 |
 |------|----------|------|
-| **V37** (진행 중) | shoulder 커리큘럼 -6→-15 | shoulder_dev < 0.3 |
-| V38 | Barrier-based penalty 또는 CaT | 커리큘럼 없이 anti-splay |
+| **V38** (다음) | Barrier-based penalty 또는 CaT | L2 대체, shoulder_dev < 0.3 |
 
 ### 중기 (V39~V40)
 | 단계 | 핵심 변경 | 목표 |

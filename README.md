@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V37 훈련 중 (anti-splay 커리큘럼: shoulder -6→-15, V36 anti-shuffle 성공 기반)
+**현재 상태**: V37.2 훈련 중 (anti-splay 커리큘럼: shoulder -6→-10, V37 -15는 보행 붕괴로 완화)
 
 ### 기술 스택
 
@@ -209,7 +209,7 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V37` (V35.5 부팅 안정화 + V36 anti-shuffle + anti-splay 커리큘럼)
+- 학습 버전: `V37.2` (V37 shoulder -15 붕괴 → -10으로 완화, 단일 변수 변경)
 - active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
 - 참고 문서: `plan/V37_PLAN.md` (현재), `plan/HANDOFF.md`, `plan/QUADRUPED_RL_RESEARCH.md`
@@ -330,7 +330,8 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V35.3~V35.4** | **03-20** | **alive_bonus 도입 (2.0→10.0)** | ❌ 부분 효과 (부팅 불완전) |
 | **V35.5** | **03-20** | **부팅 안정화 3가지 결합 (alive+contacts완화+저속)** | ✅ 부팅 성공 (iter 400 ep_len=234) |
 | **V36** | **03-20** | **V35.5 + anti-splay(-6,-3,0.23) + anti-shuffle(stride ramp, swing_stride)** | 🟡 anti-shuffle 성공(stride +34%), anti-splay 실패(shoulder 0.54 고착) |
-| **V37** | **03-20~** | **Anti-splay 커리큘럼: shoulder -6→-15, stance -3→-8, height 0.23→0.22** | 🔄 훈련 중 |
+| **V37** | **03-20** | **Anti-splay 커리큘럼: shoulder -6→-15, stance -3→-8, height 0.23→0.22** | ❌ 실패 (iter 600에서 보행 붕괴, 리스크#1 적중) |
+| **V37.2** | **03-20~** | **V37 완화: shoulder만 -6→-10, ramp 500~1500, stance/height 변경 없음** | 🔄 훈련 중 (보행 유지, splay 미해결) |
 
 ### 핵심 교훈
 

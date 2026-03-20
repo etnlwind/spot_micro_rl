@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V37"
+TRAIN_VERSION = "V37.2"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -263,13 +263,13 @@ class SpotMicroRewardCurriculumCfg:
             "boot_vel_restore_iter": 500,          # iter 500에서 원래 속도 (0.1, 0.5) 복원
             # V37: anti-splay curriculum ramp — 보행 학습 후 splay 교정
             "splay_ramp_start": 500,               # iter 500부터 강화 시작
-            "splay_ramp_end": 1000,                # iter 1000에서 최종값 도달
+            "splay_ramp_end": 1500,                # iter 1500에서 최종값 도달 (V37: 1000 → 더 느리게)
             "splay_shoulder_initial": -6.0,        # 부팅 구간 유지
-            "splay_shoulder_final": -15.0,         # 최종 강화
+            "splay_shoulder_final": -10.0,         # V37(-15) → V37.2(-10) 완화
             "splay_stance_initial": -3.0,
-            "splay_stance_final": -8.0,
+            "splay_stance_final": -3.0,            # V37(-8) → V37.2 변경 없음 (단일 변수)
             "splay_height_initial": 0.23,
-            "splay_height_final": 0.22,
+            "splay_height_final": 0.23,            # V37(0.22) → V37.2 변경 없음 (단일 변수)
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
