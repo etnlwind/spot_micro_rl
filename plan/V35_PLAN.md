@@ -123,6 +123,16 @@ alive_bonus=10.0 + undesired_contacts 완화 + 초기 저속.
 - Line 3389-3411: boot stability ramp 로직 추가
 - 이모지 → ASCII 교체 (7개소)
 
+### `isaac_ops/listener.py`
+- 영상 리포트 생성 전 Telegram 확인 요청 (훈련 중지 방지)
+- mid-run 합류 시 마지막 마일스톤 보존 (리포트 누락 방지)
+- 새 run 감지 시 train_version 자동 갱신 + version mismatch 알림
+
+### 구조 정리
+- `scripts/supervisor.py`, `scripts/heartbeat.py`, `scripts/supervisor.cmd` → `scripts/legacy/`로 이동
+- `supervisor.cmd` (프로젝트 루트) → `scripts/legacy/supervisor_root.cmd`로 이동
+- 현재 active: `isaac_ops/listen.cmd` → `isaac_ops/listener.py` (통합 listener)
+
 ### `.env`
 - `TRAIN_VERSION=V35.5`
 

@@ -487,7 +487,7 @@ def _run_video_report(run_dir: str, milestone: int, current_iter: int, total_mis
 class Monitor:
     """Periodic training monitor — replaces heartbeat.py."""
 
-    def __init__(self, iter_step: int, video_iter_step: int):
+    def __init__(self, iter_step: int, video_iter_step: int, pending_confirm: list | None = None):
         self.iter_step = iter_step
         self.video_iter_step = video_iter_step
         self.last_sent_milestone = 0
@@ -499,6 +499,10 @@ class Monitor:
         self.training_stopped = False
         self._last_tick = 0.0
         self._tick_interval = 10.0  # check every 10 seconds
+        self._pending_confirm = pending_confirm  # shared with main loop
+        self._pending_video_milestones: list[int] = []  # milestones awaiting user approval
+        self._pending_video_run_dir = ""
+        self._pending_video_current_iter = 0
 
     def tick(self) -> None:
         """Called frequently from main loop. Rate-limits actual work."""
@@ -525,6 +529,7 @@ class Monitor:
             # New run detection
             if run_name != self.last_run_name:
                 self.last_run_name = run_name
+                self._version_mismatch_notified = False
                 self.last_sent_milestone = _restore_last_milestone(run_dir, self.iter_step)
                 self.last_video_milestone = _restore_last_milestone(run_dir, self.video_iter_step, report_kind="video_report")
                 resume_iter = _get_resume_checkpoint_iter()
@@ -532,11 +537,37 @@ class Monitor:
                     skip_up_to = (resume_iter // self.video_iter_step) * self.video_iter_step
                     self.last_video_milestone = max(self.last_video_milestone, skip_up_to)
                 elif self.last_video_milestone == 0:
+                    # Skip past milestones but keep the most recent one pending
+                    # so at least one report is generated when listener joins mid-run
                     skip_up_to = (current_iter // self.video_iter_step) * self.video_iter_step
-                    self.last_video_milestone = skip_up_to
+                    self.last_video_milestone = max(0, skip_up_to - self.video_iter_step)
                 self.collapse_consecutive = 0
                 self.collapse_restart_done = False
                 self.perf_checked = False
+                # Auto-detect train version and update state
+                run_version = common._read_run_train_version(run_dir) or ""
+                if run_version:
+                    common.reload_train_version()
+                    common.update_state(
+                        mode="training",
+                        active_run=run_name,
+                        train_version=run_version,
+                    )
+                    common.write_log(f"[Monitor] New run detected: {run_name} (version={run_version})", LOG)
+
+            # Version mismatch detection (code vs running training)
+            if not getattr(self, '_version_mismatch_notified', False):
+                common.reload_train_version()
+                run_version = common._read_run_train_version(run_dir) or ""
+                if run_version and run_version != common.TRAIN_VERSION:
+                    self._version_mismatch_notified = True
+                    common.send_text(
+                        f"⚠️ <b>VERSION MISMATCH</b>\n"
+                        f"실행 중인 훈련: <code>{run_version}</code>\n"
+                        f"현재 코드: <code>{common.TRAIN_VERSION}</code>\n"
+                        f"<i>/start 명령으로 새 버전 훈련을 시작하세요.</i>",
+                        LOG, parse_mode="HTML",
+                    )
 
             # ── Perf check (once per run at iter 20+) ──
             if not self.perf_checked and current_iter >= 20:
@@ -595,25 +626,24 @@ class Monitor:
 
             # ── Video report milestones ──
             missed = _collect_missed_milestones(self.last_video_milestone, current_iter, self.video_iter_step)
-            if missed:
-                common.stop_training(LOG)
-                self.training_stopped = True
-                total_missed = len(missed)
-                for idx, milestone in enumerate(missed, start=1):
-                    _run_video_report(run_dir, milestone, current_iter, total_missed, idx, self.video_iter_step)
-                    self.last_video_milestone = milestone
-                next_milestone = self.last_video_milestone + self.video_iter_step
-                common.launch_training(LOG)
-                self.training_stopped = False
-                common.write_log(f"[VideoReport] all done, training restarted", LOG)
-                catchup_summary = f"iter {', '.join(f'{m:,}' for m in missed)}"
+            if missed and self._pending_confirm is not None and not self._pending_confirm:
+                # Ask user for confirmation before stopping training for video report
+                self._pending_video_milestones = missed
+                self._pending_video_run_dir = run_dir
+                self._pending_video_current_iter = current_iter
+                self._pending_confirm.clear()
+                self._pending_confirm.append({
+                    "action": "video_report",
+                    "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC,
+                })
+                milestone_str = ", ".join(f"{m:,}" for m in missed)
                 common.send_text(
-                    f"🚀 <b>TRAINING RESUME — {catchup_summary}</b>\n"
-                    f"<i>다음 리포트: iter {next_milestone:,}</i>",
+                    f"📹 <b>리포트 생성 확인 — iter {milestone_str}</b>\n"
+                    f"훈련을 일시 중지하고 영상 리포트를 생성합니다.\n"
+                    f"<i>계속하려면 Y, 건너뛰려면 N을 입력하세요. ({int(_CONFIRM_TIMEOUT_SEC)}초 내)</i>",
                     LOG, parse_mode="HTML",
                 )
-                text_milestone = (current_iter // self.iter_step) * self.iter_step
-                self.last_sent_milestone = max(self.last_sent_milestone, text_milestone)
+                common.write_log(f"[VideoReport] awaiting user confirmation for milestones: {missed}", LOG)
                 return
 
             # ── Text heartbeat ──
@@ -702,8 +732,8 @@ def main() -> int:
     )
     print(f"[listener] IsaacOps ACTIVE [{common.TRAIN_VERSION}] — monitoring started")
 
-    monitor = Monitor(args.iter_step, args.video_iter_step)
     pending_confirm: list = []  # mutable container for confirmation state
+    monitor = Monitor(args.iter_step, args.video_iter_step, pending_confirm=pending_confirm)
     exit_reason = "normal"
 
     try:
@@ -723,23 +753,63 @@ def main() -> int:
                     if text and common.is_authorized_message(chat_id, user_id):
                         # Pending confirmation handling
                         if pending_confirm:
+                            action = pending_confirm[0].get("action", "")
                             if time.time() > pending_confirm[0].get("expires_at", 0):
                                 pending_confirm.clear()
-                                _send_notice("START CANCELLED", "확인 시간 초과 (60초).", icon="⛔")
+                                if action == "video_report":
+                                    # Timeout — skip milestones
+                                    for m in monitor._pending_video_milestones:
+                                        monitor.last_video_milestone = m
+                                    monitor._pending_video_milestones.clear()
+                                    _send_notice("REPORT SKIPPED", "확인 시간 초과. 리포트를 건너뜁니다.", icon="⛔")
+                                else:
+                                    _send_notice("START CANCELLED", "확인 시간 초과 (60초).", icon="⛔")
                             elif text.strip().lower().startswith("y"):
                                 pending_confirm.clear()
-                                _send_notice(f"{common.TRAIN_VERSION} 새 훈련 확인", "iter 0부터 시작합니다.", icon="✅")
-                                result = common.launch_training(LOG, fresh=True)
-                                run_name = _safe_basename(result["run_dir"])
-                                common.send_text(
-                                    f"🚀 <b>TRAINING START</b>\n<i>run: {run_name}</i>",
-                                    LOG, parse_mode="HTML",
-                                )
+                                if action == "video_report":
+                                    # User approved — generate video reports
+                                    _send_notice("REPORT CONFIRMED", "영상 리포트를 생성합니다. 훈련을 일시 중지합니다.", icon="✅")
+                                    common.stop_training(LOG)
+                                    monitor.training_stopped = True
+                                    missed = monitor._pending_video_milestones
+                                    run_dir = monitor._pending_video_run_dir
+                                    cur_iter = monitor._pending_video_current_iter
+                                    total_missed = len(missed)
+                                    for idx, milestone in enumerate(missed, start=1):
+                                        _run_video_report(run_dir, milestone, cur_iter, total_missed, idx, monitor.video_iter_step)
+                                        monitor.last_video_milestone = milestone
+                                    next_milestone = monitor.last_video_milestone + monitor.video_iter_step
+                                    common.launch_training(LOG)
+                                    monitor.training_stopped = False
+                                    monitor._pending_video_milestones.clear()
+                                    common.write_log(f"[VideoReport] all done, training restarted", LOG)
+                                    catchup_summary = f"iter {', '.join(f'{m:,}' for m in missed)}"
+                                    common.send_text(
+                                        f"🚀 <b>TRAINING RESUME — {catchup_summary}</b>\n"
+                                        f"<i>다음 리포트: iter {next_milestone:,}</i>",
+                                        LOG, parse_mode="HTML",
+                                    )
+                                    text_milestone = (cur_iter // monitor.iter_step) * monitor.iter_step
+                                    monitor.last_sent_milestone = max(monitor.last_sent_milestone, text_milestone)
+                                else:
+                                    _send_notice(f"{common.TRAIN_VERSION} 새 훈련 확인", "iter 0부터 시작합니다.", icon="✅")
+                                    result = common.launch_training(LOG, fresh=True)
+                                    run_name = _safe_basename(result["run_dir"])
+                                    common.send_text(
+                                        f"🚀 <b>TRAINING START</b>\n<i>run: {run_name}</i>",
+                                        LOG, parse_mode="HTML",
+                                    )
                                 continue
                             else:
                                 pending_confirm.clear()
-                                _send_notice("START CANCELLED", "취소되었습니다.", icon="⛔")
-                                continue
+                                if action == "video_report":
+                                    # User declined — skip milestones
+                                    for m in monitor._pending_video_milestones:
+                                        monitor.last_video_milestone = m
+                                    monitor._pending_video_milestones.clear()
+                                    _send_notice("REPORT SKIPPED", "리포트를 건너뜁니다.", icon="⛔")
+                                else:
+                                    _send_notice("START CANCELLED", "취소되었습니다.", icon="⛔")
 
                         command, arg_text = _parse_command(text)
                         if command in common.command_variants():

@@ -197,6 +197,9 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 - **CLI 도구**: `cli.cmd`로 터미널에서 직접 명령 실행 (Telegram을 거치지 않음)
 - **self-contained**: `isaac_ops/` 폴더만으로 독립 동작 가능, 다른 프로젝트에 재사용 가능
 - **heartbeat 리포트**: raw metric 중심으로 간소화, 자동 판정은 iter 500 이후부터만 활성화
+- **영상 리포트 사용자 확인**: 영상 리포트 생성 전 Telegram으로 확인 요청 (훈련 중지 방지)
+- **자동 run 감지**: CLI에서 새 훈련을 시작해도 listener가 자동으로 새 run/버전 인식
+- **Note**: 구 `scripts/supervisor.py` + `scripts/heartbeat.py`는 `scripts/legacy/`로 이동됨. 현재는 `isaac_ops/listen.cmd`만 사용
 
 **Telegram 명령** (listener가 실행 중일 때):
 - `start` / `stop` / `resume` — 훈련 제어
