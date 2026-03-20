@@ -19,6 +19,11 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
+def alive_bonus(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Per-step survival bonus. Returns 1.0 for every alive environment."""
+    return torch.ones(env.num_envs, device=env.device)
+
+
 def _contact_force_peak(contact_sensor: ContactSensor, body_ids) -> torch.Tensor:
     """Return per-body peak contact force over the available sensor history window."""
     return contact_sensor.data.net_forces_w_history[:, :, body_ids, :].norm(dim=-1).max(dim=1)[0]
@@ -3196,6 +3201,12 @@ def reward_weight_curriculum(
     # V31.2: front joint-level rewards (same ramp as front_swing)
     front_joint_velocity_max: float = 0.0,
     front_joint_frozen_max: float = 0.0,
+    # V35.5: boot stability ramp
+    boot_ramp_end: int = 0,                    # 0이면 비활성화
+    boot_undesired_contacts_floor: float = -100.0,  # 초기 undesired_contacts weight
+    boot_vel_x_min: float = 0.1,               # 초기 속도 범위
+    boot_vel_x_max: float = 0.5,
+    boot_vel_restore_iter: int = 500,           # 속도 복원 iter
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -3370,6 +3381,31 @@ def reward_weight_curriculum(
             print(f"  init weights: {', '.join(weight_parts)}")
         return None
 
+    # ── V35.5: Boot stability ramp ──
+    if boot_ramp_end > 0:
+        # undesired_contacts weight: boot_floor → -100.0 over iter 0~boot_ramp_end
+        boot_alpha = min(1.0, max(0.0, iteration / boot_ramp_end))
+        boot_uc_weight = boot_undesired_contacts_floor + (-100.0 - boot_undesired_contacts_floor) * boot_alpha
+        try:
+            uc_cfg = env.reward_manager.get_term_cfg("undesired_contacts")
+            uc_cfg.weight = boot_uc_weight
+        except Exception:
+            pass
+
+        # velocity command ramp: boot_vel → original over iter 0~boot_vel_restore_iter
+        vel_alpha = min(1.0, max(0.0, iteration / boot_vel_restore_iter)) if boot_vel_restore_iter > 0 else 1.0
+        orig_vel_min, orig_vel_max = 0.1, 0.5
+        cur_vel_min = boot_vel_x_min + (orig_vel_min - boot_vel_x_min) * vel_alpha
+        cur_vel_max = boot_vel_x_max + (orig_vel_max - boot_vel_x_max) * vel_alpha
+        try:
+            env.command_manager.get_term("base_velocity").cfg.ranges.lin_vel_x = (cur_vel_min, cur_vel_max)
+        except Exception:
+            pass
+
+        # Log boot ramp state periodically
+        if iteration % log_interval == 0:
+            print(f"[Boot] iter {iteration}: uc_weight={boot_uc_weight:.1f}, vel_x=({cur_vel_min:.3f}, {cur_vel_max:.3f})")
+
     # ── 업데이트 주기 확인 ──
     if iteration - env._crr_last_update < update_interval:
         return None
@@ -3435,7 +3471,7 @@ def reward_weight_curriculum(
             gait_paused = True
             if not env._crr_gate_paused:
                 env._crr_gate_paused = True
-                print(f"[Curriculum] ⏸ Ramp PAUSED @ iter {iteration} "
+                print(f"[Curriculum] [PAUSED] Ramp PAUSED @ iter {iteration} "
                       f"(ep_len={mean_ep_len:.1f} < {gait_gate_min_ep_len})")
         elif env._crr_gate_paused:
             env._crr_gate_paused = False
@@ -3604,124 +3640,23 @@ def reward_weight_curriculum(
 
     # ── 마일스톤 로깅 (ramp 시작/완료 + snapshot) ──
     if abs(old_12) < 1e-6 and new_12 > 1e-6:
-        print(f"\n[Curriculum] 🔄 Ramp 1→2 START @ iter {iteration} (STAND→WALK)")
+        print(f"\n[Curriculum] [>>] Ramp 1→2 START @ iter {iteration} (STAND→WALK)")
         _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
     if abs(new_12 - 1.0) < 1e-6 and abs(old_12 - 1.0) >= 1e-6:
-        print(f"\n[Curriculum] ✅ Ramp 1→2 COMPLETE @ iter {iteration} (STAND→WALK)")
+        print(f"\n[Curriculum] [OK] Ramp 1→2 COMPLETE @ iter {iteration} (STAND→WALK)")
         _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
     if abs(old_23) < 1e-6 and new_23 > 1e-6:
-        print(f"\n[Curriculum] 🔄 Ramp 2→3 START @ iter {iteration} (WALK→TROT)")
+        print(f"\n[Curriculum] [>>] Ramp 2→3 START @ iter {iteration} (WALK→TROT)")
         _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
     if abs(new_23 - 1.0) < 1e-6 and abs(old_23 - 1.0) >= 1e-6:
-        print(f"\n[Curriculum] ✅ Ramp 2→3 COMPLETE @ iter {iteration} (WALK→TROT)")
+        print(f"\n[Curriculum] [OK] Ramp 2→3 COMPLETE @ iter {iteration} (WALK→TROT)")
         _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
     if abs(old_validity) < 1e-6 and new_validity > 1e-6:
-        print(f"\n[Curriculum] 🔄 Validity Ramp START @ iter {iteration}")
+        print(f"\n[Curriculum] [>>] Validity Ramp START @ iter {iteration}")
         _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
     if abs(new_validity - 1.0) < 1e-6 and abs(old_validity - 1.0) >= 1e-6:
-        print(f"\n[Curriculum] ✅ Validity Ramp COMPLETE @ iter {iteration}")
+        print(f"\n[Curriculum] [OK] Validity Ramp COMPLETE @ iter {iteration}")
         _curriculum_log_snapshot(env, iteration, new_12, new_23, new_validity, env._crr_gate_paused)
-
-    return None
-
-
-def stand_walk_curriculum(
-    env: ManagerBasedRLEnv,
-    env_ids: torch.Tensor,
-    num_steps_per_env: int = 48,
-    # Phase boundaries (iterations)
-    walk_ramp_start: int = 200,
-    walk_ramp_end: int = 500,
-    # Standing ratio ramp
-    standing_ratio_initial: float = 0.8,
-    standing_ratio_final: float = 0.1,
-    # Command range ramp (tuples)
-    lin_vel_x_initial: tuple = (0.01, 0.15),
-    lin_vel_x_final: tuple = (0.1, 0.5),
-    ang_vel_z_initial: tuple = (-0.15, 0.15),
-    ang_vel_z_final: tuple = (-0.5, 0.5),
-    # Reward weight targets (ramp from 0 to target)
-    forward_velocity_target: float = 5.0,
-    stationary_penalty_target: float = -3.0,
-    min_swing_ratio_target: float = -15.0,
-    limb_usage_min_target: float = -5.0,
-    single_limb_validity_target: float = -5.0,
-    rear_both_ground_target: float = -60.0,
-    # Logging
-    log_interval: int = 50,
-):
-    """V34: rel_standing_envs + command range + reward weight 통합 커리큘럼.
-
-    Phase 1 (iter 0~walk_ramp_start): 80% standing, 극저속 command, 서기 집중
-    Phase 2 (iter walk_ramp_start~walk_ramp_end): standing 비율/command/reward 선형 ramp
-    Phase 3 (iter walk_ramp_end~): 최종 값으로 안정, 본격 보행
-    """
-    iteration = env.common_step_counter // num_steps_per_env
-
-    # alpha: 0 (Phase 1) → 1 (Phase 3)
-    if walk_ramp_end <= walk_ramp_start:
-        alpha = 1.0 if iteration >= walk_ramp_start else 0.0
-    else:
-        alpha = float(max(0.0, min(1.0, (iteration - walk_ramp_start) / (walk_ramp_end - walk_ramp_start))))
-
-    # --- 1. Command manager 조정 ---
-    try:
-        cmd_term = env.command_manager.get_term("base_velocity")
-        # Standing ratio ramp
-        cmd_term.cfg.rel_standing_envs = standing_ratio_initial + alpha * (standing_ratio_final - standing_ratio_initial)
-        # Command range ramp (linear interpolation)
-        cmd_term.cfg.ranges.lin_vel_x = (
-            lin_vel_x_initial[0] + alpha * (lin_vel_x_final[0] - lin_vel_x_initial[0]),
-            lin_vel_x_initial[1] + alpha * (lin_vel_x_final[1] - lin_vel_x_initial[1]),
-        )
-        cmd_term.cfg.ranges.ang_vel_z = (
-            ang_vel_z_initial[0] + alpha * (ang_vel_z_final[0] - ang_vel_z_initial[0]),
-            ang_vel_z_initial[1] + alpha * (ang_vel_z_final[1] - ang_vel_z_initial[1]),
-        )
-    except Exception as e:
-        if not hasattr(env, "_swc_cmd_warn"):
-            print(f"[StandWalk] WARNING: command manager access failed: {e}")
-            env._swc_cmd_warn = True
-
-    # --- 2. Reward weight 조정 ---
-    ramp_terms = {
-        "forward_velocity": forward_velocity_target,
-        "stationary_penalty": stationary_penalty_target,
-        "min_swing_ratio": min_swing_ratio_target,
-        "limb_usage_min_penalty": limb_usage_min_target,
-        "single_limb_validity_penalty": single_limb_validity_target,
-        "rear_both_ground": rear_both_ground_target,
-    }
-
-    for term_name, target_w in ramp_terms.items():
-        new_w = alpha * target_w
-        try:
-            cfg = env.reward_manager.get_term_cfg(term_name)
-            cfg.weight = new_w
-            env.reward_manager.set_term_cfg(term_name, cfg)
-        except Exception:
-            pass
-
-    # --- 3. Logging ---
-    if log_interval > 0 and iteration % log_interval == 0:
-        if alpha < 1e-6:
-            phase_str = "Phase 1 (STAND)"
-        elif alpha < 1.0 - 1e-6:
-            phase_str = f"Phase 2 (TRANSITION {alpha:.0%})"
-        else:
-            phase_str = "Phase 3 (WALK)"
-        standing_now = standing_ratio_initial + alpha * (standing_ratio_final - standing_ratio_initial)
-        vel_x_now = (
-            lin_vel_x_initial[0] + alpha * (lin_vel_x_final[0] - lin_vel_x_initial[0]),
-            lin_vel_x_initial[1] + alpha * (lin_vel_x_final[1] - lin_vel_x_initial[1]),
-        )
-        print(f"\n{'─' * 60}")
-        print(f"[StandWalk] iter {iteration} | {phase_str} | alpha={alpha:.3f}")
-        print(f"  rel_standing_envs: {standing_now:.2f}")
-        print(f"  lin_vel_x: ({vel_x_now[0]:.3f}, {vel_x_now[1]:.3f})")
-        for term_name, target_w in ramp_terms.items():
-            print(f"  {term_name}: {alpha * target_w:.2f} (target={target_w:.1f})")
-        print(f"{'─' * 60}")
 
     return None
 

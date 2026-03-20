@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V34"
+TRAIN_VERSION = "V35.5"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -157,138 +157,114 @@ class SpotMicroRewardCurriculumCfg:
         four_limb_cooperation: 0.0 → 8.0 (iter 200~450, trigger band_hit >= 2/3)
       Layer C/B ramp 설계: iter 250+에서 Layer C 총합 > Layer B 총합
     """
-    # V33: 커리큘럼 전부 no-op — 모든 weight를 직접 설정, ramp 없음
-    # 커리큘럼 함수는 코드에 남기되, 모든 ramp를 비활성화 (initial=final=0, start=end)
     reward_weights = CurrTerm(
         func=custom_mdp.reward_weight_curriculum,
         params={
             "num_steps_per_env": 48,
-            # Phase ramp — 비활성화 (동일 값으로 no-op)
-            "ramp1_start": 99999,
-            "ramp1_end": 99999,
-            "ramp2_start": 99999,
-            "ramp2_end": 99999,
-            # Validity — 비활성화
-            "validity_ramp_start": 0,
+            "ramp1_start": 1500,
+            "ramp1_end": 3000,
+            "ramp2_start": 5500,
+            "ramp2_end": 8000,
+            "validity_ramp_start": 0,   # Legacy — no-op
             "validity_ramp_end": 1,
             "validity_limb_usage_initial": 0.0,
             "validity_limb_usage_final": 0.0,
             "validity_rear_diff_initial": 0.0,
             "validity_rear_diff_final": 0.0,
-            # Layer B floor — 비활성화
+            # V28 Layer B: existence floor ramp — V27.1b보다 완화 (Layer C 공간 확보)
             "floor_ramp_start": 0,
-            "floor_ramp_end": 1,
-            "floor_limb_usage_initial": 0.0,
-            "floor_limb_usage_final": 0.0,
-            "floor_per_leg_contact_initial": 0.0,
-            "floor_per_leg_contact_final": 0.0,
-            "floor_per_leg_propulsion_initial": 0.0,
-            "floor_per_leg_propulsion_final": 0.0,
-            "propulsion_floor_ramp_start": 0,
-            "propulsion_floor_ramp_end": 1,
-            # Load sharing — 비활성화
-            "load_ramp_start": 0,
-            "load_ramp_end": 1,
-            "load_rear_usage_diff_final": 0.0,
-            "load_front_usage_diff_final": 0.0,
-            "load_rear_prop_diff_final": 0.0,
+            "floor_ramp_end": 200,
+            "floor_limb_usage_initial": -8.0,
+            "floor_limb_usage_final": -25.0,
+            "floor_per_leg_contact_initial": -1.0,   # V28: -2 → -1 (초반 추가 완화)
+            "floor_per_leg_contact_final": -12.0,    # V28: -20 → -12 (Layer C 공간 확보)
+            "floor_per_leg_propulsion_initial": -1.0,  # V28: -2 → -1
+            "floor_per_leg_propulsion_final": -10.0,   # V28: -15 → -10
+            # V28: propulsion floor 전용 ramp (iter 50~250, V27.1b 50~200보다 늦게)
+            "propulsion_floor_ramp_start": 50,
+            "propulsion_floor_ramp_end": 250,
+            # Load sharing ramp (V27 동일 유지)
+            "load_ramp_start": 50,
+            "load_ramp_end": 150,
+            "load_rear_usage_diff_final": -10.0,
+            "load_front_usage_diff_final": -8.0,
+            "load_rear_prop_diff_final": -20.0,
             "load_front_rear_balance_final": 0.0,
-            "load_front_prop_diff_final": 0.0,
-            # Validity gate — 비활성화
+            "load_front_prop_diff_final": -20.0,
+            # V28 Layer B: single_limb_validity_penalty ramp (iter 0~250, V27.1b 0~200보다 완화)
             "validity_gate_ramp_start": 0,
-            "validity_gate_ramp_end": 1,
-            "validity_gate_initial": 0.0,
-            "validity_gate_final": 0.0,
-            # Band — 비활성화
-            "band_ramp_start": 0,
-            "band_ramp_end": 1,
-            "band_contact_initial": 0.0,
-            "band_contact_final": 0.0,
-            "band_propulsion_initial": 0.0,
-            "band_propulsion_final": 0.0,
-            # Cooperation — 비활성화
-            "coop_ramp_start": 0,
-            "coop_ramp_end": 1,
+            "validity_gate_ramp_end": 250,
+            "validity_gate_initial": -5.0,
+            "validity_gate_final": -25.0,    # V28: -35 → -25 (Layer C에 유리한 공간)
+            # V28 Layer C: contact + propulsion target-band reward ramp (iter 100~300)
+            "band_ramp_start": 100,
+            "band_ramp_end": 300,
+            "band_contact_initial": 0.5,     # iter 100부터 약하게 시작
+            "band_contact_final": 5.0,       # V26 iter200 실측 기반 (V29.2: band [0.20~0.75])
+            "band_propulsion_initial": 0.5,
+            "band_propulsion_final": 4.0,    # band [0.15~0.38]
+            # V28 Layer C: usage band + cooperation ramp (iter 200~450, 후반 강화형)
+            "coop_ramp_start": 200,
+            "coop_ramp_end": 450,
             "coop_usage_initial": 0.0,
-            "coop_usage_final": 0.0,
+            "coop_usage_final": 3.0,         # usage band [0.20~0.45]
             "coop_reward_initial": 0.0,
-            "coop_reward_final": 0.0,
-            # Residency — 비활성화
-            "residency_relay_up_start": 99999,
-            "residency_relay_up_end": 99999,
-            "residency_relay_down_end": 99999,
-            "contact_residency_early_max": 0.0,
-            "contact_residency_late_max": 0.0,
-            "prop_residency_early_max": 0.0,
-            "prop_residency_late_max": 0.0,
-            "usage_residency_early_max": 0.0,
-            "usage_residency_late_max": 0.0,
-            # Rear symmetry — 비활성화
-            "rear_symmetry_ramp_start": 0,
-            "rear_symmetry_ramp_end": 1,
-            "rear_symmetry_max": 0.0,
-            # Exit penalty — 비활성화
-            "exit_penalty_ramp_start": 0,
-            "exit_penalty_ramp_end": 1,
-            "exit_penalty_max": 0.0,
-            # Cooperation min-leg — 비활성화
-            "coop_min_leg_ramp_start": 0,
-            "coop_min_leg_ramp_end": 1,
-            "coop_min_leg_factor_target": 1.0,
-            # Rear contact diff — 비활성화
-            "rear_contact_diff_ramp_start": 0,
-            "rear_contact_diff_ramp_end": 1,
-            "rear_contact_diff_max": 0.0,
-            # Stride length — 비활성화 (직접 weight 설정)
-            "stride_length_ramp_start": 0,
-            "stride_length_ramp_end": 1,
-            "stride_length_max": 0.0,
-            # Swing gate — 비활성화
-            "swing_gate_ramp_start": 0,
-            "swing_gate_ramp_end": 1,
-            "swing_gate_max": 0.0,
-            # Front swing — 비활성화
-            "front_swing_ramp_start": 0,
-            "front_swing_ramp_end": 1,
-            "front_swing_bonus_max": 0.0,
-            "front_alternation_max": 0.0,
-            "front_both_ground_max": 0.0,
-            "min_swing_ratio_max": 0.0,
-            # Front joint — 비활성화
-            "front_joint_velocity_max": 0.0,
-            "front_joint_frozen_max": 0.0,
+            "coop_reward_final": 8.0,        # band_hit_count >= 2/3 trigger
+            # V28.1: residency relay ramp (early triangle 600→800→1000, late ramp 800→1000→유지)
+            # V29.2: 타이밍 지연 — gait 안정화 후 잔류 학습 (600/800/1000 → 800/1000/1200)
+            "residency_relay_up_start": 800,
+            "residency_relay_up_end": 1000,
+            "residency_relay_down_end": 1200,
+            "contact_residency_early_max": 3.0,   # early 최대 weight (600→800 peak)
+            "contact_residency_late_max": 4.0,    # late 최대 weight (1000+ 유지)
+            "prop_residency_early_max": 2.0,
+            "prop_residency_late_max": 3.0,
+            "usage_residency_early_max": 1.0,
+            "usage_residency_late_max": 2.0,
+            # V28.2: rear pair residency symmetry penalty 강화 (iter 400~700, 완충 포함)
+            "rear_symmetry_ramp_start": 400,      # V28.1: 600 → V28.2: 400
+            "rear_symmetry_ramp_end": 700,        # V28.1: 1000 → V28.2: 700
+            "rear_symmetry_max": -28.0,           # V28.1: -8.0 → V28.2: -28.0 (3.5배)
+            # V28.2: late-phase band exit penalty 강화 (iter 600~900)
+            "exit_penalty_ramp_start": 600,       # V28.1: 800 → V28.2: 600
+            "exit_penalty_ramp_end": 900,         # V28.1: 1200 → V28.2: 900
+            "exit_penalty_max": -15.0,            # V28.1: -6.0 → V28.2: -15.0 (2.5배)
+            # V28.2: cooperation min-leg factor 강화 (iter 600~800, 1.0 → 0.05)
+            "coop_min_leg_ramp_start": 600,       # V28.1: 800 → V28.2: 600
+            "coop_min_leg_ramp_end": 800,         # V28.1: 1000 → V28.2: 800
+            "coop_min_leg_factor_target": 0.05,   # V28.1: 0.2 → V28.2: 0.05 (95% 감쇠)
+            # V28.2: rear pair contact diff penalty (신규, current-step, iter 300~600)
+            "rear_contact_diff_ramp_start": 300,
+            "rear_contact_diff_ramp_end": 600,
+            "rear_contact_diff_max": -15.0,       # threshold 0.10, max -15.0
+            # V29: stride length reward ramp (iter 400~700)
+            "stride_length_ramp_start": 400,
+            "stride_length_ramp_end": 700,
+            "stride_length_max": 12.0,            # 보폭 10cm 달성 시 최대 보상
+            # V29: swing quality gated velocity reward ramp (iter 600~900)
+            "swing_gate_ramp_start": 600,
+            "swing_gate_ramp_end": 900,
+            "swing_gate_max": 15.0,               # 4발 min swing × 속도 (swing_gate_max=15)
+            # V31: front swing ramp (iter 100~400) — 앞다리 swing 강제
+            "front_swing_ramp_start": 100,
+            "front_swing_ramp_end": 400,
+            "front_swing_bonus_max": 0.0,          # V32: 비활성화 — feet_air_time으로 대체
+            "front_alternation_max": 0.0,          # V31.1: 비활성화
+            "front_both_ground_max": 0.0,          # V31.2: 비활성화
+            "min_swing_ratio_max": 0.0,            # V31.2: 비활성화
+            # V32: front joint-level 비활성화 — feet_air_time이 4발 공통 swing 유도
+            "front_joint_velocity_max": 0.0,       # V32: 비활성화
+            "front_joint_frozen_max": 0.0,         # V32: 비활성화
+            # V35.5: boot stability ramp — 초기 penalty 완화 + 저속 명령
+            "boot_ramp_end": 300,                  # iter 0~300: 부팅 구간
+            "boot_undesired_contacts_floor": -20.0, # -100 → -20 (iter 0), iter 300에서 -100 복원
+            "boot_vel_x_min": 0.01,                # 초기 속도 범위 (0.01, 0.05)
+            "boot_vel_x_max": 0.05,
+            "boot_vel_restore_iter": 500,          # iter 500에서 원래 속도 (0.1, 0.5) 복원
             "update_interval": 10,
-            "gait_gate_enabled": False,  # V33: gait gate 비활성화
+            "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
             "log_interval": 100,
-        },
-    )
-
-    # V34: rel_standing_envs + command range + reward weight 통합 커리큘럼
-    stand_walk = CurrTerm(
-        func=custom_mdp.stand_walk_curriculum,
-        params={
-            "num_steps_per_env": 48,
-            # Phase boundaries
-            "walk_ramp_start": 200,
-            "walk_ramp_end": 500,
-            # Standing ratio ramp
-            "standing_ratio_initial": 0.8,
-            "standing_ratio_final": 0.1,
-            # Command range ramp
-            "lin_vel_x_initial": (0.01, 0.15),
-            "lin_vel_x_final": (0.1, 0.5),
-            "ang_vel_z_initial": (-0.15, 0.15),
-            "ang_vel_z_final": (-0.5, 0.5),
-            # Reward weight targets (Phase 2 ramp)
-            "forward_velocity_target": 5.0,
-            "stationary_penalty_target": -3.0,
-            "min_swing_ratio_target": -15.0,
-            "limb_usage_min_target": -5.0,
-            "single_limb_validity_target": -5.0,
-            "rear_both_ground_target": -60.0,
-            # Logging
-            "log_interval": 50,
         },
     )
 
@@ -347,21 +323,20 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # 보상 설정
         # ============================================================
 
-        # ============================================================
-        # V33: 근본적 보상 구조 재설계 — 28개 핵심 보상
-        # 배경: V32.1 영상 관찰 → 거미 형상, 보폭 20%, 보수적 셔플링
-        # 원인: 어깨 부착점 좁음 + 높이 과다 + rear bias + 보상 충돌
-        # 철학: legged_gym 스타일 회귀, 4발 공통, 자세 먼저
-        # ============================================================
+        # V35.3: 매 step 생존 보상 — 초기 부팅 안정성 확보
+        self.rewards.alive_bonus = RewTerm(
+            func=custom_mdp.alive_bonus,
+            weight=10.0,  # V35.4: 2.0→10.0 (penalty와 경쟁 가능한 수준)
+        )
 
-        # === 과제 보상 (Task) ===
-        self.rewards.track_lin_vel_xy_exp.weight = 1.5   # V34: 처음부터 ON (standing env에서 command=0 추적 = 서기 보상)
-        self.rewards.track_ang_vel_z_exp.weight = 1.0    # V33: 1.5→1.0
+        # 속도 추적 (V15c: 전체 스케일 1/3 축소)
+        self.rewards.track_lin_vel_xy_exp.weight = 1.0
+        self.rewards.track_ang_vel_z_exp.weight = 1.5
 
-        # V33: 전진 속도 — rear gating 유지하되 축소 (전진 인센티브 필수)
+        # V15c: 전진 속도 (뒷다리 게이팅 ONLY)
         self.rewards.forward_velocity = RewTerm(
             func=custom_mdp.forward_velocity_rear_gated,
-            weight=0.0,  # V34: 0 (Phase 2 커리큘럼이 5.0까지 ramp)
+            weight=8.0,  # V15c: 25→8 (스케일 축소, 뒷다리 필수 유지)
             params={
                 "rear_joint_cfg": SceneEntityCfg("robot", joint_names=["rear_left_shoulder", "rear_right_shoulder", "rear_left_leg", "rear_right_leg", "rear_left_foot", "rear_right_foot"]),
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -376,61 +351,62 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             params={"asset_cfg": SceneEntityCfg("robot"), "target_vel": 0.5},
         )
 
-        # V33: 정지 페널티 활성화 — "안 움직이면 안전" 학습 방지
+        # 정지 페널티 (제자리 트로트용으로 비활성화)
         self.rewards.stationary_penalty = RewTerm(
             func=custom_mdp.stationary_penalty,
-            weight=0.0,  # V34: 0 (Phase 2 커리큘럼이 -3.0까지 ramp)
+            weight=0.0,
             params={"asset_cfg": SceneEntityCfg("robot"), "threshold": 0.05},
         )
 
-        # === 안정성 (Stability) ===
-        self.rewards.lin_vel_z_l2.weight = -2.0    # V33: 유지
-        self.rewards.ang_vel_xy_l2.weight = -1.0   # V33: 유지
-
-        # === 부드러움 (Smoothness) ===
-        self.rewards.dof_torques_l2.weight = -3e-5  # V33: 유지
-        self.rewards.dof_acc_l2.weight = -2.5e-6    # V33.1: -5e-6→-2.5e-6 (V33에서 TOP3 패널티 → 완화)
+        # 안정성 페널티
+        self.rewards.lin_vel_z_l2.weight = -2.0   # V29: -0.7 → -2.0 (수직 진동 억제 강화)
+        self.rewards.ang_vel_xy_l2.weight = -1.0   # V29: -0.2 → -1.0 (몸통 흔들림 억제 강화)
+        self.rewards.dof_torques_l2.weight = -3e-5
+        self.rewards.dof_acc_l2.weight = -5e-6  # V17: -8e-8→-5e-6 (가속도 페널티 강화)
+        # V17: 액션 변화율 페널티 대폭 강화 (빠른 떨림 물리적 차단)
         self.rewards.action_rate_l2 = RewTerm(
             func=custom_mdp.action_rate_l2_clamped,
-            weight=-2.0,  # V33: -3.0→-2.0 (완화 — 보폭 허용)
+            weight=-3.0,  # V17: -0.1→-3.0 (빠른 떨림 억제)
             params={"max_value": 50.0},
         )
+        # V32: feet_air_time을 4발 공통 swing 유도의 핵심 보상으로 강화
+        # legged_gym 표준: threshold=0.5, weight=1.0 (15개 보상 기준)
+        # 우리: 50+ 보상이므로 weight를 높여야 경쟁 가능
+        self.rewards.feet_air_time.weight = 30.0   # V17: 8.0 → V32: 30.0
+        self.rewards.feet_air_time.params["threshold"] = 0.3  # V17.1: 0.1 → V32: 0.3 (0.3초 이상 체공 유도)
 
-        # === Gait — 4발 공통 (V33 핵심: rear 전용 제거, 공통 보상만) ===
-        self.rewards.feet_air_time.weight = 20.0    # V33: 유지 (rear 경쟁 없이 더 효과적)
-        self.rewards.feet_air_time.params["threshold"] = 0.1  # V33: 유지
-
+        # V17: 관절 속도 억제 대폭 강화 (빠른 진동 차단)
         self.rewards.joint_vel_l2 = RewTerm(
             func=isaaclab_mdp.joint_vel_l2,
-            weight=-0.15,  # V33.1: -0.3→-0.15 (V33에서 TOP2 패널티 → 추가 완화)
+            weight=-0.5,  # V17: -0.02→-0.5 (관절 속도 억제 강화)
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
 
-        # === 자세 제어 (Posture) — V33 핵심 ===
-        self.rewards.flat_orientation_l2.weight = -5.0  # V33: -7.0→-5.0 (약간 완화)
+        # 수평 유지
+        self.rewards.flat_orientation_l2.weight = -7.0
 
-        # V33.1: 높이 목표 0.22m (V33 0.20 → 서있기 불가, 0.24 → 벌어짐, 중간값)
+        # 높이 페널티
         self.rewards.base_height_l2 = RewTerm(
             func=isaaclab_mdp.base_height_l2,
             weight=-15.0,
-            params={"target_height": 0.22, "asset_cfg": SceneEntityCfg("robot")}
+            params={"target_height": 0.24, "asset_cfg": SceneEntityCfg("robot")}
         )
 
-        # V33.1: standing_height 대폭 강화 — 서있기 인센티브 필수
+        # 높이 + 수평 결합 보상
         self.rewards.standing_height = RewTerm(
             func=custom_mdp.standing_height_exp,
-            weight=15.0,  # V33.1: 8.0→15.0 (V33에서 서있기 실패 → 대폭 강화)
-            params={"target_height": 0.22, "sigma": 0.03,
+            weight=10.0,  # V16: 12→10 (총 스케일 조정)
+            params={"target_height": 0.24, "sigma": 0.03,
                     "asset_cfg": SceneEntityCfg("robot")}
         )
 
         # 무릎/배/어깨 접촉 페널티
         self.rewards.undesired_contacts.weight = -100.0
 
-        # V33: knee_height 비활성화 — joint_deviation이 대체
+        # 무릎 높이 보상
         self.rewards.knee_height = RewTerm(
             func=custom_mdp.body_height_reward,
-            weight=0.0,   # V33: 7.0→0 (joint_deviation이 대체)
+            weight=7.0,
             params={
                 "target_height": 0.12,
                 "penalty_below": 0.06,
@@ -465,7 +441,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             }
         )
 
-        # V33: leg_pose_symmetry 비활성화 유지
+        # 앞/뒤 다리 대칭 (트로트에선 대각선 쌍이 반대이므로 비활성화)
         self.rewards.leg_pose_symmetry = RewTerm(
             func=custom_mdp.leg_pose_symmetry,
             weight=0.0,
@@ -475,30 +451,31 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             }
         )
 
-        # V33: shoulder_symmetry 비활성화 — shoulder_neutral이 대체
+        # 어깨 대칭
         self.rewards.shoulder_symmetry = RewTerm(
             func=custom_mdp.shoulder_stance_symmetry,
-            weight=0.0,   # V33: -3.0→0 (shoulder_neutral이 대체)
+            weight=-3.0,
             params={
                 "front_shoulder_cfg": SceneEntityCfg("robot", joint_names=["front_left_shoulder", "front_right_shoulder"]),
                 "rear_shoulder_cfg": SceneEntityCfg("robot", joint_names=["rear_left_shoulder", "rear_right_shoulder"]),
             }
         )
 
-        # V33: shoulder_neutral 대폭 강화 — 벌어짐 차단 핵심 (legged_gym dof_pos_dev)
+        # V23: 어깨 기구학 타깃 재정렬
+        # 어깨 roll축(X): 음수=바깥 벌림, phase-1은 과도한 splay를 줄인 posture-first 설정 사용
         self.rewards.shoulder_neutral = RewTerm(
             func=custom_mdp.shoulder_neutral_penalty,
-            weight=-15.0,  # V33: -4.0→-15.0 (×3.75, anti-splay 핵심)
+            weight=-4.0,
             params={
                 "shoulder_cfg": SceneEntityCfg("robot", joint_names=["front_left_shoulder", "front_right_shoulder", "rear_left_shoulder", "rear_right_shoulder"]),
                 "target_angles": [-0.04, -0.04, -0.04, -0.04],
             }
         )
 
-        # V33: stance_width_penalty 비활성화 — shoulder_neutral이 직접 차단
+        # V23: body-frame 기준 너무 넓은 stance 억제
         self.rewards.stance_width_penalty = RewTerm(
             func=custom_mdp.stance_width_penalty,
-            weight=0.0,   # V33: -2.5→0 (shoulder_neutral이 대체, 높이 유지와 모순 제거)
+            weight=-2.5,
             params={
                 "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -508,10 +485,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33.1: height_bonus 복구 — 서있기 인센티브 추가 (V33에서 제거 → 넘어짐)
+        # 높이 비례 보상
         self.rewards.height_bonus = RewTerm(
             func=custom_mdp.progressive_height_reward,
-            weight=5.0,   # V33.1: 0→5.0 (V32.1: 7.0보다는 낮게)
+            weight=7.0,
             params={
                 "min_height": 0.15,
                 "max_height": 0.25,
@@ -525,10 +502,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             params={"limit_angle": 1.5}  # ~86도
         )
 
-        # V33: 발 높이 보상 강화 (Walk These Ways foot clearance)
+        # V17: 발 높이 보상 (target_clearance 낮춤 — 6cm 보폭)
         self.rewards.foot_clearance = RewTerm(
             func=custom_mdp.foot_clearance_reward,
-            weight=10.0,  # V33: 8.0→10.0 (보폭 유도 강화)
+            weight=8.0,
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "foot_cfg": toe_body_cfg,
@@ -571,10 +548,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33: swing_stride 비활성화 — stride_length가 대체
+        # 스윙 보폭 보상
         self.rewards.swing_stride = RewTerm(
             func=custom_mdp.swing_stride_reward,
-            weight=0.0,   # V33: 2.0→0
+            weight=2.0,
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "foot_cfg": toe_body_cfg,
@@ -583,10 +560,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33: rear_swing 비활성화 — feet_air_time + foot_clearance가 4발 공통 대체
+        # V16: 뒷발 스윙 보너스 (V32: feet_air_time이 공통 swing 유도하므로 축소)
         self.rewards.rear_swing = RewTerm(
             func=custom_mdp.rear_swing_bonus,
-            weight=0.0,   # V33: 15.0→0 (교훈 #9: 다리별 전용 보상 제거)
+            weight=8.0,  # V32: 15→8 (feet_air_time 30.0이 주도, rear bias 축소)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "foot_cfg": toe_body_cfg,
@@ -596,17 +573,17 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33: joint_deviation 강화 — 기본 자세 유지 (legged_gym dof_pos_dev)
+        # 기본 자세 편차 페널티
         self.rewards.joint_deviation = RewTerm(
             func=isaaclab_mdp.joint_deviation_l1,
-            weight=-1.0,  # V33: -0.3→-1.0 (×3.3, 보행 억제 않도록 보수적)
+            weight=-0.3,
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
 
-        # V33: leg_lift 비활성화 — feet_air_time + foot_clearance가 대체
+        # V16: leg 관절 들어올리기 (대각 커플링에 비중 분배)
         self.rewards.leg_lift = RewTerm(
             func=custom_mdp.leg_lift_reward,
-            weight=0.0,   # V33: 15.0→0
+            weight=15.0,  # V16: 20→15 (diagonal coupling이 보완)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "leg_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_leg", "front_right_leg", "rear_left_leg", "rear_right_leg"]),
@@ -618,10 +595,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V15: 뒷다리 활성화 보상 (from-scratch 학습에 맞는 보수적 가중치)
         # ============================================================
 
-        # V33.2: rear_joint_velocity 절반 복구 — 초기 부팅 신호 필수 (V33 실패)
+        # V16: 뒷다리 관절 속도 보상 (V32: feet_air_time이 주도하므로 축소)
         self.rewards.rear_joint_velocity = RewTerm(
             func=custom_mdp.rear_joint_velocity_reward,
-            weight=10.0,  # V33.2: 0→10.0 (V32.1의 절반, 부팅 신호)
+            weight=12.0,  # V32: 20→12 (rear bias 축소, feet_air_time이 4발 공통 유도)
             params={
                 "rear_joint_cfg": SceneEntityCfg("robot", joint_names=["rear_left_shoulder", "rear_right_shoulder", "rear_left_leg", "rear_right_leg", "rear_left_foot", "rear_right_foot"]),
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -630,10 +607,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33.2: rear_joint_frozen 절반 복구
+        # V16: 뒷다리 관절 동결 페널티 (강화)
         self.rewards.rear_joint_frozen = RewTerm(
             func=custom_mdp.rear_joint_frozen_penalty,
-            weight=-60.0,  # V33.3: -30→-60 (V32.1 수준 복원, 3발 exploit 방지)
+            weight=-60.0,  # V16: -40→-60 (뒷다리 동결 강력 처벌)
             params={
                 "rear_joint_cfg": SceneEntityCfg("robot", joint_names=["rear_left_shoulder", "rear_right_shoulder", "rear_left_leg", "rear_right_leg", "rear_left_foot", "rear_right_foot"]),
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -642,10 +619,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33.2: rear_alternation 절반 복구
+        # V16: 뒷다리 교대 보상 (V32: feet_air_time이 공통 swing 유도하므로 축소)
         self.rewards.rear_alternation = RewTerm(
             func=custom_mdp.rear_alternation_reward,
-            weight=15.0,  # V33.2: 0→15.0 (V32.1의 절반)
+            weight=15.0,  # V32: 30→15 (feet_air_time이 4발 교대를 유도, rear 독점 축소)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -654,10 +631,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33.2: rear_both_ground 절반 복구
+        # V16: 뒷다리 동시 접지 페널티 (강화)
         self.rewards.rear_both_ground = RewTerm(
             func=custom_mdp.rear_both_ground_penalty,
-            weight=0.0,  # V34: 0 (Phase 2 커리큘럼이 -60까지 ramp)
+            weight=-80.0,  # V16: -50→-80 (뒷다리 고정 강력 처벌)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -666,10 +643,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33: rear_forward_stride 비활성화 — stance_propulsion이 대체
+        # V15: 뒷발 전방 보폭 보상
         self.rewards.rear_forward_stride = RewTerm(
             func=custom_mdp.rear_forward_stride_reward,
-            weight=0.0,   # V33: 10.0→0
+            weight=10.0,
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "foot_cfg": toe_body_cfg,
@@ -681,10 +658,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33: Layer B 전부 비활성화 — 커리큘럼 제거, 단순화
+        # V28 Layer B: Symmetric existence floor penalties (V27.1b보다 완화 — Layer C 공간 확보)
         self.rewards.limb_usage_min_penalty = RewTerm(
             func=custom_mdp.limb_usage_min_penalty,
-            weight=0.0,  # V34: 0 (Phase 2 커리큘럼이 -5까지 ramp)
+            weight=-8.0,  # V28: initial -8, curriculum이 -25.0까지 ramp (V27.1b 동일)
             params={
                 "min_usage": 0.10,
                 "contact_target": 0.5,
@@ -697,7 +674,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.per_leg_contact_floor = RewTerm(
             func=custom_mdp.per_leg_contact_floor_penalty,
-            weight=0.0,   # V33: -1.0→0
+            weight=-1.0,  # V28: initial -1 (V27.1b: -2), curriculum이 -12.0까지 ramp (iter 0~200)
             params={
                 "floor": 0.15,  # V27: 0.15 유지 — 완전 붕괴 방지 기준
                 "min_vel": 0.05,
@@ -706,7 +683,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.per_leg_propulsion_floor = RewTerm(
             func=custom_mdp.per_leg_propulsion_floor_penalty,
-            weight=0.0,   # V33: -1.0→0
+            weight=-1.0,  # V28: initial -1 (V27.1b: -2), curriculum이 -10.0까지 ramp (iter 50~250)
             params={
                 "floor": 0.10,  # V27: 0.10 유지 — fake contact 차단 기준
                 "min_vel": 0.05,
@@ -751,10 +728,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         )
-        # V33: front_rear_support_balance 비활성화 — 4발 공통 구조에서 불필요
         self.rewards.front_rear_support_balance_penalty = RewTerm(
             func=custom_mdp.front_rear_support_balance_penalty,
-            weight=0.0,   # V33: -8.0→0
+            weight=-8.0,  # V31: -4.0 → -8.0 강화 (V30에서 -4.0은 -0.77에 불과)
             params={
                 "max_diff": 0.15,   # V31: 0.25 → 0.15 (더 강한 gradient — front swing 보상이 안정성 보상)
                 "contact_target": 0.5,
@@ -777,7 +753,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.single_limb_validity_penalty = RewTerm(
             func=custom_mdp.single_limb_validity_penalty,
-            weight=0.0,  # V34: 0 (Phase 2 커리큘럼이 -5까지 ramp)
+            weight=-5.0,  # V28: initial weight (curriculum이 -25.0까지 ramp, iter 0~250)
             params={
                 "floor": 0.10,
                 "min_vel": 0.05,
@@ -787,10 +763,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
         # V28 Layer C: Target-Band Incentive — "정상 범위에 들어와야 이득이 되는 구조"
         # band 수치는 V26 iter 200 실측 기반: contact [0.20~0.45], propulsion [0.15~0.38]
-        # V33: Layer C 전부 비활성화
         self.rewards.per_leg_contact_target_band = RewTerm(
             func=custom_mdp.per_leg_contact_target_band_reward,
-            weight=0.0,   # V33: 3.0→0
+            weight=3.0,  # V29.2: 0.5 → 3.0 (RL/RR이 band 안에 있을 때 강한 양의 신호)
             params={
                 "band_low": 0.20,
                 "band_high": 0.65,  # V31: 0.75 → 0.65 (FL/FR이 내려와야 band 진입 가능)
@@ -947,7 +922,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.min_swing_ratio = RewTerm(
             func=custom_mdp.min_swing_ratio_penalty,
-            weight=0.0,  # V34: 0 (Phase 2 커리큘럼이 -15까지 ramp)
+            weight=0.0,  # curriculum이 -20.0까지 ramp (iter 100~400)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -991,10 +966,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V33: foot_extension 완화 — 보폭 확대 허용 (과신장만 제한)
+        # V15: foot 관절 과신전 페널티
         self.rewards.foot_extension = RewTerm(
             func=custom_mdp.foot_extension_penalty,
-            weight=-3.0,  # V33: -10.0→-3.0 (보폭 확대 허용)
+            weight=-10.0,
             params={
                 "foot_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_foot", "front_right_foot", "rear_left_foot", "rear_right_foot"]),
                 "max_angle": 1.5,
@@ -1026,10 +1001,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V17: 걸음걸이 주기 보상 — 0.3~0.5초 사이클 유도
         # 같은 발이 연속 접지하는 간격을 측정, 목표 범위에 있으면 보상
         # ============================================================
-        # V33: gait_cycle_period 축소 유지 — trot_gait은 상태만 체크, 주기는 여기서 제어
         self.rewards.gait_cycle_period = RewTerm(
             func=custom_mdp.gait_cycle_period_reward,
-            weight=8.0,   # V33: 15.0→8.0
+            weight=15.0,
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -1044,10 +1018,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V17: 보폭 길이 보상 — 발 XY 변위 ≥6cm 유도
         # 스윙 중 발의 전방 이동 거리를 측정, 큰 보폭일수록 보상
         # ============================================================
-        # V33: stride_length 직접 활성화 — 셔플링 방지 핵심 (분석 B2)
         self.rewards.stride_length = RewTerm(
             func=custom_mdp.stride_length_reward,
-            weight=6.0,   # V33: 0→6.0 (보폭 10cm 달성 시 보상)
+            weight=0.0,  # V29: curriculum ramp으로 제어 (iter 400~700), phase weights 참고
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "foot_cfg": toe_body_cfg,
@@ -1062,10 +1035,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V18.3: 스탠스 추진 보상 — 바닥을 밀어서 동체를 앞으로 보내는 메커니즘 보상
         # 스탠스 중 발이 동체 대비 뒤로 밀리면 = 실제로 바닥을 밀고 있음 → 보상
         # ============================================================
-        # V33: stance_propulsion 축소 유지 (joint_deviation과 충돌 가능)
         self.rewards.stance_propulsion = RewTerm(
             func=custom_mdp.stance_propulsion_reward,
-            weight=5.0,   # V33: 8.0→5.0
+            weight=8.0,  # Phase 1 기본값, 커리큘럼에서 Phase별 조정
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "foot_cfg": toe_body_cfg,
@@ -1080,10 +1052,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V18.2: 관절 과속 진동 페널티
         # 고속 미세진동(~20 rad/s)을 직접 억제하여 "벌레 걸음" 데드락 방지
         # ============================================================
-        # V33: joint_oscillation 비활성화 — action_rate_l2 + joint_vel_l2가 대체
         self.rewards.joint_oscillation = RewTerm(
             func=custom_mdp.excessive_joint_oscillation_penalty,
-            weight=0.0,   # V33: -5.0→0
+            weight=-5.0,  # Phase 1 기본값, 커리큘럼에서 Phase별 조정
             params={
                 "asset_cfg": SceneEntityCfg("robot"),
                 "max_vel_per_joint": 5.0,
@@ -1097,13 +1068,13 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.episode_length_s = 10.0
 
         # 속도 명령
-        self.commands.base_velocity.rel_standing_envs = 0.8  # V34: 80% standing (커리큘럼이 0.1까지 축소)
+        self.commands.base_velocity.rel_standing_envs = 0.0
         self.commands.base_velocity.rel_heading_envs = 1.0
         
         # V17: 속도 범위 확대 + 최소속도 도입 (정지 방지)
-        self.commands.base_velocity.ranges.lin_vel_x = (0.01, 0.15)  # V34: 초기 극저속 (커리큘럼이 0.1~0.5까지 확대)
+        self.commands.base_velocity.ranges.lin_vel_x = (0.1, 0.5)  # V17: (0,0.3)→(0.1,0.5)
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
-        self.commands.base_velocity.ranges.ang_vel_z = (-0.15, 0.15)  # V34: 초기 저회전 (커리큘럼이 -0.5~0.5까지 확대)
+        self.commands.base_velocity.ranges.ang_vel_z = (-0.5, 0.5)
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

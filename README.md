@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V34 (rel_standing_envs 기반 3-Phase 커리큘럼: 서기→걷기) 훈련 준비
+**현재 상태**: V35.5 훈련 중 (부팅 안정화 성공, ep_len=250 안정 궤도)
 
 ### 기술 스택
 
@@ -206,41 +206,46 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V34` (rel_standing_envs 기반 3-Phase Stand→Walk 커리큘럼)
+- 학습 버전: `V35.5` (V32.1 복원 + 부팅 안정화 3가지 결합)
 - active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
-- 참고 문서: `plan/V34_PLAN.md` (현재), `plan/HANDOFF.md`, `plan/QUADRUPED_RL_RESEARCH.md`
+- 참고 문서: `plan/V35_PLAN.md` (현재), `plan/HANDOFF.md`, `plan/QUADRUPED_RL_RESEARCH.md`
 
 ---
 
 ## Reward Design
 
-### V34 Stand→Walk 커리큘럼 (현재)
+### V35.5 Boot Stability + V32.1 커리큘럼 (현재)
 
-Isaac Lab 내장 `rel_standing_envs` + command range 커리큘럼으로 **서기→걷기** 3-Phase 전환:
+V32.1의 검증된 보상 구조(122개)를 복원하고, **부팅 안정화 3가지 결합**으로 초기 학습 안정성을 근본 개선:
 
 | 구간 | Iteration 범위 | 내용 |
 |------|----------------|------|
-| Phase 1 (STAND) | 0 ~ 200 | 80% env standing, 극저속 command, 자세 안정화 |
-| Phase 2 (TRANSITION) | 200 ~ 500 | standing 비율/command range/reward weight 선형 ramp |
-| Phase 3 (WALK) | 500+ | 10% standing, 본격 보행, 전체 reward 활성 |
+| Boot Phase | 0 ~ 300 | alive_bonus(+10/step), undesired_contacts -20→-100 램프, 저속 command |
+| Velocity Restore | 0 ~ 500 | lin_vel_x (0.01,0.05) → (0.1,0.5) 선형 복원 |
+| STAND→WALK Ramp | 1500 ~ 3000 | V32.1 soft-ramp 커리큘럼 |
+| WALK→TROT Ramp | 5500 ~ 8000 | 전체 gait 보상 활성 |
 
-**핵심 메커니즘**:
-- `rel_standing_envs=0.8`: standing env에 command=0 자동 할당 (Isaac Lab 내장)
-- `track_lin_vel_xy_exp=1.5` 처음부터 ON → standing env에서 "0 추적 성공" = 서기 보상
-- Command range: (0.01, 0.15) → (0.1, 0.5) 점진 확대
+**부팅 안정화 핵심 메커니즘** (V35 시리즈 연구 결과):
+- `alive_bonus=10.0`: 매 step 생존 보상 → "오래 서있을수록 좋다" gradient 제공
+- `undesired_contacts` 초기 완화: -100→-20 (iter 0~300 램프) → 탐색 실패 관용
+- 초기 저속 command: (0.01, 0.05) → 서기 안정화 우선, 이후 속도 복원
 
-### V34 Reward Architecture
+**배경**: V32.1은 동일 코드로 4회 실행 시 1회만 성공 (25% 재현성). 랜덤 정책의 초기 탐색 운에 의존하는 불안정한 부팅 구조가 근본 원인. V35.5의 3가지 결합으로 안정적 부팅 달성 (iter 400에서 ep_len=234, V32.1 성공 run과 동등).
 
-V33 근본 재설계(122→28개) 기반, ~28개 핵심 보상:
+### V35.5 Reward Architecture
 
-**자세 제어** (처음부터 활성): `shoulder_neutral(-15)`, `joint_deviation(-1)`, `standing_height(+15)`, `base_height_l2(-15)`, `flat_orientation_l2(-5)`
+V32.1 보상 구조(122개) 완전 복원 + alive_bonus 1개 추가:
 
-**Gait 패턴** (4발 공통, 처음부터 활성): `feet_air_time(+20)`, `trot_gait(+40)`, `same_side_penalty(-30)`, `diagonal_coupling(+25)`
+**부팅 안정화**: `alive_bonus(+10.0)` — 매 step 생존 보상
 
-**전진/보행** (Phase 2 커리큘럼): `forward_velocity(0→5)`, `stationary_penalty(0→-3)`, `min_swing_ratio(0→-15)`, `rear_both_ground(0→-60)`
+**자세 제어**: `standing_height(+10)`, `base_height_l2(-15)`, `flat_orientation_l2(-7)`, `shoulder_neutral(-4)`, `stance_width_penalty(-2.5)`
 
-**Rear 부팅 신호** (처음부터 활성): `rear_joint_frozen(-60)`, `rear_joint_velocity(+10)`, `rear_alternation(+15)`
+**Gait 패턴**: `feet_air_time(+30)`, `diagonal_coupling(+25)`, `gait_cycle_period(+15)`, `trot_gait(+15)`
+
+**전진/보행**: `forward_velocity(+8)`, `stance_propulsion(+8)`, `rear_joint_velocity(+12)`, `rear_swing(+8)`
+
+**Multi-layer 커리큘럼**: Layer B floors → Layer C bands → residency → cooperation → gait_gate
 
 ### 리워드 함수 패턴
 
@@ -308,7 +313,10 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V33.1** | **03-19** | **standing_height 강화** | ❌ 실패 (동일 붕괴) |
 | **V33.2** | **03-19** | **rear 절반 복구 (부팅 신호)** | ❌ 실패 (3발 exploit) |
 | **V33.3** | **03-19** | **per-limb penalty (min_swing, limb_usage, validity)** | ❌ 실패 (학습 억제) |
-| **V34** | **03-19~** | **rel_standing_envs 기반 3-Phase Stand→Walk 커리큘럼** | 🔄 훈련 준비 |
+| **V34** | **03-19** | **rel_standing_envs 기반 3-Phase Stand→Walk 커리큘럼** | ❌ 실패 (V33 기반) |
+| **V35~V35.2** | **03-19~03-20** | **V32.1 복원 시도, anti-splay/anti-shuffle 수정** | ❌ 실패 (이모지 crash + 재현성 문제 발견) |
+| **V35.3~V35.4** | **03-20** | **alive_bonus 도입 (2.0→10.0)** | ❌ 부분 효과 (부팅 불완전) |
+| **V35.5** | **03-20~** | **부팅 안정화 3가지 결합 (alive+contacts완화+저속)** | ✅ 부팅 성공 (iter 400 ep_len=234) |
 
 ### 핵심 교훈
 
@@ -323,6 +331,10 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 - **Gait 패턴은 "발견"보다 "지시"가 안정적** → phase clock 또는 CPG 구조적 강제가 효과적
 - **서기도 못 하는데 보행+전진 동시 요구는 불가** → 단계적 학습(서기→걷기) 필요
 - **reward weight=0으로 Phase 분리하면 관측-보상 불일치** → Isaac Lab `rel_standing_envs` 사용이 정석
+- **재현성 먼저 확인**: "성공한 버전"이라도 재현성 검증 필수 (V32.1은 25% 성공률)
+- **alive_bonus는 locomotion RL의 기본**: 매 step 생존 보상이 없으면 초기 탐색 실패 시 local minimum에 갇힘
+- **초기 harsh penalty는 탐색을 억제**: undesired_contacts=-100은 "시도하지 않는 게 최선"이라는 잘못된 학습 유도
+- **Windows cp949 인코딩 주의**: print 문의 이모지(⏸🔄✅)가 UnicodeEncodeError로 훈련 crash 유발
 
 ---
 
