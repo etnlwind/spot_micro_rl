@@ -3207,6 +3207,15 @@ def reward_weight_curriculum(
     boot_vel_x_min: float = 0.1,               # 초기 속도 범위
     boot_vel_x_max: float = 0.5,
     boot_vel_restore_iter: int = 500,           # 속도 복원 iter
+    # V37: anti-splay curriculum ramp
+    splay_ramp_start: int = 0,                   # 0이면 비활성화
+    splay_ramp_end: int = 0,
+    splay_shoulder_initial: float = -4.0,
+    splay_shoulder_final: float = -4.0,
+    splay_stance_initial: float = -2.5,
+    splay_stance_final: float = -2.5,
+    splay_height_initial: float = 0.24,
+    splay_height_final: float = 0.24,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -3405,6 +3414,37 @@ def reward_weight_curriculum(
         # Log boot ramp state periodically
         if iteration % log_interval == 0:
             print(f"[Boot] iter {iteration}: uc_weight={boot_uc_weight:.1f}, vel_x=({cur_vel_min:.3f}, {cur_vel_max:.3f})")
+
+    # ── V37: Anti-splay curriculum ramp ──
+    if splay_ramp_start > 0 and splay_ramp_end > splay_ramp_start:
+        if iteration >= splay_ramp_start:
+            splay_alpha = min(1.0, max(0.0, (iteration - splay_ramp_start) / (splay_ramp_end - splay_ramp_start)))
+            # shoulder_neutral weight ramp
+            cur_shoulder = splay_shoulder_initial + (splay_shoulder_final - splay_shoulder_initial) * splay_alpha
+            try:
+                sn_cfg = env.reward_manager.get_term_cfg("shoulder_neutral")
+                sn_cfg.weight = cur_shoulder
+            except Exception:
+                pass
+            # stance_width_penalty weight ramp
+            cur_stance = splay_stance_initial + (splay_stance_final - splay_stance_initial) * splay_alpha
+            try:
+                sw_cfg = env.reward_manager.get_term_cfg("stance_width_penalty")
+                sw_cfg.weight = cur_stance
+            except Exception:
+                pass
+            # height target ramp
+            cur_height = splay_height_initial + (splay_height_final - splay_height_initial) * splay_alpha
+            try:
+                bh_cfg = env.reward_manager.get_term_cfg("base_height_l2")
+                bh_cfg.params["target_height"] = cur_height
+                sh_cfg = env.reward_manager.get_term_cfg("standing_height")
+                sh_cfg.params["target_height"] = cur_height
+            except Exception:
+                pass
+            # Log
+            if iteration % log_interval == 0:
+                print(f"[Splay] iter {iteration}: shoulder={cur_shoulder:.1f}, stance={cur_stance:.1f}, height={cur_height:.3f} (alpha={splay_alpha:.2f})")
 
     # ── 업데이트 주기 확인 ──
     if iteration - env._crr_last_update < update_interval:

@@ -1,6 +1,7 @@
 # 4족 보행 RL 연구 조사 및 프로젝트 비교 분석
 
 **작성일**: 2026-03-18
+**최종 업데이트**: 2026-03-20 (V37 anti-splay 관련 논문 추가)
 **목적**: 주요 논문/프레임워크의 reward 설계를 조사하여 우리 프로젝트에서 놓친 부분 파악
 
 ---
@@ -151,21 +152,25 @@ rew = -square(target_height - foot_height) * (1 - desired_contact)
 
 ### 보유 vs 미보유 기능
 
-| 기능 | legged_gym | Walk These Ways | AllGaits | 우리 (V31.2) |
-|------|-----------|-----------------|----------|-------------|
+| 기능 | legged_gym | Walk These Ways | AllGaits | 우리 (V37) |
+|------|-----------|-----------------|----------|------------|
 | velocity tracking | ✅ | ✅ | ✅ | ✅ |
-| **feet_air_time** | **✅ (w=1.0)** | — (phase clock 대체) | — (CPG 대체) | **❌ 없음** |
-| **gait phase clock** | — | **✅** | — | **❌ 없음** |
-| **CPG oscillator** | — | — | **✅** | **❌ 없음** |
-| **foot clearance (phase 연동)** | — | **✅** | ✅ (g_c param) | **❌ 없음** |
+| **feet_air_time** | **✅ (w=1.0)** | — (phase clock 대체) | — (CPG 대체) | **✅ (w=20, V32.1+)** |
+| **gait phase clock** | — | **✅** | — | ❌ 없음 |
+| **CPG oscillator** | — | — | **✅** | ❌ 없음 |
+| **foot clearance (phase 연동)** | — | **✅** | ✅ (g_c param) | ❌ 없음 |
 | orientation | ✅ | ✅ | ✅ | ✅ |
 | joint vel/acc penalty | ✅ | ✅ | ✅ (power) | ✅ |
 | action rate | ✅ | ✅ | — | ✅ |
 | base height | ✅ | ✅ | — | ✅ |
 | collision | ✅ | ✅ | — | ✅ |
 | torque penalty | ✅ | ✅ | ✅ | ❌ |
-| **Raibert heuristic** | — | **✅** | — | **❌ 없음** |
-| front/rear 전용 보상 | — | — | — | ✅ (5+개씩) |
+| **Raibert heuristic** | — | **✅** | — | ❌ 없음 |
+| **alive_bonus** | — | — | — | **✅ (V35.5+)** |
+| **anti-splay curriculum** | dof_pos_dev | stance_width cmd | — | **✅ (V37, shoulder -6→-15)** |
+| **anti-shuffle (stride)** | — | — | — | **✅ (V36+, stride_length + swing_stride)** |
+| **boot stability** | — | — | — | **✅ (V35.5+, 3결합)** |
+| front/rear 전용 보상 | — | — | — | ✅ (rear 유지, front 제거) |
 | 보상 항목 수 | **15개** | **~28개** | **4개** | **50개+** |
 
 ### 핵심 차이점
@@ -265,11 +270,111 @@ desired_contact = {
 
 ---
 
+## 6. Anti-Splay 관련 최신 연구 (2024~2025)
+
+V37의 anti-splay 커리큘럼 설계와 직접 관련된 논문들.
+
+### 6a. Barrier-Based Style Rewards (KAIST, ICRA 2025)
+
+**논문**: [arXiv 2409.15780](https://arxiv.org/abs/2409.15780)
+**저자**: Gijeong Kim, Yong-Hoon Lee, Hae-Won Park (KAIST)
+
+**핵심 기법**: 관절 자세 제약에 **완화 로그 배리어 함수(relaxed logarithmic barrier)**를 사용. 관절 상태가 허용 범위 안에 있으면 패널티가 거의 0이고, 경계에 접근하면 대수적으로 급증하는 벽 형성.
+
+```
+barrier(x) = -log(margin - |x - target|)  (|x - target| < margin)
+```
+
+- 단일 하이퍼파라미터(margin 폭)로 제어
+- L2 패널티 + weight 스케줄링보다 수학적으로 깔끔
+
+**V37 적용 가능성**: 현재 shoulder_neutral의 L2 패널티(-6 → -15 커리큘럼) 대신 barrier 함수를 사용하면, 부팅 구간에서도 안전하면서 splay 경계에서만 강한 패널티를 자동 적용. 커리큘럼 타이밍 튜닝이 불필요해짐.
+
+### 6b. CaT: Constraints as Terminations (IROS 2024)
+
+**논문**: [arXiv 2403.18765](https://arxiv.org/abs/2403.18765)
+**코드**: [github.com/Gepetto/constraints-as-terminations](https://github.com/Gepetto/constraints-as-terminations)
+
+**핵심 기법**: 제약 조건(관절 한계, 토크 한계, 몸체 높이 등)을 보상 패널티가 아닌 **확률적 에피소드 종료**로 변환. 위반 시 일정 확률로 에피소드가 종료되어 미래 보상이 차단됨. PPO에 최소한의 수정으로 구현 가능.
+
+- **Solo-12 (2.5kg 소형 4족 로봇)**에서 검증 — SpotMicro와 유사 스케일
+- reward weight 튜닝 불필요 — 종료 확률만 설정
+
+**V37 적용 가능성**: shoulder_dev > 0.4 rad이면 확률적 종료 → weight 커리큘럼 없이 매우 강한 학습 신호. 단, 부팅 구간에서 조기 종료가 과다할 수 있으므로 iter 500 이후 활성화 필요.
+
+### 6c. ROGER: Reward Gain Adaptation (2025)
+
+**논문**: [arXiv 2510.10759](https://arxiv.org/html/2510.10759v1)
+
+**핵심 기법**: 제약 위반 정도에 따라 **보상 gain을 자동으로 조절**. 위반이 크면 패널티 weight를 높이고, 안전 범위 내면 낮춤. 60kg 4족 로봇에서 SOTA 대비 50% 더 높은 주 보상 달성.
+
+**V37 적용 가능성**: shoulder_neutral weight를 -6 → -15로 고정 스케줄링하는 대신, 실제 shoulder_dev 측정값에 따라 자동 조절. 수동 커리큘럼 튜닝을 제거할 수 있는 장기적 개선 방향.
+
+### 6d. Not Only Rewards But Also Constraints (2023)
+
+**논문**: [arXiv 2308.12517](https://arxiv.org/abs/2308.12517)
+
+**핵심 기법**: 안전 관련 항목(충돌, 관절 한계)을 reward에서 제거하고 **명시적 제약 조건(constrained RL)**으로 분리. "무엇을 최적화할 것인가"(속도 추적, gait)와 "무엇을 피할 것인가"(splay, 충돌)를 분리하여 학습 안정화.
+
+### 6e. Solo-12 RL Control (Nature Scientific Reports 2023)
+
+**논문**: [doi.org/10.1038/s41598-023-38259-7](https://www.nature.com/articles/s41598-023-38259-7)
+
+**핵심 기법**: 2.5kg 소형 로봇에서 **관절 임피던스(stiffness + damping)**를 action space로 사용. 경량 로봇은 관성이 낮아 sim-to-real gap이 작으므로 간단한 domain randomization으로 충분.
+
+**SpotMicro 시사점**: 경량 로봇은 sim-to-real 유리하지만, 낮은 관성 때문에 splay에 더 취약 → anti-splay 조치가 필수.
+
+### 6f. Anti-Shuffle 관련: Energy Regularization (ICRA 2025)
+
+**논문**: [arXiv 2403.20001](https://arxiv.org/html/2403.20001)
+
+**핵심 기법**: 에너지 비용(torque * joint velocity)을 정규화 항으로 사용. 셔플링은 속도 대비 에너지 효율이 나쁘므로, 에너지 패널티가 자연스럽게 셔플링을 억제. 명시적 stride 지표 없이도 보폭 증가 유도.
+
+### 6g. SpotMicro / 소형 4족 오픈소스 프로젝트
+
+| 프로젝트 | 특징 | 링크 |
+|---------|------|------|
+| Rex-Gym | SpotMicro 전용 OpenAI Gym, PPO 기반 | [github.com/nicrusso7/rex-gym](https://github.com/nicrusso7/rex-gym) |
+| sim2real-3d-printed-quadruped | Isaac Lab → ROS2 → 실물 파이프라인, 20Hz | [github.com/shaheenbharwani/sim2real-3d-printed-quadruped](https://github.com/shaheenbharwani/sim2real-3d-printed-quadruped) |
+| SpotMiniMini | PyBullet, Bezier gait, domain randomization | [github.com/OpenQuadruped/spot_mini_mini](https://github.com/OpenQuadruped/spot_mini_mini) |
+| ManyQuadrupeds (2024) | 16종 로봇 단일 policy, 2시간 학습 | [arXiv 2310.10486](https://arxiv.org/html/2310.10486v2) |
+| NVIDIA Spot RL Kit (2025) | CMA-ES로 sim-to-real gap 최적화, BD Spot 실물 | [arXiv 2504.17857](https://arxiv.org/html/2504.17857v1) |
+
+---
+
+## 7. V37+ 향후 기술 로드맵 (논문 기반)
+
+| 우선순위 | 기법 | 출처 | 적용 시점 | 효과 |
+|---------|------|------|----------|------|
+| **1** | Barrier-based shoulder penalty | KAIST 2025 | V38 | 커리큘럼 없이 anti-splay |
+| **2** | Constraints as Terminations | IROS 2024 (Solo-12) | V38 | shoulder 제약의 강력한 학습 신호 |
+| 3 | Energy regularization | ICRA 2025 | V38~39 | 자연스러운 anti-shuffle |
+| 4 | Adaptive reward gain (ROGER) | 2025 | V39+ | 자동 weight 조절 |
+| 5 | CPG oscillator layer | AllGaits 2024 | V40+ | gait 구조적 분리 |
+| 6 | Gait phase clock command | Walk These Ways | V40+ | 명시적 trot 지시 |
+
+---
+
 ## 참고 자료
 
+### 기존 프레임워크
 - [legged_gym (ETH RSL)](https://github.com/leggedrobotics/legged_gym)
 - [Walk These Ways (CMU, Margolis 2023)](https://arxiv.org/abs/2212.03238) | [코드](https://github.com/Improbable-AI/walk-these-ways)
-- [AllGaits: Learning All Quadruped Gaits and Transitions (2024)](https://arxiv.org/html/2411.04787v1)
-- [NVIDIA Isaac Lab Spot Training](https://developer.nvidia.com/blog/closing-the-sim-to-real-gap-training-spot-quadruped-locomotion-with-nvidia-isaac-lab/)
+- [AllGaits: Learning All Quadruped Gaits and Transitions (2024)](https://arxiv.org/abs/2411.04787)
+
+### Anti-Splay / Constraint 관련 (V37+ 핵심)
+- [Barrier-Based Style Rewards (KAIST, ICRA 2025)](https://arxiv.org/abs/2409.15780)
+- [CaT: Constraints as Terminations (IROS 2024)](https://arxiv.org/abs/2403.18765) | [코드](https://github.com/Gepetto/constraints-as-terminations)
+- [Not Only Rewards But Also Constraints](https://arxiv.org/abs/2308.12517)
+- [ROGER: Reward Gain Adaptation (2025)](https://arxiv.org/html/2510.10759v1)
+
+### 소형 로봇 / Sim-to-Real
+- [Solo-12 RL Control (Nature 2023)](https://www.nature.com/articles/s41598-023-38259-7)
+- [NVIDIA Isaac Lab Spot Training (2025)](https://arxiv.org/html/2504.17857v1)
+- [ManyQuadrupeds (2024)](https://arxiv.org/html/2310.10486v2)
+- [Adaptive Energy Regularization (ICRA 2025)](https://arxiv.org/html/2403.20001)
+
+### 기타
 - [Deep RL for Quadrupedal Locomotion Review](https://www.oaepublish.com/articles/ir.2022.20)
 - [Footstep Reward for Energy-Efficient Gait](https://www.tandfonline.com/doi/full/10.1080/01691864.2024.2442718)
+- [Time Limits in RL (Pardo et al.)](https://arxiv.org/abs/1712.00378) — timeout bootstrapping 중요

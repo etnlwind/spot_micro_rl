@@ -1,137 +1,103 @@
 # HANDOFF.md
 
-> 마지막 업데이트: 2026-03-18
+> 마지막 업데이트: 2026-03-20
 > 최신 커밋: develop 브랜치
 
 ---
 
 ## 1. 현재 목표
 
-**V32 `feet_air_time` 강화 — 4발 공통 체공시간 보상으로 front lock-in 해결**
+**V37 Anti-Splay 강화 — shoulder_neutral 커리큘럼(-6 → -15)으로 벌레보행 제거**
 
 | 버전 | 결과 | 비고 |
 |------|------|------|
-| V28.2 | ✅ rear 대칭 달성 | iter 1703 rear_usage_diff=0.012 |
-| V28.3 | ❌ front contact 고착 | FL/FR 0.83+ — cap 패널티로 해결 불가 |
-| V29 | ❌ residency 목표 미달 | band_high 설정 오류 |
-| V30 | 🟡 부분 성공 | 학습 품질 향상, FL/FR lock-in 불변 |
-| V31 | ❌ 대각 2발 고착 | front_alternation이 역할 분리 유발 |
-| V31.1 | ❌ 대각 2발 고착 | front_both_ground + min_swing_ratio도 역할 분리 유발 |
-| V31.2 | ❌ front lock-in 재발 | joint-level 보상은 작동하나 ground-based 진동으로 보상 획득 |
-| **V32** | 🔄 **훈련 준비** | feet_air_time 강화 + front 전용 보상 전폐 + rear bias 축소 |
+| V32.1 | 🟡 부분 성공 | front lock-in 해소, 하지만 거미형 벌어짐 + 셔플링 |
+| V33~V34 | ❌ 실패 | 근본 재설계/커리큘럼 시도, 부팅 불가 |
+| V35~V35.4 | ❌ 실패 | 재현성 문제 발견, alive_bonus 도입 과정 |
+| V35.5 | ✅ 부팅 성공 | alive_bonus(10) + contacts 램프 + 저속 command 3결합 |
+| V36 | 🟡 부분 성공 | anti-shuffle 성공(stride +34%), **anti-splay 실패**(shoulder_dev 0.54 고착) |
+| **V37** | 🔄 **훈련 중** | anti-splay 커리큘럼: shoulder -6→-15, stance -3→-8 (iter 500~1000) |
 
 ---
 
-## 2. V31.2 실패 분석
+## 2. V37 설계
 
-### 버그 수정 효과
-- curriculum ramp에서 `front_joint_velocity_max`, `front_joint_frozen_max` 누락 → 수정 후 정상 작동
-- front_joint_velocity: 0 → **14.5** (iter 500)
+### 핵심 가설
+V36에서 anti-splay penalty가 전체 reward의 0.6%에 불과하여 무시됨. **5~10%까지 올려야 행동 변경 유도 가능**.
 
-### 실패 원인
-- front_joint_velocity=14.5이지만 **FL contact 0.81, FR 0.77** — 앞발이 땅에 붙은 채 관절만 진동
-- 진정한 swing(체공)이 아닌 **ground-based 진동**으로 보상 획득
-- F-R gap: 0.316 (iter 500) — V30(0.365)과 비슷한 수준
-- RL(0.31) vs RR(0.63) rear 비대칭도 발생
+### Anti-Splay 커리큘럼 (splay_ramp, iter 500~1000)
+| 파라미터 | iter 0~500 | iter 500~1000 | iter 1000+ |
+|---------|-----------|--------------|-----------|
+| shoulder_neutral | -6.0 | -6.0 → -15.0 | -15.0 |
+| stance_width_penalty | -3.0 | -3.0 → -8.0 | -8.0 |
+| height target | 0.23 | 0.23 → 0.22 | 0.22 |
 
-### V31.2 iter 500 실측
+### Anti-Shuffle (V36 유지)
+stride_length ramp 200~500, feet_air_time threshold 0.25, swing_stride 4.0
 
-| 다리 | contact | swing | propulsion |
-|------|---------|-------|------------|
-| FL | **0.808** | 0.170 | 0.649 |
-| FR | **0.769** | 0.208 | 0.630 |
-| RL | 0.312 | 0.665 | 0.283 |
-| RR | 0.639 | 0.338 | 0.518 |
+### 부팅 안정화 (V35.5 유지)
+alive_bonus=10.0, boot_ramp_end=300, contacts -20→-100, 저속 command
 
-### V31.2 reward 분석 (iter 500 TOP 10)
-
-| reward | 값 | 비고 |
-|--------|-----|------|
-| rear_joint_velocity | +19.3 | rear에만 적용 → rear bias |
-| rear_alternation | +17.2 | rear에만 적용 → rear bias |
-| front_joint_velocity | +14.5 | ground-based 진동으로 획득 |
-| per_leg_contact_target_band | +14.0 | |
-| leg_lift | +11.5 | |
-| joint_vel_l2 | -11.1 | |
-| foot_extension | -11.0 | |
-| **feet_air_time** | **-0.46** | weight=8, threshold=0.1 → 거의 무시됨 |
-
----
-
-## 3. V32 설계 — feet_air_time 핵심 전환
-
-### 연구 근거 (`plan/QUADRUPED_RL_RESEARCH.md`)
-
-| 프레임워크 | 4발 swing 유도 방식 |
-|-----------|-------------------|
-| legged_gym (ETH RSL) | **feet_air_time** (w=1.0, threshold=0.5) |
-| Walk These Ways (CMU) | gait phase clock + desired_contact_states |
-| AllGaits (CPG) | CPG 커플링 매트릭스 |
-| **우리 (V31.2)** | **front_*/rear_* 개별 보상 → 역할 분리 유발** |
-
-**교훈 #9**: 다리별 전용 보상은 "어떤 다리를 희생할지" 최적화 유발 → 4발 공통 보상이 안전
-
-### V32 변경 사항
-
-| 항목 | V31.2 | V32 | 이유 |
-|------|-------|-----|------|
-| **feet_air_time weight** | 8.0 | **30.0** | 핵심 swing 유도 (50+ 보상 환경에서 경쟁 가능) |
-| **feet_air_time threshold** | 0.1초 | **0.3초** | legged_gym(0.5)의 60%, SpotMicro 크기 감안 |
-| front_joint_velocity | +15 ramp | **0 (비활성)** | ground-based 진동으로 보상 획득 — 실패 |
-| front_joint_frozen | -40 ramp | **0 (비활성)** | 위와 동일 |
-| front_swing_bonus | +12 ramp | **0 (비활성)** | feet_air_time이 대체 |
-| rear_swing | 15.0 | **8.0** | rear bias 축소 |
-| rear_alternation | 30.0 | **15.0** | rear bias 축소 |
-| rear_joint_velocity | 20.0 | **12.0** | rear bias 축소 |
-
-### 기대 효과
-- feet_air_time(30.0, threshold=0.3)이 **모든 발에 0.3초 이상 체공** 유도
-- rear 전용 보상 축소 → front-rear 비대칭 완화
-- 앞발이 땅에 붙어있으면 feet_air_time이 음수 → 들어야 보상
+### 체크포인트 기준
+| iter | 확인 | 판정 |
+|------|------|------|
+| 100 | ep_len > 30 | 부팅 확인 |
+| 400 | ep_len > 200 | 부팅 완료 |
+| 500 | shoulder_dev < 0.5 | splay_ramp 시작 전 기준값 |
+| 700 | shoulder_dev < 0.4 | splay_ramp 중간 효과 |
+| 1000 | shoulder_dev < 0.3, stride > 6.0 | splay_ramp 완료 + shuffle 유지 |
 
 ### 리스크
-- threshold 0.3초가 SpotMicro에 너무 클 수 있음 (ANYmal보다 작은 로봇)
-- rear 보상 축소가 과하면 rear도 무너질 수 있음
-- 50+ 보상 중 feet_air_time이 여전히 경쟁에서 밀릴 수 있음
+1. shoulder=-15.0이 보행을 억제 → ep_len 하락 시 final 완화
+2. height 0.22가 기구학적 한계 근접 (init pos 0.192m)
+3. anti-splay와 anti-shuffle 상호작용 (다리 모으면 stride 감소 가능)
 
 ---
 
-## 4. IsaacOps 인프라
+## 3. V36 결과 분석
 
-| 항목 | 변경 |
-|------|------|
-| **isaac_ops/ 패키지** | common.py, listener.py, cli_send.py, cli.cmd, listen.cmd — 독립 실행 가능 |
-| **heartbeat 간소화** | TAP/collapse/iter판정/curriculum/posture_raw/AI분석 섹션 제거 |
-| **판정 로직 지연** | 워밍업 300→500, enforce 600→1200 (false alarm 방지) |
-| **CLI 도구** | `cli.cmd status/hb/stop/start/resume` — 터미널에서 직접 실행 |
+| 지표 | V35.5 (기준) | V36 | 변화 | 판정 |
+|------|-------------|-----|------|------|
+| ep_len | 250 | 250 | 동일 | ✅ 부팅 완벽 |
+| shoulder_dev | 0.544 rad | 0.543 | 0% | ❌ anti-splay 무효 |
+| stride_length | 4.533 | 6.084 | +34% | ✅ anti-shuffle 성공 |
+| swing_stride | 0.522 | 1.192 | +128% | ✅ 대폭 개선 |
+| feet_air_time | -9.541 | -7.070 | +26% | ✅ 체공 개선 |
 
----
+### Shoulder Dev 추이 (V36)
+iter 100: 0.091 → iter 300: 0.184 → iter 500: 0.529 → iter 800: 0.543 (고착)
 
-## 5. 현재 브랜치 상태
-
-```
-브랜치: develop
-상태: V32 env_cfg 변경 완료, 훈련 준비
-훈련: V31.2 종료 (iter 518, front lock-in으로 실패 판정)
-```
+**패턴**: 보행 학습 시 안정성을 위해 다리를 벌리는 것이 보상적으로 유리. penalty(-6.0)가 보행 보상 합(+180) 대비 너무 약해서 무시됨.
 
 ---
 
-## 6. 주의사항
-
-### 운영
-- **listener는 `isaac_ops/listen.cmd`로 실행** (구 supervisor.cmd 대체)
-- **CLI: `isaac_ops/cli.cmd <command>`** (status, hb, stop, start, resume)
-- **rewards.py / env_cfg.py 수정 시 listener 재시작 불필요** (훈련 프로세스만 재시작)
-- **WSL2에서 git push**: `cmd.exe /c "cd /d D:\project\spot_micro_rl && git push origin develop"`
+## 4. 프로젝트 현재 상태
 
 ### 코드
-- **TRAIN_VERSION 단일 소스**: env_cfg.py line 7
-- **버전별 상수는 TRAINING_CONFIG에서 읽기** (rewards.py에 하드코딩 금지)
+```
+브랜치: develop
+상태: V37 env_cfg/rewards.py 변경 완료 (uncommitted)
+훈련: V37 진행 중 (iter ~100, 2026-03-20 15:28 시작)
+```
+
+### 주요 파일
+| 파일 | 내용 |
+|------|------|
+| `source/.../spot_micro_rl_env_cfg.py` | V37 환경 설정 (splay_ramp 커리큘럼 추가) |
+| `source/.../mdp/rewards.py` | V37 보상 함수 (splay_ramp 로직 추가) |
+| `plan/V37_PLAN.md` | V37 설계 문서 |
+| `plan/V36_PLAN.md` | V36 설계 + 결과 |
+| `plan/V35_PLAN.md` | V35 시리즈 전체 경과 |
+| `plan/QUADRUPED_RL_RESEARCH.md` | 연구 조사 (최신 논문 포함) |
+
+### IsaacOps
+- `isaac_ops/listen.cmd` → 통합 listener (Telegram 명령 + heartbeat + 영상)
+- `isaac_ops/cli.cmd` → CLI 도구 (status, hb, stop, start, resume)
+- listener가 V37 run을 자동 인식하여 heartbeat 전송 중
 
 ---
 
-## 7. 프로젝트 11대 교훈 (V1~V32)
+## 5. 프로젝트 19대 교훈 (V1~V37)
 
 1. **output=0 reward는 weight를 올려도 0** — band 밖이면 gradient 소멸
 2. **패널티만으로는 고착된 local optimum 탈출 불가** — 인센티브 구조 변경 필요
@@ -141,36 +107,55 @@
 6. **특정 행동의 부재는 패널티로 해결 불가** — 해당 행동에 대한 명시적 보상이 필요
 7. **step-level alternation은 역할 분리를 보상** — temporal alternation과 다름
 8. **contact-level 패널티는 대각 역할 분리를 유발** — joint-level 접근이 필요
-9. **다리별 전용 보상(front_*, rear_*)은 역할 분리 유발** — 4발 공통 보상이 안전 ★ V31.2
-10. **보상 50개+는 항목 간 상호작용 예측 불가** — 성공한 프레임워크는 15~20개 ★ 연구조사
-11. **Gait 패턴은 "발견"보다 "지시"가 안정적** — phase clock/CPG 구조적 강제 ★ 연구조사
+9. **다리별 전용 보상(front_*, rear_*)은 역할 분리 유발** — 4발 공통 보상이 안전
+10. **보상 50개+는 항목 간 상호작용 예측 불가** — 성공한 프레임워크는 15~20개
+11. **Gait 패턴은 "발견"보다 "지시"가 안정적** — phase clock/CPG 구조적 강제
+12. **한 번에 하나만 변경** — 단, 구조 자체가 틀리면 대폭 재설계 필요
+13. **높이 목표와 서있기 보상은 충분해야 함** — 양의 보상 부족 시 정지/넘어짐 학습
+14. **4발 공통 보상은 초기 부팅 신호를 제공하지 못함** — rear 전용 보상이 부팅의 핵심
+15. **서기도 못 하면서 보행+전진 동시 요구 불가** — 단계적 학습 필요
+16. **reward weight=0 Phase 분리 → 관측-보상 불일치** — rel_standing_envs 사용
+17. **재현성 먼저 확인** — "성공" 버전이라도 최소 2회 실행 검증 (V32.1 = 25% 성공률)
+18. **alive_bonus는 locomotion RL의 기본** — 초기 탐색 실패 시 local min 탈출 불가
+19. **penalty가 전체 reward의 1% 미만이면 무시됨** — 5~10%는 되어야 행동 변경 유도
 
 ---
 
-## 8. 실측 참고값
+## 6. 향후 로드맵
 
-| 지표 | V30 @724 | V31.1 @1001 | V31.2 @500 | V32 목표 |
-|------|----------|-------------|------------|---------|
-| mean reward | 257 | 65 | 416 | > 300 |
-| FL contact | 0.826 | 0.874 | **0.808** | < 0.65 |
-| FR contact | 0.841 | 0.593 | **0.769** | < 0.65 |
-| RL contact | 0.420 | 0.027 | 0.312 | > 0.30 |
-| RR contact | 0.510 | 0.758 | 0.639 | > 0.30 |
-| F-R gap | 0.365 | 0.341 | **0.316** | < 0.15 |
-| feet_air_time | — | — | **-0.46** | > 0 (양수) |
-| 패턴 | FL+FR 고접지 | FL+RR 대각 | FL+FR 고접지 | 4발 균형 |
+### 단기 (V37~V38)
+| 단계 | 핵심 변경 | 목표 |
+|------|----------|------|
+| **V37** (진행 중) | shoulder 커리큘럼 -6→-15 | shoulder_dev < 0.3 |
+| V38 | Barrier-based penalty 또는 CaT | 커리큘럼 없이 anti-splay |
+
+### 중기 (V39~V40)
+| 단계 | 핵심 변경 | 목표 |
+|------|----------|------|
+| V39 | Energy regularization + 보상 정리 (50→25개) | 자연스러운 보행 |
+| V40 | Gait phase clock 또는 CPG layer | 명시적 trot 강제 |
+
+### 장기
+- Sim-to-real (Solo-12 논문 참고, 경량 로봇은 domain randomization 적음)
+- 보상 15~20개로 최종 정리
+
+### 참고 논문 (V38+ 핵심)
+- Barrier-Based Style Rewards (KAIST, ICRA 2025) — [arXiv 2409.15780](https://arxiv.org/abs/2409.15780)
+- CaT: Constraints as Terminations (IROS 2024) — [arXiv 2403.18765](https://arxiv.org/abs/2403.18765)
+- ROGER: Adaptive Reward Gain (2025) — [arXiv 2510.10759](https://arxiv.org/html/2510.10759v1)
+- 전체 목록: `plan/QUADRUPED_RL_RESEARCH.md`
 
 ---
 
-## 9. 향후 로드맵
+## 7. 주의사항
 
-| 단계 | 버전 | 핵심 변경 | 목표 |
-|------|------|----------|------|
-| **현재** | **V32** | feet_air_time 강화 + rear bias 축소 | F-R gap < 0.15 |
-| 다음 | V33 | contact schedule (trot phase clock) 도입 | 명시적 trot 강제 |
-| 장기 | V34+ | 보상 항목 대폭 정리 (50개 → 20개) | 안정적 학습 구조 |
+### 운영
+- **listener는 `isaac_ops/listen.cmd`로 실행** (구 supervisor.cmd 대체)
+- **CLI: `isaac_ops/cli.cmd <command>`** (status, hb, stop, start, resume)
+- **rewards.py / env_cfg.py 수정 시 listener 재시작 불필요** (훈련 프로세스만 재시작)
+- **WSL2에서 git push**: `cmd.exe /c "cd /d D:\project\spot_micro_rl && git push origin develop"`
+- **Windows cp949 이모지 crash**: print에 이모지 금지, ASCII 텍스트 사용
 
-### 참고 문서
-- `plan/QUADRUPED_RL_RESEARCH.md` — 4족 보행 RL 연구 조사 (legged_gym, Walk These Ways, AllGaits)
-- `plan/V31_PLAN.md` — V31 설계 + V31/V31.1/V31.2 분석
-- `plan/V30_ANALYSIS.md` — V30 분석
+### 코드
+- **TRAIN_VERSION 단일 소스**: env_cfg.py line 7
+- **버전별 상수는 TRAINING_CONFIG에서 읽기** (rewards.py에 하드코딩 금지)

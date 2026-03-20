@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V35.5"
+TRAIN_VERSION = "V37"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -238,9 +238,9 @@ class SpotMicroRewardCurriculumCfg:
             "rear_contact_diff_ramp_end": 600,
             "rear_contact_diff_max": -15.0,       # threshold 0.10, max -15.0
             # V29: stride length reward ramp (iter 400~700)
-            "stride_length_ramp_start": 400,
-            "stride_length_ramp_end": 700,
-            "stride_length_max": 12.0,            # 보폭 10cm 달성 시 최대 보상
+            "stride_length_ramp_start": 200,      # V36: 400→200 (anti-shuffle 조기 활성화)
+            "stride_length_ramp_end": 500,        # V36: 700→500
+            "stride_length_max": 15.0,            # V36: 12→15 (보폭 보상 강화)
             # V29: swing quality gated velocity reward ramp (iter 600~900)
             "swing_gate_ramp_start": 600,
             "swing_gate_ramp_end": 900,
@@ -261,6 +261,15 @@ class SpotMicroRewardCurriculumCfg:
             "boot_vel_x_min": 0.01,                # 초기 속도 범위 (0.01, 0.05)
             "boot_vel_x_max": 0.05,
             "boot_vel_restore_iter": 500,          # iter 500에서 원래 속도 (0.1, 0.5) 복원
+            # V37: anti-splay curriculum ramp — 보행 학습 후 splay 교정
+            "splay_ramp_start": 500,               # iter 500부터 강화 시작
+            "splay_ramp_end": 1000,                # iter 1000에서 최종값 도달
+            "splay_shoulder_initial": -6.0,        # 부팅 구간 유지
+            "splay_shoulder_final": -15.0,         # 최종 강화
+            "splay_stance_initial": -3.0,
+            "splay_stance_final": -8.0,
+            "splay_height_initial": 0.23,
+            "splay_height_final": 0.22,
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -373,7 +382,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # legged_gym 표준: threshold=0.5, weight=1.0 (15개 보상 기준)
         # 우리: 50+ 보상이므로 weight를 높여야 경쟁 가능
         self.rewards.feet_air_time.weight = 30.0   # V17: 8.0 → V32: 30.0
-        self.rewards.feet_air_time.params["threshold"] = 0.3  # V17.1: 0.1 → V32: 0.3 (0.3초 이상 체공 유도)
+        self.rewards.feet_air_time.params["threshold"] = 0.25  # V36: 0.3→0.25 (anti-shuffle, 체공 달성 용이)
 
         # V17: 관절 속도 억제 대폭 강화 (빠른 진동 차단)
         self.rewards.joint_vel_l2 = RewTerm(
@@ -389,14 +398,14 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.base_height_l2 = RewTerm(
             func=isaaclab_mdp.base_height_l2,
             weight=-15.0,
-            params={"target_height": 0.24, "asset_cfg": SceneEntityCfg("robot")}
+            params={"target_height": 0.23, "asset_cfg": SceneEntityCfg("robot")}  # V36: 0.24→0.23 (anti-splay)
         )
 
         # 높이 + 수평 결합 보상
         self.rewards.standing_height = RewTerm(
             func=custom_mdp.standing_height_exp,
             weight=10.0,  # V16: 12→10 (총 스케일 조정)
-            params={"target_height": 0.24, "sigma": 0.03,
+            params={"target_height": 0.23, "sigma": 0.03,  # V36: 0.24→0.23 (anti-splay)
                     "asset_cfg": SceneEntityCfg("robot")}
         )
 
@@ -465,7 +474,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # 어깨 roll축(X): 음수=바깥 벌림, phase-1은 과도한 splay를 줄인 posture-first 설정 사용
         self.rewards.shoulder_neutral = RewTerm(
             func=custom_mdp.shoulder_neutral_penalty,
-            weight=-4.0,
+            weight=-6.0,  # V36: -4.0→-6.0 (anti-splay)
             params={
                 "shoulder_cfg": SceneEntityCfg("robot", joint_names=["front_left_shoulder", "front_right_shoulder", "rear_left_shoulder", "rear_right_shoulder"]),
                 "target_angles": [-0.04, -0.04, -0.04, -0.04],
@@ -475,7 +484,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V23: body-frame 기준 너무 넓은 stance 억제
         self.rewards.stance_width_penalty = RewTerm(
             func=custom_mdp.stance_width_penalty,
-            weight=-2.5,
+            weight=-3.0,  # V36: -2.5→-3.0 (anti-splay)
             params={
                 "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -551,7 +560,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # 스윙 보폭 보상
         self.rewards.swing_stride = RewTerm(
             func=custom_mdp.swing_stride_reward,
-            weight=2.0,
+            weight=4.0,  # V36: 2.0→4.0 (anti-shuffle, 스윙 보폭 강화)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "foot_cfg": toe_body_cfg,
