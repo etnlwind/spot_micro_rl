@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V38.2"
+TRAIN_VERSION = "V38.3"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -270,12 +270,12 @@ class SpotMicroRewardCurriculumCfg:
             "splay_stance_final": -3.0,
             "splay_height_initial": 0.23,
             "splay_height_final": 0.23,
-            # V38.2: Soft CaT (threshold/margin 고정, probability만 ramp)
+            # V38.3: Soft CaT (prob 3.75x — V38.2 too conservative)
             "cat_ramp_start": 800,
             "cat_ramp_end": 3000,
             "cat_threshold": 0.3,
             "cat_margin": 0.3,
-            "cat_probability_final": 0.0004,
+            "cat_probability_final": 0.0015,
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
