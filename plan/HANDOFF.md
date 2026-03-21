@@ -7,37 +7,41 @@
 
 ## 1. 현재 목표
 
-**Anti-Splay 해결 — L2 penalty 커리큘럼 한계 확인, Barrier/CaT 전환 준비**
+**Anti-Splay 해결 — V38.1: CaT (Constraints as Terminations) 파라미터 완화 재시도**
 
 | 버전 | 결과 | 비고 |
 |------|------|------|
-| V32.1 | 🟡 부분 성공 | front lock-in 해소, 하지만 거미형 벌어짐 + 셔플링 |
-| V33~V34 | ❌ 실패 | 근본 재설계/커리큘럼 시도, 부팅 불가 |
-| V35~V35.5 | ✅ 부팅 성공 | alive_bonus(10) + contacts 램프 + 저속 command 3결합, 100% 재현 |
-| V36 | 🟡 부분 성공 | anti-shuffle 성공(stride +34%), **anti-splay 실패**(shoulder_dev 0.54 고착) |
-| V37 | ❌ 실패 | 3변수 동시 변경(shoulder -15, stance -8, height 0.22) → iter 600 보행 붕괴 |
-| **V37.2** | 🟡 **한계 확인** | shoulder만 -6→-10 단일 변경, 보행 유지하나 splay 개선 없음 (0.532 vs 0.543) |
+| V32.1 | 부분 성공 | front lock-in 해소, 하지만 거미형 벌어짐 + 셔플링 |
+| V33~V34 | 실패 | 근본 재설계/커리큘럼 시도, 부팅 불가 |
+| V35~V35.5 | 부팅 성공 | alive_bonus(10) + contacts ramp + 저속 command 3결합, 100% 재현 |
+| V36 | 부분 성공 | anti-shuffle 성공(stride +34%), anti-splay 실패(shoulder_dev 0.54 고착) |
+| V37~V37.2 | 한계 확인 | L2 penalty -10까지 올려도 splay 행동 변화 없음 |
+| V38 | 실패 | CaT threshold 0.6이 너무 타이트, iter 600 즉시 붕괴 |
+| **V38.1** | **훈련 중** | CaT 완화: threshold 0.8->0.45, prob 0.03->0.15, ramp 800~2500 |
 
 ---
 
-## 2. V37 → V37.2 경과
+## 2. V38 -> V38.1 경과
 
-### V37 (실패)
-- **설계**: shoulder -6→-15, stance -3→-8, height 0.23→0.22 동시 커리큘럼 (iter 500~1000)
-- **결과**: iter 600에서 보행 붕괴 (reward 181→-92, ep_len 250→6)
-- **원인**: 교훈 #12 위반 — 3변수 동시 변경이 학습 안정성 파괴
-- **교훈**: splay_ramp 시작 직후 100 iter 이내 급격한 reward 하락은 커리큘럼 과도 신호
+### V38 (실패 — 2026-03-21)
+- **설계**: CaT 도입, shoulder splay > threshold -> 확률적 에피소드 종료
+- **파라미터**: threshold 0.6->0.4, probability 0.1->0.3, ramp iter 500~1500
+- **결과**: iter 400에서 부팅 성공 (ep_len 247, reward 170), iter 500 CaT 활성화 직후 iter 600에서 즉시 붕괴 (ep_len 11, CaT 종료율 99.3%)
+- **원인**: threshold 0.6이 실측 dev 0.54에 너무 가까움 (margin 0.06). probability 0.1도 과도
+- **교훈**: CaT threshold는 실측 dev의 1.5배 이상, probability는 0.03~0.05에서 시작
 
-### V37.2 (L2 한계 확인)
-- **설계**: shoulder만 -6→-10 단일 변경, 느린 ramp (iter 500~1500), stance/height 고정
-- **결과**: 보행 완벽 유지 (ep_len 247-250), reward 회복 중, **BUT shoulder_dev 0.532 (V36: 0.543)**
-- **결론**: L2 penalty를 -10까지 올려도 splay 행동 변화 없음. 보행 보상(+180) 대비 penalty 비율이 구조적으로 부족
+### V38.1 (훈련 중 — 2026-03-21)
+- **설계**: V38 동일 구조, 파라미터만 대폭 완화
+- **파라미터 변경**: threshold 0.8->0.45, probability 0.03->0.15, ramp iter 800~2500
+- **Run**: `2026-03-21_09-08-16`
+- **초기 상태 (iter 500)**: 부팅 성공 (ep_len 242, reward 180, CaT 아직 OFF)
 
 ### 핵심 발견
-**L2 penalty 커리큘럼 방식의 근본 한계 확인**:
-- 약하게 주면(-6~-10) 무시됨 (전체 reward의 1% 미만)
-- 강하게 주면(-15) 보행 자체가 붕괴
-- → Barrier 함수 또는 CaT(Constraints as Terminations) 같은 구조적 접근 필요
+**L2 penalty -> CaT 전환의 핵심 포인트**:
+- L2 penalty는 reward 채널 — agent가 다른 보상으로 상쇄 가능 (V37.2에서 확인)
+- CaT는 discount factor 채널 — terminated=True면 미래 보상=0, 상쇄 불가
+- 단, CaT는 "너무 타이트하면 보행 자체를 포기"하는 새로운 failure mode 존재
+- threshold/probability의 보수적 설정이 필수
 
 ---
 
@@ -45,16 +49,11 @@
 
 | 지표 | V35.5 (기준) | V36 | 변화 | 판정 |
 |------|-------------|-----|------|------|
-| ep_len | 250 | 250 | 동일 | ✅ 부팅 완벽 |
-| shoulder_dev | 0.544 rad | 0.543 | 0% | ❌ anti-splay 무효 |
-| stride_length | 4.533 | 6.084 | +34% | ✅ anti-shuffle 성공 |
-| swing_stride | 0.522 | 1.192 | +128% | ✅ 대폭 개선 |
-| feet_air_time | -9.541 | -7.070 | +26% | ✅ 체공 개선 |
-
-### Shoulder Dev 추이 (V36)
-iter 100: 0.091 → iter 300: 0.184 → iter 500: 0.529 → iter 800: 0.543 (고착)
-
-**패턴**: 보행 학습 시 안정성을 위해 다리를 벌리는 것이 보상적으로 유리. penalty(-6.0)가 보행 보상 합(+180) 대비 너무 약해서 무시됨.
+| ep_len | 250 | 250 | 동일 | 부팅 완벽 |
+| shoulder_dev | 0.544 rad | 0.543 | 0% | anti-splay 무효 |
+| stride_length | 4.533 | 6.084 | +34% | anti-shuffle 성공 |
+| swing_stride | 0.522 | 1.192 | +128% | 대폭 개선 |
+| feet_air_time | -9.541 | -7.070 | +26% | 체공 개선 |
 
 ---
 
@@ -63,28 +62,26 @@ iter 100: 0.091 → iter 300: 0.184 → iter 500: 0.529 → iter 800: 0.543 (고
 ### 코드
 ```
 브랜치: develop
-상태: V37.2 env_cfg/rewards.py 변경 완료
-훈련: V37.2 완료 — L2 penalty 한계 확인, 다음 단계(V38 Barrier/CaT) 준비
+상태: V38.1 env_cfg/rewards.py 변경 완료
+훈련: V38.1 진행 중 (run 2026-03-21_09-08-16)
 ```
 
 ### 주요 파일
 | 파일 | 내용 |
 |------|------|
-| `source/.../spot_micro_rl_env_cfg.py` | V37.2 환경 설정 (splay_ramp 커리큘럼) |
-| `source/.../mdp/rewards.py` | V37.2 보상 함수 (splay_ramp 로직) |
-| `plan/V37_PLAN.md` | V37~V37.2 설계 + 결과 문서 |
-| `plan/V36_PLAN.md` | V36 설계 + 결과 |
-| `plan/V35_PLAN.md` | V35 시리즈 전체 경과 |
-| `plan/QUADRUPED_RL_RESEARCH.md` | 연구 조사 (최신 논문 포함) |
+| `source/.../spot_micro_rl_env_cfg.py` | V38.1 환경 설정 (CaT DoneTerm + 커리큘럼) |
+| `source/.../mdp/rewards.py` | V38.1 보상 함수 (shoulder_splay_termination + CaT ramp) |
+| `plan/V38_PLAN.md` | V38~V38.1 설계 + V38 결과 + V38.1 파라미터 |
+| `plan/V37_PLAN.md` | V37~V37.2 설계 + 결과 |
+| `plan/QUADRUPED_RL_RESEARCH.md` | 연구 조사 (CaT 논문 포함) |
 
 ### IsaacOps
-- `isaac_ops/listen.cmd` → 통합 listener (Telegram 명령 + heartbeat + 영상)
-- `isaac_ops/cli.cmd` → CLI 도구 (status, hb, stop, start, resume)
-- listener가 V37 run을 자동 인식하여 heartbeat 전송 중
+- `isaac_ops/listen.cmd` -> 통합 listener (Telegram 명령 + heartbeat + 영상)
+- `isaac_ops/cli.cmd` -> CLI 도구 (status, hb, stop, start, resume)
 
 ---
 
-## 5. 프로젝트 19대 교훈 (V1~V37)
+## 5. 프로젝트 21대 교훈 (V1~V38)
 
 1. **output=0 reward는 weight를 올려도 0** — band 밖이면 gradient 소멸
 2. **패널티만으로는 고착된 local optimum 탈출 불가** — 인센티브 구조 변경 필요
@@ -101,24 +98,27 @@ iter 100: 0.091 → iter 300: 0.184 → iter 500: 0.529 → iter 800: 0.543 (고
 13. **높이 목표와 서있기 보상은 충분해야 함** — 양의 보상 부족 시 정지/넘어짐 학습
 14. **4발 공통 보상은 초기 부팅 신호를 제공하지 못함** — rear 전용 보상이 부팅의 핵심
 15. **서기도 못 하면서 보행+전진 동시 요구 불가** — 단계적 학습 필요
-16. **reward weight=0 Phase 분리 → 관측-보상 불일치** — rel_standing_envs 사용
+16. **reward weight=0 Phase 분리 -> 관측-보상 불일치** — rel_standing_envs 사용
 17. **재현성 먼저 확인** — "성공" 버전이라도 최소 2회 실행 검증 (V32.1 = 25% 성공률)
 18. **alive_bonus는 locomotion RL의 기본** — 초기 탐색 실패 시 local min 탈출 불가
 19. **penalty가 전체 reward의 1% 미만이면 무시됨** — 5~10%는 되어야 행동 변경 유도
+20. **CaT threshold는 실측 dev의 1.5배 이상으로 시작** — V38에서 1.1배로 즉시 붕괴
+21. **CaT probability는 0.03~0.05에서 시작** — 0.1도 과도, 점진 강화 필수
 
 ---
 
 ## 6. 향후 로드맵
 
-### 단기 (V38)
+### 단기 (V38.1~V39)
 | 단계 | 핵심 변경 | 목표 |
 |------|----------|------|
-| **V38** (다음) | Barrier-based penalty 또는 CaT | L2 대체, shoulder_dev < 0.3 |
+| **V38.1** (현재) | CaT 파라미터 완화 (threshold 0.8->0.45, prob 0.03->0.15) | shoulder_dev < 0.35 |
+| V38.2 (필요 시) | CaT 추가 조정 | V38.1 결과에 따라 |
 
 ### 중기 (V39~V40)
 | 단계 | 핵심 변경 | 목표 |
 |------|----------|------|
-| V39 | Energy regularization + 보상 정리 (50→25개) | 자연스러운 보행 |
+| V39 | Energy regularization + 보상 정리 (50->25개) | 자연스러운 보행 |
 | V40 | Gait phase clock 또는 CPG layer | 명시적 trot 강제 |
 
 ### 장기
@@ -126,8 +126,8 @@ iter 100: 0.091 → iter 300: 0.184 → iter 500: 0.529 → iter 800: 0.543 (고
 - 보상 15~20개로 최종 정리
 
 ### 참고 논문 (V38+ 핵심)
-- Barrier-Based Style Rewards (KAIST, ICRA 2025) — [arXiv 2409.15780](https://arxiv.org/abs/2409.15780)
 - CaT: Constraints as Terminations (IROS 2024) — [arXiv 2403.18765](https://arxiv.org/abs/2403.18765)
+- Barrier-Based Style Rewards (KAIST, ICRA 2025) — [arXiv 2409.15780](https://arxiv.org/abs/2409.15780)
 - ROGER: Adaptive Reward Gain (2025) — [arXiv 2510.10759](https://arxiv.org/html/2510.10759v1)
 - 전체 목록: `plan/QUADRUPED_RL_RESEARCH.md`
 
@@ -136,7 +136,7 @@ iter 100: 0.091 → iter 300: 0.184 → iter 500: 0.529 → iter 800: 0.543 (고
 ## 7. 주의사항
 
 ### 운영
-- **listener는 `isaac_ops/listen.cmd`로 실행** (구 supervisor.cmd 대체)
+- **listener는 `isaac_ops/listen.cmd`로 실행** (구 supervisor.cmd 폐기)
 - **CLI: `isaac_ops/cli.cmd <command>`** (status, hb, stop, start, resume)
 - **rewards.py / env_cfg.py 수정 시 listener 재시작 불필요** (훈련 프로세스만 재시작)
 - **WSL2에서 git push**: `cmd.exe /c "cd /d D:\project\spot_micro_rl && git push origin develop"`

@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V37.2"
+TRAIN_VERSION = "V38.1"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -261,15 +261,22 @@ class SpotMicroRewardCurriculumCfg:
             "boot_vel_x_min": 0.01,                # 초기 속도 범위 (0.01, 0.05)
             "boot_vel_x_max": 0.05,
             "boot_vel_restore_iter": 500,          # iter 500에서 원래 속도 (0.1, 0.5) 복원
-            # V37: anti-splay curriculum ramp — 보행 학습 후 splay 교정
-            "splay_ramp_start": 500,               # iter 500부터 강화 시작
-            "splay_ramp_end": 1500,                # iter 1500에서 최종값 도달 (V37: 1000 → 더 느리게)
-            "splay_shoulder_initial": -6.0,        # 부팅 구간 유지
-            "splay_shoulder_final": -10.0,         # V37(-15) → V37.2(-10) 완화
+            # V38: anti-splay L2 ramp 고정 (CaT로 대체, weight escalation 중단)
+            "splay_ramp_start": 500,               # ramp 구간 유지하되 initial==final
+            "splay_ramp_end": 1500,
+            "splay_shoulder_initial": -6.0,        # V37.2(-10) -> V38 고정(-6)
+            "splay_shoulder_final": -6.0,          # 고정 — CaT가 splay 교정 담당
             "splay_stance_initial": -3.0,
-            "splay_stance_final": -3.0,            # V37(-8) → V37.2 변경 없음 (단일 변수)
+            "splay_stance_final": -3.0,
             "splay_height_initial": 0.23,
-            "splay_height_final": 0.23,            # V37(0.22) → V37.2 변경 없음 (단일 변수)
+            "splay_height_final": 0.23,
+            # V38.1: CaT ramp (V38 붕괴 교훈: threshold/prob 대폭 완화)
+            "cat_ramp_start": 800,
+            "cat_ramp_end": 2500,
+            "cat_threshold_initial": 0.8,
+            "cat_threshold_final": 0.45,
+            "cat_probability_initial": 0.03,
+            "cat_probability_final": 0.15,
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -509,6 +516,20 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.terminations.bad_orientation = DoneTerm(
             func=isaaclab_mdp.bad_orientation,
             params={"limit_angle": 1.5}  # ~86도
+        )
+
+        # V38: CaT — shoulder splay 위반 시 확률적 에피소드 종료
+        self.terminations.shoulder_splay = DoneTerm(
+            func=custom_mdp.shoulder_splay_termination,
+            params={
+                "shoulder_cfg": SceneEntityCfg("robot", joint_names=[
+                    "front_left_shoulder", "front_right_shoulder",
+                    "rear_left_shoulder", "rear_right_shoulder",
+                ]),
+                "target_angles": [-0.04, -0.04, -0.04, -0.04],
+                "threshold": 0.8,
+                "probability": 0.0,  # curriculum ramp controls this
+            },
         )
 
         # V17: 발 높이 보상 (target_clearance 낮춤 — 6cm 보폭)

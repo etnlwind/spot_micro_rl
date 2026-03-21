@@ -1233,6 +1233,31 @@ def shoulder_neutral_penalty(
     return torch.sum(torch.square(shoulder_angles), dim=1)
 
 
+def shoulder_splay_termination(
+    env: ManagerBasedRLEnv,
+    shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_angles: list[float] | None = None,
+    threshold: float = 0.4,
+    probability: float = 0.5,
+) -> torch.Tensor:
+    """CaT: shoulder splay violation triggers probabilistic episode termination.
+
+    V38: Constraints as Terminations - uses discount factor channel instead of
+    reward penalty, making it impossible for agent to offset with other rewards.
+    """
+    asset = env.scene[shoulder_cfg.name]
+    shoulder_angles = asset.data.joint_pos[:, shoulder_cfg.joint_ids]
+    if target_angles is not None:
+        targets = torch.tensor(target_angles, device=shoulder_angles.device, dtype=shoulder_angles.dtype)
+        dev = torch.abs(shoulder_angles - targets)
+    else:
+        dev = torch.abs(shoulder_angles)
+    max_dev = dev.max(dim=1).values  # worst of 4 shoulders
+    violated = max_dev > threshold
+    rand = torch.rand(env.num_envs, device=env.device)
+    return violated & (rand < probability)
+
+
 def stance_width_penalty(
     env: ManagerBasedRLEnv,
     foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -3216,6 +3241,13 @@ def reward_weight_curriculum(
     splay_stance_final: float = -2.5,
     splay_height_initial: float = 0.24,
     splay_height_final: float = 0.24,
+    # V38: CaT (Constraints as Terminations) ramp
+    cat_ramp_start: int = 0,
+    cat_ramp_end: int = 0,
+    cat_threshold_initial: float = 0.6,
+    cat_threshold_final: float = 0.4,
+    cat_probability_initial: float = 0.1,
+    cat_probability_final: float = 0.3,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -3445,6 +3477,31 @@ def reward_weight_curriculum(
             # Log
             if iteration % log_interval == 0:
                 print(f"[Splay] iter {iteration}: shoulder={cur_shoulder:.1f}, stance={cur_stance:.1f}, height={cur_height:.3f} (alpha={splay_alpha:.2f})")
+
+    # ── V38: CaT (Constraints as Terminations) ramp ──
+    if cat_ramp_start > 0 and cat_ramp_end > cat_ramp_start:
+        if iteration < cat_ramp_start:
+            # Boot phase: CaT disabled
+            try:
+                cat_cfg = env.termination_manager.get_term_cfg("shoulder_splay")
+                cat_cfg.params["threshold"] = 99.0
+                cat_cfg.params["probability"] = 0.0
+                env.termination_manager.set_term_cfg("shoulder_splay", cat_cfg)
+            except Exception:
+                pass
+        elif iteration <= cat_ramp_end:
+            cat_alpha = min(1.0, max(0.0, (iteration - cat_ramp_start) / (cat_ramp_end - cat_ramp_start)))
+            cur_threshold = cat_threshold_initial + (cat_threshold_final - cat_threshold_initial) * cat_alpha
+            cur_probability = cat_probability_initial + (cat_probability_final - cat_probability_initial) * cat_alpha
+            try:
+                cat_cfg = env.termination_manager.get_term_cfg("shoulder_splay")
+                cat_cfg.params["threshold"] = cur_threshold
+                cat_cfg.params["probability"] = cur_probability
+                env.termination_manager.set_term_cfg("shoulder_splay", cat_cfg)
+            except Exception:
+                pass
+            if iteration % log_interval == 0:
+                print(f"[CaT] iter {iteration}: threshold={cur_threshold:.2f}, prob={cur_probability:.2f} (alpha={cat_alpha:.2f})")
 
     # ── 업데이트 주기 확인 ──
     if iteration - env._crr_last_update < update_interval:
