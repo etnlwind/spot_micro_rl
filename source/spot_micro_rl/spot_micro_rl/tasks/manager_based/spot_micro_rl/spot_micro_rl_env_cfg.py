@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V38.1"
+TRAIN_VERSION = "V38.2"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -270,13 +270,12 @@ class SpotMicroRewardCurriculumCfg:
             "splay_stance_final": -3.0,
             "splay_height_initial": 0.23,
             "splay_height_final": 0.23,
-            # V38.1: CaT ramp (V38 붕괴 교훈: threshold/prob 대폭 완화)
+            # V38.2: Soft CaT (threshold/margin 고정, probability만 ramp)
             "cat_ramp_start": 800,
-            "cat_ramp_end": 2500,
-            "cat_threshold_initial": 0.8,
-            "cat_threshold_final": 0.45,
-            "cat_probability_initial": 0.03,
-            "cat_probability_final": 0.15,
+            "cat_ramp_end": 3000,
+            "cat_threshold": 0.3,
+            "cat_margin": 0.3,
+            "cat_probability_final": 0.0004,
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -518,7 +517,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             params={"limit_angle": 1.5}  # ~86도
         )
 
-        # V38: CaT — shoulder splay 위반 시 확률적 에피소드 종료
+        # V38.2: Soft CaT — 종료 확률이 splay deviation에 비례
         self.terminations.shoulder_splay = DoneTerm(
             func=custom_mdp.shoulder_splay_termination,
             params={
@@ -527,7 +526,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "rear_left_shoulder", "rear_right_shoulder",
                 ]),
                 "target_angles": [-0.04, -0.04, -0.04, -0.04],
-                "threshold": 0.8,
+                "threshold": 0.3,
+                "margin": 0.3,
                 "probability": 0.0,  # curriculum ramp controls this
             },
         )

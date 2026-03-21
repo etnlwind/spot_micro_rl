@@ -27,7 +27,7 @@ import common  # noqa: E402
 _OPS_LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 LOG = os.path.join(_OPS_LOG_DIR, "listener.log")
 PID_FILE = os.path.join(_OPS_LOG_DIR, "listener.pid")
-_CONFIRM_TIMEOUT_SEC = 60.0
+_CONFIRM_TIMEOUT_SEC = 15.0
 
 # Collapse detection config (from TRAINING_CONFIG)
 _collapse_cfg = common.TRAINING_CONFIG.get("collapse_restart", {})
@@ -46,6 +46,9 @@ _RECENT_UPDATE_ID_SET: set[int] = set()
 _RECENT_COMMAND_WINDOW_SEC = 15.0
 _RECENT_COMMAND_TIMES: dict[tuple, float] = {}
 
+# Thread-safe lock for shared state (pending_confirm, state.json)
+_confirm_lock = threading.Lock()
+
 
 # ═══════════════════════════════════════════
 # Telegram Receiver Thread
@@ -56,15 +59,16 @@ _receiver_stop = threading.Event()
 
 
 def _telegram_receiver():
-    """Dedicated thread: polls getUpdates and puts messages in queue."""
+    """Dedicated thread: polls getUpdates with long polling."""
     while not _receiver_stop.is_set():
         try:
-            updates = common.fetch_updates(timeout_sec=0, log_path=LOG)
+            # Long polling: Telegram holds connection up to 30s, returns immediately on new message
+            updates = common.fetch_updates(timeout_sec=30, log_path=LOG)
             for update in updates:
                 _msg_queue.put(update)
         except Exception:
-            pass
-        _receiver_stop.wait(1.0)  # sleep 1s, but interruptible
+            # Network error — brief pause before retry
+            _receiver_stop.wait(3.0)
 
 
 # ═══════════════════════════════════════════
@@ -180,11 +184,12 @@ def _handle_start(pending_confirm_ref: list) -> None:
     version_changed = run_version and run_version != common.TRAIN_VERSION
 
     if existing_checkpoint and not version_changed:
-        pending_confirm_ref.clear()
-        pending_confirm_ref.append({
-            "action": "fresh_start",
-            "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC,
-        })
+        with _confirm_lock:
+            pending_confirm_ref.clear()
+            pending_confirm_ref.append({
+                "action": "fresh_start",
+                "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC,
+            })
         common.send_text(
             f"⚠️ <b>확인 필요 — {common.TRAIN_VERSION} 새 훈련</b>\n"
             f"새로 구성된 reward/env 설정으로 <b>iter 0부터 새 훈련을 시작</b>합니다.\n"
@@ -227,72 +232,70 @@ def _handle_resume() -> None:
 
 
 def _handle_report(run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
-    if common.is_training_running():
-        if checkpoint_iter is not None:
-            common.send_text(
-                "⚠️ <b>IsaacOps — REPORT</b>\n<i>특정 iteration 리포트는 훈련이 정지된 상태에서만 생성할 수 있습니다.</i>",
-                LOG, parse_mode="HTML",
-            )
-            return
-        zip_path = common.find_latest_report_zip(run_dir)
-        if not zip_path:
-            common.send_text(
-                "⚠️ <b>IsaacOps — REPORT</b>\n<i>현재 훈련 중이며 전송할 최신 ZIP 리포트가 없습니다.</i>",
-                LOG, parse_mode="HTML",
-            )
-            return
-        common.send_document(zip_path, f"📦 latest report | {os.path.basename(run_dir)}", LOG)
-        return
+    training_running = common.is_training_running()
+    device = "cpu" if training_running else "cuda:0"
 
-    with common.busy_lock("report"):
-        common.update_state(mode="reporting", last_command="report", last_error="")
-        report_data = common.stop_and_report(run_dir, checkpoint, LOG, force=True)
-        common.send_text(
-            common.format_report_summary_html(
-                run_dir, checkpoint, report_data["analysis_text"],
-                report_data["kpi_snapshot"],
-                metrics_run_dir=report_data.get("metrics_run_dir"),
-            ),
-            LOG, parse_mode="HTML",
-        )
-        common.send_document(
-            report_data["zip_path"],
-            f"📦 report | {os.path.basename(run_dir)} | {os.path.basename(report_data['zip_path'])}",
-            LOG,
-        )
-        common.update_state(mode="stopped", last_command="report", last_error="")
+    def _do_report():
+        try:
+            with common.busy_lock("report"):
+                common.update_state(mode="reporting", last_command="report", last_error="")
+                report_data = common.stop_and_report(run_dir, checkpoint, LOG, force=True, device=device)
+                common.send_text(
+                    common.format_report_summary_html(
+                        run_dir, checkpoint, report_data["analysis_text"],
+                        report_data["kpi_snapshot"],
+                        metrics_run_dir=report_data.get("metrics_run_dir"),
+                    ),
+                    LOG, parse_mode="HTML",
+                )
+                common.send_document(
+                    report_data["zip_path"],
+                    f"📦 report | {os.path.basename(run_dir)} | {os.path.basename(report_data['zip_path'])}",
+                    LOG,
+                )
+                restore_mode = "training" if training_running else "stopped"
+                common.update_state(mode=restore_mode, last_command="report", last_error="")
+        except Exception as err:
+            common.write_log(f"[Report] background thread error: {err}\n{common.capture_exception()}", LOG)
+            _send_notice("REPORT FAILED", str(err), icon="⚠️")
+
+    common.send_text(
+        f"📦 <b>REPORT — {'CPU 백그라운드' if training_running else '생성'} 시작</b>\n<i>완료 시 전송합니다.</i>",
+        LOG, parse_mode="HTML",
+    )
+    t = threading.Thread(target=_do_report, daemon=True, name="cmd-report")
+    t.start()
 
 
 def _handle_view(view_key: str, run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
-    if common.is_training_running():
-        if checkpoint_iter is not None:
-            common.send_text(
-                f"⚠️ <b>IsaacOps — {view_key.upper()}</b>\n<i>특정 iteration 영상은 훈련이 정지된 상태에서만 생성할 수 있습니다.</i>",
-                LOG, parse_mode="HTML",
-            )
-            return
-        video_path = common.find_latest_video(view_key, run_dir)
-        if not video_path:
-            common.send_text(
-                f"⚠️ <b>IsaacOps — {view_key.upper()}</b>\n<i>최근 {view_key} 영상을 찾지 못했습니다.</i>",
-                LOG, parse_mode="HTML",
-            )
-            return
-        common.send_video(video_path, f"📹 latest {view_key} | {os.path.basename(run_dir)}", LOG)
-        return
+    training_running = common.is_training_running()
+    device = "cpu" if training_running else "cuda:0"
 
-    with common.busy_lock(view_key):
-        common.update_state(mode="rendering", last_command=view_key, last_error="")
-        videos = common.ensure_current_videos(run_dir, checkpoint, LOG, force=True)
-        video_path = videos.get(view_key)
-        if not video_path:
-            raise RuntimeError(f"{view_key} view was not generated.")
-        common.send_video(
-            video_path,
-            f"📹 {view_key} | {os.path.basename(run_dir)} | iter {common.get_display_iteration(run_dir, checkpoint):,}",
-            LOG,
-        )
-        common.update_state(mode="stopped", last_command=view_key, last_error="")
+    def _do_view():
+        try:
+            with common.busy_lock(view_key):
+                common.update_state(mode="rendering", last_command=view_key, last_error="")
+                videos = common.ensure_current_videos(run_dir, checkpoint, LOG, force=True, device=device)
+                video_path = videos.get(view_key)
+                if not video_path:
+                    raise RuntimeError(f"{view_key} view was not generated.")
+                common.send_video(
+                    video_path,
+                    f"📹 {view_key} | {os.path.basename(run_dir)} | iter {common.get_display_iteration(run_dir, checkpoint):,}",
+                    LOG,
+                )
+                restore_mode = "training" if training_running else "stopped"
+                common.update_state(mode=restore_mode, last_command=view_key, last_error="")
+        except Exception as err:
+            common.write_log(f"[View] background thread error: {err}\n{common.capture_exception()}", LOG)
+            _send_notice(f"{view_key.upper()} FAILED", str(err), icon="⚠️")
+
+    common.send_text(
+        f"📹 <b>{view_key.upper()} — {'CPU 백그라운드' if training_running else ''} 녹화 시작</b>\n<i>완료 시 전송합니다.</i>",
+        LOG, parse_mode="HTML",
+    )
+    t = threading.Thread(target=_do_view, daemon=True, name=f"cmd-{view_key}")
+    t.start()
 
 
 def _dispatch_command(command: str, arg_text: str, pending_confirm: list) -> None:
@@ -443,18 +446,18 @@ def _run_video_report(run_dir: str, milestone: int, current_iter: int, total_mis
         )
         return
 
-    common.write_log(f"[VideoReport] iter {milestone} (current={current_iter})", LOG)
+    common.write_log(f"[VideoReport] iter {milestone} (current={current_iter}) — background CPU recording", LOG)
     common.log_event("HB", "VIDEO_REPORT", f"iter={milestone} current={current_iter} catchup={is_catchup}")
     notice_lines = [f"🎬 <b>AUTO VIDEO REPORT — iter {milestone:,}{catchup_label}</b>"]
     if is_catchup:
         notice_lines.append(f"<i>현재 iter {current_iter:,}, iter {milestone:,} 소급 생성</i>")
     else:
-        notice_lines.append("<i>훈련 일시 정지 후 영상 녹화</i>")
+        notice_lines.append("<i>훈련 계속 진행 중 (CPU 백그라운드 녹화)</i>")
     notice_lines.append(f"<i>checkpoint: model_{milestone}.pt</i>")
     common.send_text("\n".join(notice_lines), LOG, parse_mode="HTML")
 
     try:
-        report_data = common.stop_and_report(run_dir, checkpoint, LOG, force=True)
+        report_data = common.stop_and_report(run_dir, checkpoint, LOG, force=True, device="cpu")
         common.send_text(
             common.format_report_summary_html(
                 run_dir, checkpoint, report_data["analysis_text"],
@@ -496,13 +499,113 @@ class Monitor:
         self.collapse_consecutive = 0
         self.collapse_restart_done = False
         self.perf_checked = False
-        self.training_stopped = False
         self._last_tick = 0.0
         self._tick_interval = 10.0  # check every 10 seconds
         self._pending_confirm = pending_confirm  # shared with main loop
         self._pending_video_milestones: list[int] = []  # milestones awaiting user approval
         self._pending_video_run_dir = ""
         self._pending_video_current_iter = 0
+        # Pre-confirmation: predict milestone arrival, ask 5 min early
+        self._iter_samples: list[tuple[float, int]] = []  # (time, iter) for speed estimation
+        self._pre_confirm_milestone = 0  # milestone for which pre-confirm was sent
+        self._pre_confirm_declined = False  # user said N
+        # Stall detection: auto-resume if training dies
+        self._last_iter_seen = 0
+        self._last_iter_change_time = time.time()
+        self._stall_notified = False
+        self._STALL_TIMEOUT_SEC = 600.0  # 10 min no progress = dead
+        self._video_disabled = False  # True after report-caused crash
+        self._auto_resume_count = 0  # consecutive auto-resumes without progress
+        self._AUTO_RESUME_MAX = 3  # max consecutive attempts before giving up
+        self._video_thread: threading.Thread | None = None  # background video generation
+
+    def _do_video_check(self, run_dir: str, current_iter: int) -> None:
+        """Video report: predict milestone, pre-confirm, generate on arrival."""
+        next_video_milestone = ((self.last_video_milestone // self.video_iter_step) + 1) * self.video_iter_step
+        if next_video_milestone <= self.last_video_milestone:
+            next_video_milestone = self.last_video_milestone + self.video_iter_step
+
+        # Estimate seconds until next milestone
+        eta_sec = None
+        if len(self._iter_samples) >= 2 and current_iter < next_video_milestone:
+            t0, i0 = self._iter_samples[0]
+            t1, i1 = self._iter_samples[-1]
+            dt = t1 - t0
+            di = i1 - i0
+            if dt > 0 and di > 0:
+                iter_per_sec = di / dt
+                remaining = next_video_milestone - current_iter
+                eta_sec = remaining / iter_per_sec
+
+        # Pre-confirm: ask 5 min before predicted arrival
+        _PRE_CONFIRM_LEAD_SEC = 300.0
+        with _confirm_lock:
+            if (eta_sec is not None
+                    and eta_sec > 0
+                    and eta_sec <= _PRE_CONFIRM_LEAD_SEC
+                    and self._pre_confirm_milestone != next_video_milestone
+                    and not self._pre_confirm_declined
+                    and self._pending_confirm is not None
+                    and not self._pending_confirm):
+                self._pre_confirm_milestone = next_video_milestone
+                self._pending_confirm.clear()
+                self._pending_confirm.append({
+                    "action": "video_pre_confirm",
+                    "milestone": next_video_milestone,
+                })
+                eta_min = int(eta_sec / 60)
+                common.send_text(
+                    f"<b>iter {next_video_milestone:,} 도달 예정 (~{eta_min}분 후)</b>\n"
+                    f"도달 시 자동으로 영상 리포트를 생성합니다.\n"
+                    f"<i>건너뛰려면 N을 입력하세요.</i>",
+                    LOG, parse_mode="HTML",
+                )
+                common.write_log(
+                    f"[VideoReport] pre-confirm sent for iter {next_video_milestone} (ETA ~{eta_min}min)", LOG,
+                )
+
+        # Milestone reached — generate immediately (no waiting)
+        missed = _collect_missed_milestones(self.last_video_milestone, current_iter, self.video_iter_step)
+        if missed:
+            with _confirm_lock:
+                if self._pending_confirm is not None and self._pending_confirm:
+                    action = self._pending_confirm[0].get("action", "")
+                    if action == "video_pre_confirm":
+                        self._pending_confirm.clear()
+
+            if self._pre_confirm_declined:
+                common.write_log(f"[VideoReport] skipping milestones {missed} (user declined)", LOG)
+                for m in missed:
+                    self.last_video_milestone = m
+                self._pre_confirm_declined = False
+                self._pre_confirm_milestone = 0
+            elif self._video_thread is not None and self._video_thread.is_alive():
+                # Previous video report still running — skip this milestone set
+                common.write_log(f"[VideoReport] skipping milestones {missed} (previous report still running)", LOG)
+            else:
+                # Launch video report in background thread (non-blocking)
+                for m in missed:
+                    self.last_video_milestone = m
+                self._pre_confirm_milestone = 0
+                milestones_copy = list(missed)
+                run_dir_copy = run_dir
+                cur_iter_copy = current_iter
+                video_step_copy = self.video_iter_step
+
+                def _bg_video():
+                    total = len(milestones_copy)
+                    for idx, m in enumerate(milestones_copy, start=1):
+                        _run_video_report(run_dir_copy, m, cur_iter_copy, total, idx, video_step_copy)
+                    common.write_log(f"[VideoReport] background thread done for milestones: {milestones_copy}", LOG)
+
+                self._video_thread = threading.Thread(target=_bg_video, daemon=True, name="video-report")
+                self._video_thread.start()
+                common.write_log(f"[VideoReport] background thread started for milestones: {missed}", LOG)
+
+    def reset_safety_flags(self) -> None:
+        """Reset video_disabled and auto_resume_count — call on explicit /start."""
+        self._video_disabled = False
+        self._auto_resume_count = 0
 
     def tick(self) -> None:
         """Called frequently from main loop. Rate-limits actual work."""
@@ -526,6 +629,70 @@ class Monitor:
             current_iter = int(reward_vals[-1][0])
             run_name = os.path.basename(run_dir)
 
+            # ── Stall detection: training died? ──
+            if current_iter != self._last_iter_seen:
+                self._last_iter_seen = current_iter
+                self._last_iter_change_time = time.time()
+                self._stall_notified = False
+                self._auto_resume_count = 0  # progress made, reset counter
+            elif time.time() - self._last_iter_change_time > self._STALL_TIMEOUT_SEC:
+                if not self._stall_notified:
+                    self._stall_notified = True
+                    alive = common.is_training_running()
+                    if not alive:
+                        # Determine if crash was likely caused by video report
+                        crash_during_report = (
+                            self.last_video_milestone > 0
+                            and current_iter <= self.last_video_milestone + 100
+                        )
+                        common.write_log(
+                            f"[Stall] Training dead — iter stuck at {current_iter} for "
+                            f"{int(time.time() - self._last_iter_change_time)}s, process not found. Auto-resuming."
+                            f" (report_suspected={crash_during_report})",
+                            LOG,
+                        )
+                        if crash_during_report and not self._video_disabled:
+                            self._video_disabled = True
+                            common.send_text(
+                                f"<b>TRAINING DEAD — report crash suspected</b>\n"
+                                f"iter {current_iter:,}에서 프로세스 사망\n"
+                                f"<i>CPU 백그라운드 녹화로 인한 crash 의심.</i>\n"
+                                f"<i>자동 resume + 이후 video report 비활성화.</i>",
+                                LOG, parse_mode="HTML",
+                            )
+                        else:
+                            common.send_text(
+                                f"<b>TRAINING DEAD — auto-resume</b>\n"
+                                f"iter {current_iter:,}에서 {int(self._STALL_TIMEOUT_SEC/60)}분간 진행 없음\n"
+                                f"<i>프로세스 사망 확인. 자동 resume 시도.</i>",
+                                LOG, parse_mode="HTML",
+                            )
+                        self._auto_resume_count += 1
+                        common.log_event("TRAIN", "STALL_RESUME", f"iter={current_iter} report_crash={crash_during_report} attempt={self._auto_resume_count}")
+                        if self._auto_resume_count > self._AUTO_RESUME_MAX:
+                            common.write_log(f"[Stall] Max auto-resume attempts ({self._AUTO_RESUME_MAX}) reached. Giving up.", LOG)
+                            common.send_text(
+                                f"<b>AUTO-RESUME GAVE UP</b>\n"
+                                f"iter {current_iter:,}에서 {self._AUTO_RESUME_MAX}회 재시작 실패\n"
+                                f"<i>수동 개입 필요.</i>",
+                                LOG, parse_mode="HTML",
+                            )
+                        else:
+                            try:
+                                common.launch_training(LOG, fresh=False)
+                            except Exception as err:
+                                common.write_log(f"[Stall] Auto-resume failed: {err}", LOG)
+                                common.send_text(
+                                    f"<b>AUTO-RESUME FAILED</b>\n<i>{err}</i>",
+                                    LOG, parse_mode="HTML",
+                                )
+                    else:
+                        common.write_log(
+                            f"[Stall] iter stuck at {current_iter} for "
+                            f"{int(time.time() - self._last_iter_change_time)}s, but process alive. Waiting.",
+                            LOG,
+                        )
+
             # New run detection
             if run_name != self.last_run_name:
                 self.last_run_name = run_name
@@ -544,6 +711,23 @@ class Monitor:
                 self.collapse_consecutive = 0
                 self.collapse_restart_done = False
                 self.perf_checked = False
+                # Clear stale pending_confirm from previous run
+                with _confirm_lock:
+                    if self._pending_confirm is not None and self._pending_confirm:
+                        common.write_log(f"[VideoReport] clearing stale pending_confirm from previous run", LOG)
+                        self._pending_confirm.clear()
+                        self._pending_video_milestones.clear()
+                self._iter_samples.clear()
+                self._pre_confirm_milestone = 0
+                self._pre_confirm_declined = False
+                # Reset stall detection for new run
+                self._last_iter_seen = current_iter
+                self._last_iter_change_time = time.time()
+                self._stall_notified = False
+                # Reset safety flags only on fresh start (iter near 0), not on resume
+                if current_iter < 50:
+                    self._video_disabled = False
+                    self._auto_resume_count = 0
                 # Auto-detect train version and update state
                 run_version = common._read_run_train_version(run_dir) or ""
                 if run_version:
@@ -554,6 +738,14 @@ class Monitor:
                         train_version=run_version,
                     )
                     common.write_log(f"[Monitor] New run detected: {run_name} (version={run_version})", LOG)
+                # Immediate status heartbeat on new run detection
+                try:
+                    report_text = common.format_report(data, run_name, cycle_num=(current_iter // self.iter_step))
+                    common.send_text(report_text, LOG, parse_mode="HTML")
+                    self.last_sent_milestone = (current_iter // self.iter_step) * self.iter_step
+                    common.write_log(f"[Monitor] Immediate heartbeat sent: iter={current_iter}", LOG)
+                except Exception:
+                    pass
 
             # Version mismatch detection (code vs running training)
             if not getattr(self, '_version_mismatch_notified', False):
@@ -624,27 +816,22 @@ class Monitor:
                 else:
                     self.collapse_consecutive = 0
 
-            # ── Video report milestones ──
-            missed = _collect_missed_milestones(self.last_video_milestone, current_iter, self.video_iter_step)
-            if missed and self._pending_confirm is not None and not self._pending_confirm:
-                # Ask user for confirmation before stopping training for video report
-                self._pending_video_milestones = missed
-                self._pending_video_run_dir = run_dir
-                self._pending_video_current_iter = current_iter
-                self._pending_confirm.clear()
-                self._pending_confirm.append({
-                    "action": "video_report",
-                    "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC,
-                })
-                milestone_str = ", ".join(f"{m:,}" for m in missed)
-                common.send_text(
-                    f"📹 <b>리포트 생성 확인 — iter {milestone_str}</b>\n"
-                    f"훈련을 일시 중지하고 영상 리포트를 생성합니다.\n"
-                    f"<i>계속하려면 Y, 건너뛰려면 N을 입력하세요. ({int(_CONFIRM_TIMEOUT_SEC)}초 내)</i>",
-                    LOG, parse_mode="HTML",
-                )
-                common.write_log(f"[VideoReport] awaiting user confirmation for milestones: {missed}", LOG)
-                return
+            # ── Video report milestones (prediction-based pre-confirm) ──
+            # Track iteration speed for arrival prediction
+            now = time.time()
+            self._iter_samples.append((now, current_iter))
+            # Keep last 10 samples for smoothing
+            if len(self._iter_samples) > 10:
+                self._iter_samples = self._iter_samples[-10:]
+
+            # Skip video report if disabled (after report-caused crash)
+            if self._video_disabled:
+                missed = _collect_missed_milestones(self.last_video_milestone, current_iter, self.video_iter_step)
+                for m in missed:
+                    self.last_video_milestone = m
+                # Jump to text heartbeat (skip all video logic below)
+            else:
+                self._do_video_check(run_dir, current_iter)
 
             # ── Text heartbeat ──
             milestone = (current_iter // self.iter_step) * self.iter_step
@@ -751,65 +938,40 @@ def main() -> int:
                 else:
                     text, chat_id, user_id = common.extract_message(update)
                     if text and common.is_authorized_message(chat_id, user_id):
-                        # Pending confirmation handling
-                        if pending_confirm:
-                            action = pending_confirm[0].get("action", "")
-                            if time.time() > pending_confirm[0].get("expires_at", 0):
-                                pending_confirm.clear()
-                                if action == "video_report":
-                                    # Timeout — skip milestones
-                                    for m in monitor._pending_video_milestones:
-                                        monitor.last_video_milestone = m
-                                    monitor._pending_video_milestones.clear()
-                                    _send_notice("REPORT SKIPPED", "확인 시간 초과. 리포트를 건너뜁니다.", icon="⛔")
-                                else:
+                        # Pending confirmation handling (thread-safe)
+                        with _confirm_lock:
+                            if pending_confirm:
+                                action = pending_confirm[0].get("action", "")
+                                if action == "video_pre_confirm":
+                                    milestone = pending_confirm[0].get("milestone", 0)
+                                    if text.strip().lower().startswith("n"):
+                                        pending_confirm.clear()
+                                        monitor._pre_confirm_declined = True
+                                        _send_notice("REPORT SKIP", f"iter {milestone:,} 리포트를 건너뜁니다.", icon="⛔")
+                                        common.write_log(f"[VideoReport] user declined pre-confirm for iter {milestone}", LOG)
+                                    else:
+                                        pending_confirm.clear()
+                                        _send_notice("REPORT OK", f"iter {milestone:,} 도달 시 자동 생성합니다.", icon="✅")
+                                        common.write_log(f"[VideoReport] user confirmed pre-confirm for iter {milestone}", LOG)
+                                    continue
+                                elif time.time() >= pending_confirm[0].get("expires_at", 0):
+                                    pending_confirm.clear()
                                     _send_notice("START CANCELLED", "확인 시간 초과 (60초).", icon="⛔")
-                            elif text.strip().lower().startswith("y"):
-                                pending_confirm.clear()
-                                if action == "video_report":
-                                    # User approved — generate video reports
-                                    _send_notice("REPORT CONFIRMED", "영상 리포트를 생성합니다. 훈련을 일시 중지합니다.", icon="✅")
-                                    common.stop_training(LOG)
-                                    monitor.training_stopped = True
-                                    missed = monitor._pending_video_milestones
-                                    run_dir = monitor._pending_video_run_dir
-                                    cur_iter = monitor._pending_video_current_iter
-                                    total_missed = len(missed)
-                                    for idx, milestone in enumerate(missed, start=1):
-                                        _run_video_report(run_dir, milestone, cur_iter, total_missed, idx, monitor.video_iter_step)
-                                        monitor.last_video_milestone = milestone
-                                    next_milestone = monitor.last_video_milestone + monitor.video_iter_step
-                                    common.launch_training(LOG)
-                                    monitor.training_stopped = False
-                                    monitor._pending_video_milestones.clear()
-                                    common.write_log(f"[VideoReport] all done, training restarted", LOG)
-                                    catchup_summary = f"iter {', '.join(f'{m:,}' for m in missed)}"
-                                    common.send_text(
-                                        f"🚀 <b>TRAINING RESUME — {catchup_summary}</b>\n"
-                                        f"<i>다음 리포트: iter {next_milestone:,}</i>",
-                                        LOG, parse_mode="HTML",
-                                    )
-                                    text_milestone = (cur_iter // monitor.iter_step) * monitor.iter_step
-                                    monitor.last_sent_milestone = max(monitor.last_sent_milestone, text_milestone)
+                                elif text.strip().lower().startswith("y"):
+                                    pending_confirm.clear()
+                                    if action == "fresh_start":
+                                        _send_notice(f"{common.TRAIN_VERSION} 새 훈련 확인", "iter 0부터 시작합니다.", icon="✅")
+                                        monitor.reset_safety_flags()
+                                        result = common.launch_training(LOG, fresh=True)
+                                        run_name = _safe_basename(result["run_dir"])
+                                        common.send_text(
+                                            f"🚀 <b>TRAINING START</b>\n<i>run: {run_name}</i>",
+                                            LOG, parse_mode="HTML",
+                                        )
+                                    continue
                                 else:
-                                    _send_notice(f"{common.TRAIN_VERSION} 새 훈련 확인", "iter 0부터 시작합니다.", icon="✅")
-                                    result = common.launch_training(LOG, fresh=True)
-                                    run_name = _safe_basename(result["run_dir"])
-                                    common.send_text(
-                                        f"🚀 <b>TRAINING START</b>\n<i>run: {run_name}</i>",
-                                        LOG, parse_mode="HTML",
-                                    )
-                                continue
-                            else:
-                                pending_confirm.clear()
-                                if action == "video_report":
-                                    # User declined — skip milestones
-                                    for m in monitor._pending_video_milestones:
-                                        monitor.last_video_milestone = m
-                                    monitor._pending_video_milestones.clear()
-                                    _send_notice("REPORT SKIPPED", "리포트를 건너뜁니다.", icon="⛔")
-                                else:
-                                    _send_notice("START CANCELLED", "취소되었습니다.", icon="⛔")
+                                    pending_confirm.clear()
+                                    _send_notice("CANCELLED", "취소되었습니다.", icon="⛔")
 
                         command, arg_text = _parse_command(text)
                         if command in common.command_variants():
@@ -855,12 +1017,6 @@ def main() -> int:
         raise
     finally:
         _receiver_stop.set()
-        if monitor.training_stopped:
-            try:
-                common.write_log("IsaacOps exiting while training stopped — attempting recovery", LOG)
-                common.launch_training(LOG)
-            except Exception:
-                pass
         common.write_log(f"IsaacOps exiting: reason={exit_reason}", LOG)
         common.release_pid_lock(PID_FILE)
 

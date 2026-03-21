@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -361,6 +362,7 @@ RUNLOG_COLUMNS = [
 
 _tg_offset: int | None = None
 _tg_poll_conflict_logged = False
+_tg_offset_lock = threading.Lock()
 
 
 def _normalize_windows_path(raw_path: str | None) -> str | None:
@@ -837,38 +839,41 @@ def _clear_telegram_poll_conflict(log_path: str | None) -> None:
 
 def prime_update_offset(log_path: str) -> int:
     global _tg_offset
-    stored_offset = load_telegram_offset()
-    if stored_offset > 0:
-        _tg_offset = stored_offset
-        write_log(f"Telegram offset restored: {stored_offset}", log_path)
-        return stored_offset
-    try:
-        updates = _telegram_get_updates(0, timeout_sec=0)
-    except (urllib.error.URLError, TimeoutError, OSError) as err:
-        _tg_offset = stored_offset if stored_offset > 0 else 0
-        write_log(f"Telegram offset prime skipped due to network error: {err}", log_path)
-        return _tg_offset
-    if updates is None:
-        _tg_offset = 0
-        _handle_telegram_poll_conflict(log_path)
-        write_log("Telegram offset prime deferred until polling conflict clears.", log_path)
-        return 0
-    _clear_telegram_poll_conflict(log_path)
-    next_offset = 0
-    for update in updates:
-        next_offset = max(next_offset, int(update.get("update_id", 0)) + 1)
-    _tg_offset = next_offset
-    save_telegram_offset(next_offset)
-    write_log(f"Telegram offset primed: {next_offset}", log_path)
-    return next_offset
+    with _tg_offset_lock:
+        stored_offset = load_telegram_offset()
+        if stored_offset > 0:
+            _tg_offset = stored_offset
+            write_log(f"Telegram offset restored: {stored_offset}", log_path)
+            return stored_offset
+        try:
+            updates = _telegram_get_updates(0, timeout_sec=0)
+        except (urllib.error.URLError, TimeoutError, OSError) as err:
+            _tg_offset = stored_offset if stored_offset > 0 else 0
+            write_log(f"Telegram offset prime skipped due to network error: {err}", log_path)
+            return _tg_offset
+        if updates is None:
+            _tg_offset = 0
+            _handle_telegram_poll_conflict(log_path)
+            write_log("Telegram offset prime deferred until polling conflict clears.", log_path)
+            return 0
+        _clear_telegram_poll_conflict(log_path)
+        next_offset = 0
+        for update in updates:
+            next_offset = max(next_offset, int(update.get("update_id", 0)) + 1)
+        _tg_offset = next_offset
+        save_telegram_offset(next_offset)
+        write_log(f"Telegram offset primed: {next_offset}", log_path)
+        return next_offset
 
 
 def fetch_updates(timeout_sec: int = 0, log_path: str | None = None) -> list[dict]:
     global _tg_offset
-    if _tg_offset is None:
-        _tg_offset = load_telegram_offset()
+    with _tg_offset_lock:
+        if _tg_offset is None:
+            _tg_offset = load_telegram_offset()
+        offset = _tg_offset
     try:
-        updates = _telegram_get_updates(_tg_offset, timeout_sec=timeout_sec, log_path=log_path)
+        updates = _telegram_get_updates(offset, timeout_sec=timeout_sec, log_path=log_path)
     except (urllib.error.URLError, TimeoutError, OSError) as err:
         if log_path:
             write_log(f"Telegram polling failed due to network error: {err}", log_path)
@@ -877,10 +882,11 @@ def fetch_updates(timeout_sec: int = 0, log_path: str | None = None) -> list[dic
         _handle_telegram_poll_conflict(log_path)
         return []
     _clear_telegram_poll_conflict(log_path)
-    for update in updates:
-        _tg_offset = max(_tg_offset, int(update.get("update_id", 0)) + 1)
-    if updates:
-        save_telegram_offset(_tg_offset)
+    with _tg_offset_lock:
+        for update in updates:
+            _tg_offset = max(_tg_offset, int(update.get("update_id", 0)) + 1)
+        if updates:
+            save_telegram_offset(_tg_offset)
     return updates
 
 
@@ -1400,6 +1406,17 @@ def kill_training_processes(log_path: str) -> list[int]:
             pass
     if killed:
         time.sleep(3)
+        # Verify processes actually died
+        still_alive = [pid for pid in killed if psutil.pid_exists(pid)]
+        if still_alive:
+            write_log(f"WARNING: PIDs still alive after kill: {still_alive}", log_path)
+            for pid in still_alive:
+                try:
+                    psutil.Process(pid).kill()
+                    write_log(f"Retry-killed PID {pid}", log_path)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            time.sleep(2)
     return killed
 
 
@@ -4580,6 +4597,7 @@ def _build_play_command(
     camera_zoom: float,
     num_envs: int,
     headless: bool,
+    device: str = "cuda:0",
 ) -> str:
     command = (
         f'cd /d "{PROJECT_ROOT}" && '
@@ -4587,18 +4605,23 @@ def _build_play_command(
         f'"{ISAAC_LAB}" -p "{play_script}" '
         f'--task={TASK} --num_envs={num_envs} '
         f'--checkpoint="{checkpoint_path}" --video --video_length={VIDEO_LENGTH} '
-        f'--camera_view={camera_view} --camera_zoom={camera_zoom}'
+        f'--camera_view={camera_view} --camera_zoom={camera_zoom} '
+        f'--device={device}'
     )
     if headless:
         command += " --headless"
     return _wrap_conda_command(command, force_activate=True)
 
 
-def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int, log_path: str, headless: bool) -> dict[str, str]:
+def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int, log_path: str, headless: bool, device: str = "cuda:0") -> dict[str, str]:
     play_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "play.py")
     iter_num = get_checkpoint_iter(checkpoint_path)
     captured_videos: dict[str, str] = {}
-    for spec in get_video_capture_specs(PLAY_ENVS):
+    specs = get_video_capture_specs(PLAY_ENVS)
+    if device == "cpu":
+        # CPU background: skip overview (requires multi-env GPU rendering)
+        specs = [s for s in specs if s["key"] != "overview"]
+    for spec in specs:
         pre_videos = _snapshot_play_videos(run_dir)
         play_cmd = _build_play_command(
             checkpoint_path=checkpoint_path,
@@ -4607,6 +4630,7 @@ def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int, log_p
             camera_zoom=spec["camera_zoom"],
             num_envs=spec["num_envs"],
             headless=headless,
+            device=device,
         )
         mode_label = "headless" if headless else "gui"
         write_log(f"Recording {spec['key']} ({mode_label}): {play_cmd}", log_path)
@@ -4671,7 +4695,7 @@ def record_video_bundle(checkpoint_path: str, run_dir: str, clip_num: int, log_p
     return captured_videos
 
 
-def capture_videos_with_validation(checkpoint_path: str, run_dir: str, clip_num: int, log_path: str) -> dict[str, str]:
+def capture_videos_with_validation(checkpoint_path: str, run_dir: str, clip_num: int, log_path: str, device: str = "cuda:0") -> dict[str, str]:
     attempt_modes = [VIDEO_CAPTURE_HEADLESS]
     if VIDEO_CAPTURE_FALLBACK_GUI and VIDEO_CAPTURE_HEADLESS:
         attempt_modes.append(False)
@@ -4679,13 +4703,14 @@ def capture_videos_with_validation(checkpoint_path: str, run_dir: str, clip_num:
     last_error = ""
     for attempt_index, headless in enumerate(attempt_modes, start=1):
         mode_label = "headless" if headless else "gui"
-        write_log(f"Video capture attempt {attempt_index}/{len(attempt_modes)} mode={mode_label}", log_path)
+        write_log(f"Video capture attempt {attempt_index}/{len(attempt_modes)} mode={mode_label} device={device}", log_path)
         captured_videos = record_video_bundle(
             checkpoint_path=checkpoint_path,
             run_dir=run_dir,
             clip_num=clip_num,
             log_path=log_path,
             headless=headless,
+            device=device,
         )
         if not captured_videos:
             last_error = f"No videos were generated in {mode_label} mode."
@@ -4873,7 +4898,7 @@ def _checkpoint_matches_cached(checkpoint_path: str, cached_checkpoint: str, fil
     return all(path and os.path.isfile(path) for path in file_map.values())
 
 
-def ensure_current_videos(run_dir: str, checkpoint_path: str, log_path: str, force: bool = False) -> dict[str, str]:
+def ensure_current_videos(run_dir: str, checkpoint_path: str, log_path: str, force: bool = False, device: str = "cuda:0") -> dict[str, str]:
     state = load_state()
     cached_videos = state.get("last_videos") or {}
     if (
@@ -4884,12 +4909,13 @@ def ensure_current_videos(run_dir: str, checkpoint_path: str, log_path: str, for
         return cached_videos
     iter_num = get_checkpoint_iter(checkpoint_path)
     clip_num = max(1, iter_num)
-    write_log(f"Generating current videos for iter {iter_num}", log_path)
-    captured_videos = capture_videos_with_validation(checkpoint_path, run_dir, clip_num, log_path)
+    write_log(f"Generating current videos for iter {iter_num} (device={device})", log_path)
+    captured_videos = capture_videos_with_validation(checkpoint_path, run_dir, clip_num, log_path, device=device)
     if not captured_videos:
         raise RuntimeError("No videos were generated.")
+    video_mode = "training" if device == "cpu" else "stopped"
     update_state(
-        mode="stopped",
+        mode=video_mode,
         active_run=os.path.basename(run_dir),
         active_checkpoint=checkpoint_path,
         last_videos=captured_videos,
@@ -4898,7 +4924,7 @@ def ensure_current_videos(run_dir: str, checkpoint_path: str, log_path: str, for
     return captured_videos
 
 
-def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bool = False) -> dict:
+def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bool = False, device: str = "cuda:0") -> dict:
     state = load_state()
     cached_zip = state.get("last_report_zip") or ""
     cached_report_checkpoint = state.get("last_report_checkpoint") or ""
@@ -4917,7 +4943,7 @@ def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bo
             "analysis_text": "",
             "kpi_snapshot": build_supervisor_kpi_snapshot(run_dir),
         }
-    videos = ensure_current_videos(run_dir, checkpoint_path, log_path=log_path, force=force)
+    videos = ensure_current_videos(run_dir, checkpoint_path, log_path=log_path, force=force, device=device)
     representative_video = select_representative_video(videos)
     iter_num = get_checkpoint_iter(checkpoint_path)
     clip_num = max(1, iter_num)
@@ -4940,8 +4966,9 @@ def stop_and_report(run_dir: str, checkpoint_path: str, log_path: str, force: bo
     heartbeat_xlsx_path = artifact_paths.get("xlsx_path") if artifact_paths else None
     if not zip_path or not os.path.isfile(zip_path):
         raise RuntimeError("Report ZIP was not created.")
+    report_mode = "training" if device == "cpu" else "stopped"
     update_state(
-        mode="stopped",
+        mode=report_mode,
         active_run=os.path.basename(run_dir),
         active_checkpoint=checkpoint_path,
         last_report_zip=zip_path,

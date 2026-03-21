@@ -106,7 +106,47 @@ Run: `2026-03-21_09-08-16`
 - PPO 하이퍼파라미터
 - from-scratch 훈련 (resume 아님)
 
-## 교훈 (V38에서 추가)
-- **CaT threshold는 실측 dev의 1.5배 이상으로 시작**: V38에서 dev 0.54 대비 threshold 0.6 (1.1배) -> 즉시 붕괴. V38.1에서 0.8 (1.5배)
-- **CaT probability는 0.03~0.05에서 시작**: 0.1도 과도. 점진 강화 필수
+## V38.2: Soft CaT (진행 중 — 2026-03-22)
+
+### 설계
+- **Phase transition 제거**: threshold/margin 고정, probability만 ramp
+- `prob(dev) = base_prob * clamp((max_dev - 0.3) / 0.3, 0, 1)`
+- probability_final = 0.0004 (step-level, 에피소드 종료율 ~8% at dev=0.54)
+
+### 파라미터
+| 파라미터 | 값 | 비고 |
+|---------|-----|------|
+| threshold | 0.3 | 고정 (목표 dev 근처) |
+| margin | 0.3 | 0.3~0.6 구간 선형 |
+| probability_final | 0.0004 | step-level per-step |
+| cat_ramp | 800~3000 | probability만 ramp |
+
+### Run 1: prob=0.08 (실패 — 즉시 중단)
+- Run: `2026-03-21_15-46-35`
+- iter 900: splay 56.8%, ep_len 162 — V38.1과 동일 패턴
+- **원인**: prob 0.08은 step-level에서 `(1-0.08*0.8)^250 = 0` — 에피소드 100% 종료
+- **교훈**: DoneTerm은 매 step 호출, probability는 `(1-p)^ep_len`으로 역산 필수
+
+### Run 2: prob=0.0004 (진행 중)
+- Run: `2026-03-21_18-53-17`
+
+| iter | sh_dev | splay% | ep_len | stride | 비고 |
+|------|--------|--------|--------|--------|------|
+| 800 | 0.537 | 0.00% | 250.0 | 6.050 | CaT 시작 |
+| 1000 | 0.536 | 0.84% | 250.0 | 6.401 | 안정 |
+| 1200 | 0.532 | 1.77% | 244.3 | 6.461 | |
+| 1400 | 0.533 | 2.74% | 248.9 | 6.801 | |
+| 1600 | 0.532 | 3.50% | 246.6 | 6.919 | |
+| 1800 | 0.530 | 4.16% | 240.1 | 7.140 | |
+| 2000 | 0.528 | 5.11% | 243.1 | 7.359 | ep_len 안정, sh_dev 정체 |
+
+- **CaT 안정**: ep_len 붕괴 없음, stride 개선 (+22%)
+- **sh_dev 정체**: 0.537→0.528 (2000 iter 간 -0.009) — probability 0.0004 너무 보수적
+- iter 3000 완주 후 baseline 확보 -> V38.3 probability 상향 예정
+
+## 교훈 (V38~V38.2)
+- **CaT threshold는 실측 dev의 1.5배 이상으로 시작**: V38에서 dev 0.54 대비 threshold 0.6 (1.1배) -> 즉시 붕괴
+- **CaT probability는 0.03~0.05에서 시작**: 0.1도 과도 (V38)
 - **CaT ramp 시작은 부팅 안정 500 iter 후**: boot_ramp_end(300) + 500 = 800
+- **DoneTerm은 매 step 호출**: probability 설계 시 `(1-p)^ep_len`으로 에피소드 생존율 역산 필수
+- **Soft CaT는 안정적이지만 prob 0.0004는 너무 약함**: 에피소드 종료율 ~5%로는 sh_dev 변화 불가

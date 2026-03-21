@@ -118,7 +118,7 @@ def main() -> int:
         # WSL에서 training 명령은 cmd.exe로 Windows CLI 직접 실행 (로그는 Windows 쪽에서 기록)
         if cmd in _TRAINING_CMDS and common._IS_WSL:
             win_root = common._to_win_path(common.PROJECT_ROOT)
-            win_cmd = f'cmd.exe /c "cd /d {win_root} && isaac_ops\\cli.cmd {cmd}"'
+            win_cmd = f'cmd.exe /c "cd /d \"{win_root}\" && isaac_ops\\cli.cmd {cmd}"'
             print(f"[INFO] WSL detected — executing via cmd.exe: {cmd}")
             os.system(win_cmd)
         elif cmd == "status":

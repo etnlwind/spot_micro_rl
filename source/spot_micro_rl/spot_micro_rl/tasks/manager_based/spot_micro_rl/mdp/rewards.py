@@ -1237,13 +1237,14 @@ def shoulder_splay_termination(
     env: ManagerBasedRLEnv,
     shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     target_angles: list[float] | None = None,
-    threshold: float = 0.4,
-    probability: float = 0.5,
+    threshold: float = 0.3,
+    margin: float = 0.3,
+    probability: float = 0.0004,
 ) -> torch.Tensor:
-    """CaT: shoulder splay violation triggers probabilistic episode termination.
+    """Soft CaT: termination probability proportional to splay deviation.
 
-    V38: Constraints as Terminations - uses discount factor channel instead of
-    reward penalty, making it impossible for agent to offset with other rewards.
+    V38.2: phase transition 제거 — dev가 threshold~threshold+margin 구간에서
+    종료 확률이 0~probability로 선형 증가. dev <= threshold이면 종료 확률 0.
     """
     asset = env.scene[shoulder_cfg.name]
     shoulder_angles = asset.data.joint_pos[:, shoulder_cfg.joint_ids]
@@ -1253,9 +1254,10 @@ def shoulder_splay_termination(
     else:
         dev = torch.abs(shoulder_angles)
     max_dev = dev.max(dim=1).values  # worst of 4 shoulders
-    violated = max_dev > threshold
+    scale = torch.clamp((max_dev - threshold) / margin, 0.0, 1.0)
+    effective_prob = probability * scale
     rand = torch.rand(env.num_envs, device=env.device)
-    return violated & (rand < probability)
+    return rand < effective_prob
 
 
 def stance_width_penalty(
@@ -3241,13 +3243,12 @@ def reward_weight_curriculum(
     splay_stance_final: float = -2.5,
     splay_height_initial: float = 0.24,
     splay_height_final: float = 0.24,
-    # V38: CaT (Constraints as Terminations) ramp
+    # V38.2: Soft CaT ramp (threshold/margin 고정, probability만 ramp)
     cat_ramp_start: int = 0,
     cat_ramp_end: int = 0,
-    cat_threshold_initial: float = 0.6,
-    cat_threshold_final: float = 0.4,
-    cat_probability_initial: float = 0.1,
-    cat_probability_final: float = 0.3,
+    cat_threshold: float = 0.3,
+    cat_margin: float = 0.3,
+    cat_probability_final: float = 0.0004,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
@@ -3478,30 +3479,31 @@ def reward_weight_curriculum(
             if iteration % log_interval == 0:
                 print(f"[Splay] iter {iteration}: shoulder={cur_shoulder:.1f}, stance={cur_stance:.1f}, height={cur_height:.3f} (alpha={splay_alpha:.2f})")
 
-    # ── V38: CaT (Constraints as Terminations) ramp ──
+    # ── V38.2: Soft CaT ramp (threshold/margin 고정, probability만 ramp) ──
     if cat_ramp_start > 0 and cat_ramp_end > cat_ramp_start:
         if iteration < cat_ramp_start:
-            # Boot phase: CaT disabled
+            # Boot phase: Soft CaT disabled (probability=0)
             try:
                 cat_cfg = env.termination_manager.get_term_cfg("shoulder_splay")
-                cat_cfg.params["threshold"] = 99.0
+                cat_cfg.params["threshold"] = cat_threshold
+                cat_cfg.params["margin"] = cat_margin
                 cat_cfg.params["probability"] = 0.0
                 env.termination_manager.set_term_cfg("shoulder_splay", cat_cfg)
             except Exception:
                 pass
         elif iteration <= cat_ramp_end:
             cat_alpha = min(1.0, max(0.0, (iteration - cat_ramp_start) / (cat_ramp_end - cat_ramp_start)))
-            cur_threshold = cat_threshold_initial + (cat_threshold_final - cat_threshold_initial) * cat_alpha
-            cur_probability = cat_probability_initial + (cat_probability_final - cat_probability_initial) * cat_alpha
+            cur_prob = cat_probability_final * cat_alpha
             try:
                 cat_cfg = env.termination_manager.get_term_cfg("shoulder_splay")
-                cat_cfg.params["threshold"] = cur_threshold
-                cat_cfg.params["probability"] = cur_probability
+                cat_cfg.params["threshold"] = cat_threshold
+                cat_cfg.params["margin"] = cat_margin
+                cat_cfg.params["probability"] = cur_prob
                 env.termination_manager.set_term_cfg("shoulder_splay", cat_cfg)
             except Exception:
                 pass
             if iteration % log_interval == 0:
-                print(f"[CaT] iter {iteration}: threshold={cur_threshold:.2f}, prob={cur_probability:.2f} (alpha={cat_alpha:.2f})")
+                print(f"[CaT] iter {iteration}: th={cat_threshold:.2f} m={cat_margin:.2f} prob={cur_prob:.4f} (a={cat_alpha:.2f})")
 
     # ── 업데이트 주기 확인 ──
     if iteration - env._crr_last_update < update_interval:
