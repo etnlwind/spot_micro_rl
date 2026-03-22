@@ -1,13 +1,13 @@
 # HANDOFF.md
 
-> 마지막 업데이트: 2026-03-21
+> 마지막 업데이트: 2026-03-22
 > 최신 커밋: develop 브랜치
 
 ---
 
 ## 1. 현재 목표
 
-**Anti-Splay 해결 — V38.1: CaT (Constraints as Terminations) 파라미터 완화 재시도**
+**Anti-Splay 해결 — V38.3: Soft CaT prob 0.0015, 15000 iter 완주 중**
 
 | 버전 | 결과 | 비고 |
 |------|------|------|
@@ -16,32 +16,61 @@
 | V35~V35.5 | 부팅 성공 | alive_bonus(10) + contacts ramp + 저속 command 3결합, 100% 재현 |
 | V36 | 부분 성공 | anti-shuffle 성공(stride +34%), anti-splay 실패(shoulder_dev 0.54 고착) |
 | V37~V37.2 | 한계 확인 | L2 penalty -10까지 올려도 splay 행동 변화 없음 |
-| V38 | 실패 | CaT threshold 0.6이 너무 타이트, iter 600 즉시 붕괴 |
-| **V38.1** | **훈련 중** | CaT 완화: threshold 0.8->0.45, prob 0.03->0.15, ramp 800~2500 |
+| V38 | 실패 | CaT threshold ramp, 0.6이 너무 타이트 → iter 600 즉시 붕괴 |
+| V38.1 | 실패 | CaT threshold ramp 완화, splay 57% → 붕괴 (phase transition) |
+| V38.2 | 부분 성공 | Soft CaT prob 0.0004, 안정적이나 shoulder_dev 0.518 정체 |
+| **V38.3** | **진행 중** | Soft CaT prob 0.0015, shoulder_dev 0.537→0.457 (**-14.9%**), **0.45 정체 관찰 중** |
 
 ---
 
-## 2. V38 -> V38.1 경과
+## 2. V38.3 현재 상황 (2026-03-22)
 
-### V38 (실패 — 2026-03-21)
-- **설계**: CaT 도입, shoulder splay > threshold -> 확률적 에피소드 종료
-- **파라미터**: threshold 0.6->0.4, probability 0.1->0.3, ramp iter 500~1500
-- **결과**: iter 400에서 부팅 성공 (ep_len 247, reward 170), iter 500 CaT 활성화 직후 iter 600에서 즉시 붕괴 (ep_len 11, CaT 종료율 99.3%)
-- **원인**: threshold 0.6이 실측 dev 0.54에 너무 가까움 (margin 0.06). probability 0.1도 과도
-- **교훈**: CaT threshold는 실측 dev의 1.5배 이상, probability는 0.03~0.05에서 시작
+### Run: `2026-03-22_08-03-25` (iter ~4000 / 15000)
 
-### V38.1 (훈련 중 — 2026-03-21)
-- **설계**: V38 동일 구조, 파라미터만 대폭 완화
-- **파라미터 변경**: threshold 0.8->0.45, probability 0.03->0.15, ramp iter 800~2500
-- **Run**: `2026-03-21_09-08-16`
-- **초기 상태 (iter 500)**: 부팅 성공 (ep_len 242, reward 180, CaT 아직 OFF)
+| iter | shoulder dev | splay% | ep_len | stride | 비고 |
+|------|-------------|--------|--------|--------|------|
+| 800 | 0.537 | 0.0% | 250 | 6.05 | CaT 시작 |
+| 1500 | 0.512 | 10.7% | 238 | 6.22 | |
+| 2000 | 0.492 | 17.7% | 227 | 6.44 | 8% 감소 기준 통과 |
+| 2500 | 0.476 | 24.0% | 221 | 6.80 | |
+| 3000 | 0.456 | 30.3% | 215 | 6.73 | ramp 완료 |
+| 3500 | 0.457 | 30.2% | 195 | 6.65 | **정체 + ep_len < 200** |
+
+### 현재 판단
+
+**성과**: shoulder_dev 0.537→0.457 (-14.9%) — V1~V38.2 역사상 최대 감소
+**문제**: 0.45에서 새로운 local optimum. splay 30%에서 안정화, shoulder_dev 정체, ep_len 195
+
+**해석**: CaT 30% 압력에 agent가 적응 — "30% 에피소드 손실 감수 + 현재 자세 유지" 전략 선택.
+V37.2 (L2, 0.54 고착)와 같은 구조가 0.45에서 반복.
+
+**방침**: 15000 iter 완주 (중단: ep_len < 180 또는 shoulder_dev 500 iter 이상 반등)
+
+---
+
+## 3. V38 시리즈 전체 경과
+
+### V38 — Binary CaT (실패)
+- threshold 0.6→0.4 ramp, probability 0.1→0.3
+- iter 600에서 99.3% 종료, 즉시 붕괴
+
+### V38.1 — Binary CaT 완화 (실패)
+- threshold 0.8→0.45, probability 0.03→0.15
+- iter 1800에서 splay 57%, ep_len 10 — phase transition으로 붕괴
+
+### V38.2 — Soft CaT (부분 성공)
+- `prob(dev) = base_prob × clamp((max_dev - 0.3) / 0.3, 0, 1)`, prob 0.0004
+- phase transition 제거, 안정적이지만 shoulder_dev 0.518 정체 (9% 종료율 무시)
+
+### V38.3 — Soft CaT prob 3.75x (진행 중)
+- prob 0.0004→0.0015
+- shoulder_dev 0.537→0.457 달성, 하지만 0.45에서 새 local optimum
 
 ### 핵심 발견
-**L2 penalty -> CaT 전환의 핵심 포인트**:
-- L2 penalty는 reward 채널 — agent가 다른 보상으로 상쇄 가능 (V37.2에서 확인)
-- CaT는 discount factor 채널 — terminated=True면 미래 보상=0, 상쇄 불가
-- 단, CaT는 "너무 타이트하면 보행 자체를 포기"하는 새로운 failure mode 존재
-- threshold/probability의 보수적 설정이 필수
+- **L2 penalty는 reward 채널** — agent가 다른 보상으로 상쇄 가능
+- **CaT는 discount factor 채널** — 상쇄 불가, 하지만 local optimum은 존재
+- **Soft CaT는 phase transition 없이 안정적** — prob 조절만으로 압력 제어
+- **DoneTerm은 매 step 호출** — probability는 `(1-p)^ep_len`으로 역산 필수
 
 ---
 
