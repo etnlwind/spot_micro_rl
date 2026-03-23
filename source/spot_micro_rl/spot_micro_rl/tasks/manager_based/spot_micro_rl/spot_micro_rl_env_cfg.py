@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V38.3"
+TRAIN_VERSION = "V39.1"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -319,7 +319,13 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Disable height scanner on flat terrain
         self.scene.height_scanner = None
         self.observations.policy.height_scan = None
-        
+
+        # V39: Phase clock observation (8-dim: sin/cos × 4 legs)
+        self.observations.policy.phase_clock = ObsTerm(
+            func=custom_mdp.phase_clock_obs,
+            params={"frequency": 2.0},
+        )
+
         # Terminations: base_contact 비활성화
         self.terminations.base_contact = None
 
@@ -529,6 +535,18 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "threshold": 0.3,
                 "margin": 0.3,
                 "probability": 0.0,  # curriculum ramp controls this
+            },
+        )
+
+        # V39: Phase-conditioned contact reward (CPG trot 유도)
+        self.rewards.phase_contact = RewTerm(
+            func=custom_mdp.phase_contact_reward,
+            weight=10.0,
+            params={
+                "sensor_cfg": toe_contact_sensor_cfg,
+                "frequency": 2.0,
+                "duty_factor": 0.5,
+                "contact_threshold": 1.0,
             },
         )
 

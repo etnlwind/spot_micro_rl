@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import torch
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,85 @@ if TYPE_CHECKING:
 def alive_bonus(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Per-step survival bonus. Returns 1.0 for every alive environment."""
     return torch.ones(env.num_envs, device=env.device)
+
+
+# ═══════════════════════════════════════════
+# V39: CPG / Phase Clock
+# ═══════════════════════════════════════════
+
+def phase_clock_obs(
+    env: ManagerBasedRLEnv,
+    frequency: float = 2.0,
+) -> torch.Tensor:
+    """Phase clock observation: sin/cos per leg for trot gait.
+
+    V39: 4다리 각각의 phase를 sin/cos로 인코딩하여 8차원 observation 반환.
+    Trot 패턴: FL/RR 동위상, FR/RL 반위상.
+
+    Args:
+        frequency: trot 주파수 (Hz). 1 cycle = stance + swing.
+    Returns:
+        (num_envs, 8) tensor: [sin_FL, sin_FR, sin_RL, sin_RR, cos_FL, cos_FR, cos_RL, cos_RR]
+    """
+    t = env.episode_length_buf.float() * env.step_dt  # (num_envs,)
+    base_phase = 2.0 * math.pi * frequency * t  # (num_envs,)
+
+    # Trot: FL/RR = base, FR/RL = base + π
+    fl_phase = base_phase
+    fr_phase = base_phase + math.pi
+    rl_phase = base_phase + math.pi
+    rr_phase = base_phase
+
+    phases = torch.stack([fl_phase, fr_phase, rl_phase, rr_phase], dim=1)  # (num_envs, 4)
+    sin_cos = torch.cat([torch.sin(phases), torch.cos(phases)], dim=1)  # (num_envs, 8)
+    return sin_cos
+
+
+def phase_contact_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    frequency: float = 2.0,
+    duty_factor: float = 0.5,
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Phase-conditioned contact reward: stance phase에서 접지, swing phase에서 이탈 시 보상.
+
+    V39: CPG phase에 맞춰 발을 올바르게 사용하면 reward.
+    - stance phase (0 ~ duty_factor × 2π): 발이 닿아있으면 +1
+    - swing phase (duty_factor × 2π ~ 2π): 발이 떨어져있으면 +1
+
+    Args:
+        frequency: trot 주파수 (Hz).
+        duty_factor: stance phase 비율.
+        contact_threshold: 접촉 판정 force threshold (N).
+    Returns:
+        (num_envs,) per-env reward (0~1 범위, 4다리 평균).
+    """
+    contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
+    # 4다리 toe contact: (num_envs, 4)
+    forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
+    is_contact = (forces > contact_threshold).float()
+
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = 2.0 * math.pi * frequency * t
+
+    # Trot phases
+    fl_phase = base_phase
+    fr_phase = base_phase + math.pi
+    rl_phase = base_phase + math.pi
+    rr_phase = base_phase
+    phases = torch.stack([fl_phase, fr_phase, rl_phase, rr_phase], dim=1)  # (num_envs, 4)
+
+    # Normalize to [0, 2π)
+    phase_norm = phases % (2.0 * math.pi)
+    stance_threshold = duty_factor * 2.0 * math.pi
+
+    # Expected contact state: stance → 1 (should touch), swing → 0 (should lift)
+    expected_contact = (phase_norm < stance_threshold).float()
+
+    # Reward: 1 if actual matches expected, 0 otherwise
+    match = (is_contact == expected_contact).float()
+    return match.mean(dim=1)  # 4다리 평균
 
 
 def _contact_force_peak(contact_sensor: ContactSensor, body_ids) -> torch.Tensor:
