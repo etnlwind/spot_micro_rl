@@ -86,25 +86,21 @@ def phase_contact_reward(env):
 
 **V39 1차 실험의 현실적 관심사는 0.30 즉시 달성이 아니라, 0.45 장벽을 구조적으로 깨고 0.38~0.42 구간에 안정 진입하는지 확인하는 것이다.**
 
-### Step 1: 주파수 스크리닝 (V39.1 / V39.2 / V39.3)
+### Step 1: 주파수 스크리닝 → Reward Shape 수정 (완료)
 
-3개 주파수 후보의 **부팅 + 초기 phase 반응**을 짧게 확인:
-- **V39.1**: **2.0 Hz** (Solo-12 기준, 첫 시도)
-- **V39.2**: **1.5 Hz** (SpotMicro 짧은 다리 보정)
-- **V39.3**: **2.5 Hz** (빠른 주기)
+~~3개 주파수 스크리닝 계획~~ → **reward shape 결함 발견으로 중단**
 
-공통 설정:
-- Phase clock observation 8차원 추가
-- phase_contact_reward 1개만 추가
-- **기존 50개 reward 그대로 유지** (정리는 나중)
-- Soft CaT 그대로 유지
-- from-scratch
+**V39.1 (2.0 Hz) 결과**:
+- phase_contact raw = 0.507 (baseline 0.50과 동일)
+- **원인**: match=1/mismatch=0 구조에서 phase를 따르지 않아도 0.50 공짜
+- agent가 기존 always-contact 행동으로 자동 match → phase 학습 동기 없음
+- **결론**: 주파수가 아니라 reward shape가 병목
 
-각 iter 1000 (구간 평균 iter 800~1000 기준)에서 판정:
-- phase_contact_reward가 **전체 reward의 5% 이상** 기여하는 주파수 선택
-- 복수 통과 시: FL/FR contact ratio가 가장 낮은 주파수 선택
-
-**주파수 스크리닝은 리스크 완화가 아닌 필수 운영 계획.**
+**V39.1.1 수정**:
+- phase_contact_reward: match=+1, mismatch=-1 (baseline=0.0, 공짜 제거)
+- weight: 10→20
+- frequency: 2.0 Hz 유지
+- incentive: +3.0→+12.0 (4배 개선)
 
 ### Step 2: 확정 주파수 본실험
 

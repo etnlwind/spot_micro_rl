@@ -46,10 +46,13 @@
 **V38 시리즈 결론**: CaT로 0.54→0.45 달성. 그 이상은 벌칙만으로 한계.
 **V38.3.1 실패**: resume + L2 강화 시도 → critic 무효화 + curriculum 미복원으로 성과 소실.
 
-**다음 단계**: V39 CPG/Phase Clock (`plan/V39_PLAN.md`)
-- 후보 A (CaT+L2 병행) 실패 확인 → resume 중 reward 변경 불가
-- **후보 C (CPG/Phase Clock)로 전환** — from-scratch, 구조적 gait 유도
-- reward 정리(후보 B)는 CPG 구현 시 병행
+**현재**: V39.1.1 훈련 대기 (CPG Phase Clock 2.0 Hz + reward shape 수정)
+
+**V39 경과**:
+- V39.1 (2.0 Hz): phase_contact raw=0.507 (baseline=0.50) → **reward shape 결함 발견**
+  - match=1/mismatch=0 → 공짜 baseline 0.50. agent가 phase를 따를 동기 없음
+  - 주파수 스크리닝 중단, reward shape 수정으로 전환
+- V39.1.1: match=+1/mismatch=-1 + weight 10→20. incentive 4배 (3.0→12.0)
 
 ---
 
