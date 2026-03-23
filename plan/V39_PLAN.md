@@ -84,22 +84,23 @@ def phase_contact_reward(env):
 
 ## 3. 구현 단계 (교훈 #12: 한 번에 하나만)
 
-### Phase 1: CPG만 추가 (V39.0)
+### Phase 1: CPG + 주파수 스윕 (V39.1~V39.3)
 
 - Phase clock observation 8차원 추가
 - phase_contact_reward 1개만 추가
 - **기존 50개 reward 그대로 유지** (정리는 나중)
 - Soft CaT 그대로 유지
 - from-scratch
+- **3개 주파수 병렬 테스트** (각 iter 1000 판정)
 
-**판정**: iter 1000에서 phase_contact_reward > 0이면 Phase 2 진행
+**판정**: phase_contact_reward가 전체 reward의 5% 이상 기여하는 주파수 선택
 
-### Phase 2: 주파수 확정 — 필수 스윕 (V39.0~V39.2)
+### Phase 2: 주파수 확정 — 필수 스윕 (V39.1~V39.3)
 
 **Phase 1 결과에 관계없이** 3개 주파수를 짧게 테스트:
-- V39.0: **2.0 Hz** (Solo-12 기준, 첫 시도)
-- V39.1: **1.5 Hz** (SpotMicro 짧은 다리 보정)
-- V39.2: **2.5 Hz** (빠른 주기)
+- **V39.1**: **2.0 Hz** (Solo-12 기준, 첫 시도)
+- **V39.2**: **1.5 Hz** (SpotMicro 짧은 다리 보정)
+- **V39.3**: **2.5 Hz** (빠른 주기)
 
 각 iter 1000에서 판정:
 - phase_contact_reward 전체 reward의 5% 이상 기여하는 주파수 선택
@@ -108,7 +109,7 @@ def phase_contact_reward(env):
 
 **주파수 스윕은 리스크 완화가 아닌 필수 운영 계획**
 
-### Phase 3: Reward 정리 (V39.3)
+### Phase 3: Reward 정리 (V39.4+)
 
 Phase 1~2에서 확정된 CPG 설정 위에 reward 정리:
 - 50→25개 (중복 제거, front/rear 통합)
