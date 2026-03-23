@@ -102,10 +102,16 @@ def phase_contact_reward(env):
 - frequency: 2.0 Hz 유지
 - incentive: +3.0→+12.0 (4배 개선)
 
-### Step 2: 확정 주파수 본실험
+**V39.1.1 스크리닝 결과**: **PASS**
+- iter 800~1000 평균: phase_contact=4.92 (baseline 0, 실질 신호 확인)
+- agent가 phase clock을 따르기 시작
+- 15000 iter 완주로 전환
 
-Step 1에서 선정된 주파수로 **단일 run 15000 iter 완주**:
-- 확정 주파수의 V39.x run을 그대로 이어서 진행 (이미 1000 iter 완료)
+### Step 2: V39.1.1 본실험 (진행 중)
+
+Run `2026-03-23_22-14-10`, 15000 iter 완주 진행:
+- 2.0 Hz, reward shape +1/-1, weight 20
+- iter 5000+에서 2축 판정 (최근 500 iter 평균)
 - iter 5000+ 시점에서 2축 판정 (최근 500 iter 평균 기준)
 
 ### Step 3: Reward 정리 (V39.4+)

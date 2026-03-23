@@ -46,13 +46,30 @@
 **V38 시리즈 결론**: CaT로 0.54→0.45 달성. 그 이상은 벌칙만으로 한계.
 **V38.3.1 실패**: resume + L2 강화 시도 → critic 무효화 + curriculum 미복원으로 성과 소실.
 
-**현재**: V39.1.1 훈련 대기 (CPG Phase Clock 2.0 Hz + reward shape 수정)
+**현재**: V39.1.1 훈련 중 (iter 1354 / 15000) — **스크리닝 통과, 15000 iter 완주 진행**
 
 **V39 경과**:
 - V39.1 (2.0 Hz): phase_contact raw=0.507 (baseline=0.50) → **reward shape 결함 발견**
   - match=1/mismatch=0 → 공짜 baseline 0.50. agent가 phase를 따를 동기 없음
   - 주파수 스크리닝 중단, reward shape 수정으로 전환
-- V39.1.1: match=+1/mismatch=-1 + weight 10→20. incentive 4배 (3.0→12.0)
+- **V39.1.1** (2.0 Hz, shape +1/-1, weight 20): **스크리닝 PASS** (phase=4.92, baseline=0)
+  - Run: `2026-03-23_22-14-10`
+  - phase_contact 양수 = agent가 phase clock 따르기 시작
+
+### V39.1.1 진행 데이터 (iter 1354)
+
+| iter | reward | ep_len | shoulder dev | phase | stride | FL/FR | splay% |
+|------|--------|--------|-------------|-------|--------|-------|--------|
+| 400 | 170.1 | 242 | 0.516 | 2.74 | 2.92 | 0.75/0.72 | 0.0% |
+| 600 | -3.5 | 248 | 0.535 | 4.18 | 5.08 | 0.84/0.82 | 0.0% |
+| 800 | -137.4 | 248 | 0.518 | 4.92 | 5.25 | 0.86/0.83 | 0.0% |
+| 1000 | -96.3 | 249 | 0.520 | 4.88 | 5.22 | 0.85/0.84 | 3.2% |
+| 1200 | -18.4 | 244 | 0.515 | 5.35 | 5.51 | 0.84/0.83 | 6.4% |
+
+- phase_contact: 상승 추세 (2.74→5.35) — phase following 개선 중
+- CaT splay: iter 800부터 활성화 (3.2%→6.4%)
+- shoulder dev: 0.515~0.520 — 아직 초기, CaT 압력 축적 중
+- 판정: iter 5000+ (최근 500 iter 평균)
 
 ---
 
