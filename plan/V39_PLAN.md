@@ -34,8 +34,9 @@
 
 ### V39 목표
 
-- **1차**: 정상 trot 달성 (앞발 과고정 해결, phase reward > 0)
-- **2차**: shoulder dev 0.45 → 0.30 이하 (가설 A 입증 시)
+- **궁극 목표**: shoulder dev 0.30 이하
+- **V39 1차 기대치**: shoulder dev **0.38~0.42** (V38.3의 0.45 대비 명확한 개선)
+- **최소 성공 기준**: shoulder dev < 0.45 + 정상 trot (V38.3 대비 개선)
 - ep_len > 200, stride > 6.0 유지
 
 ---
@@ -93,14 +94,19 @@ def phase_contact_reward(env):
 
 **판정**: iter 1000에서 phase_contact_reward > 0이면 Phase 2 진행
 
-### Phase 2: 주파수 확정 (V39.0~V39.2)
+### Phase 2: 주파수 확정 — 필수 스윕 (V39.0~V39.2)
 
-3개 주파수 병렬 테스트 (각 iter 1000에서 판정):
-- V39.0: 1.5 Hz
-- V39.1: 2.0 Hz
-- V39.2: 2.5 Hz
+**Phase 1 결과에 관계없이** 3개 주파수를 짧게 테스트:
+- V39.0: **2.0 Hz** (Solo-12 기준, 첫 시도)
+- V39.1: **1.5 Hz** (SpotMicro 짧은 다리 보정)
+- V39.2: **2.5 Hz** (빠른 주기)
 
-**판정**: phase_contact_reward가 가장 높은 주파수 선택
+각 iter 1000에서 판정:
+- phase_contact_reward 전체 reward의 5% 이상 기여하는 주파수 선택
+- 복수 통과 시: FL/FR contact ratio가 가장 낮은 주파수 선택
+- 전부 실패 시: 1.0 Hz / 3.0 Hz 확장 스윕
+
+**주파수 스윕은 리스크 완화가 아닌 필수 운영 계획**
 
 ### Phase 3: Reward 정리 (V39.3)
 
@@ -192,23 +198,34 @@ Trot 부분 학습, 앞발 소폭 개선. shoulder dev는 V38.3(0.45)보다 소�
 
 | 지표 | 통과 | 실패 |
 |------|------|------|
-| phase_contact_reward | > 0 | ≈ 0 → 주파수 변경 |
+| phase_contact_reward | **전체 reward의 5% 이상 기여** | ≈ 0 또는 미미 → 주파수 변경 |
 | ep_len | > 200 | < 150 → 부팅 실패 |
+| diagonal_coupling_raw | phase reward와 동시 상승 | 하락 → phase/gait 충돌 |
 
-### 최종 판정 (iter 5000+)
+### 최종 판정 (iter 5000+) — 2축 분리 판정
 
-필수:
-1. phase_contact_reward > 0 (trot 학습됨)
-2. ep_len > 200
-3. shoulder dev 감소 추세 확인 (가설 검증)
+**Axis 1: Splay/Posture 개선**
+1. shoulder dev < 0.42 (V38.3의 0.45 대비 개선)
+2. splay% 감소 추세 (CaT 작동 확인)
 
-보조:
-4. stride > 6.0
-5. FL/FR contact ratio < 0.70
+**Axis 2: Gait 구조 개선**
+3. phase_contact_reward 전체 reward의 5% 이상 (phase를 실질적으로 따르는지)
+4. FL/FR contact ratio < 0.70 (앞발 과고정 해결)
+5. diagonal_coupling_raw 유지 또는 개선
+6. gait_symmetry: rear pair 비대칭 감소
 
-가설 검증:
-6. shoulder dev가 phase reward와 동시에 감소 → 가설 A (splay = gait 부산물)
-7. shoulder dev 변화 없이 FL contact만 감소 → 가설 B (splay 독립 문제) → CaT prob 추가 상향
+**공통:**
+7. ep_len > 200
+8. stride > 6.0
+
+**판정 매트릭스:**
+
+| Axis 1 (splay) | Axis 2 (gait) | 판정 |
+|----------------|---------------|------|
+| 개선 | 개선 | **완전 성공** — 가설 A 입증 |
+| 미변화 | 개선 | **부분 성공** — gait OK, splay는 독립 문제 → CaT 상향 |
+| 개선 | 미변화 | **의외** — phase 없이 splay 감소? 원인 분석 필요 |
+| 미변화 | 미변화 | **실패** — 주파수/weight 조정 또는 구조 재설계 |
 
 ---
 
