@@ -44,11 +44,12 @@
 - splay 30% 안정, ep_len 216, stride 7.23
 
 **V38 시리즈 결론**: CaT로 0.54→0.45 달성. 그 이상은 벌칙만으로 한계.
+**V38.3.1 실패**: resume + L2 강화 시도 → critic 무효화 + curriculum 미복원으로 성과 소실.
 
-**다음 단계**: V39 설계 중 (`plan/V39_PLAN.md`)
-- 후보 A: CaT + L2 병행 (저위험, 빠른 검증)
-- 후보 B: Reward 구조 개편 (50→25개)
-- 후보 C: CPG/Phase Clock (구조적 gait 유도)
+**다음 단계**: V39 CPG/Phase Clock (`plan/V39_PLAN.md`)
+- 후보 A (CaT+L2 병행) 실패 확인 → resume 중 reward 변경 불가
+- **후보 C (CPG/Phase Clock)로 전환** — from-scratch, 구조적 gait 유도
+- reward 정리(후보 B)는 CPG 구현 시 병행
 
 ---
 

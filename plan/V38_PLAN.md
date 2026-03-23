@@ -198,6 +198,14 @@ CaT는 "나쁜 자세를 벌주는" 채널이지, "좋은 자세를 보상하는
 
 **조기 중단 사유**: iter 3000 이후 수렴 확정, 잔여 9000 iter (~50시간) GPU 시간 절약
 
+### V38.3.1 시도 (실패 — resume + L2 강화)
+
+- shoulder_neutral weight -6.0→-12.0으로 변경 후 V38.3 model_6400.pt에서 resume
+- **결과**: resume 충격으로 shoulder dev 0.45→0.544 완전 복귀. CaT 3000 iter 성과 소실
+- **원인 1**: reward weight 2배 변경 → critic value 추정 무효화 (교훈 #4)
+- **원인 2**: Isaac Lab resume은 curriculum 상태를 복원하지 않음 → CaT ramp가 iter 0부터 재시작
+- **교훈**: resume 중 reward weight 변경은 사실상 from-scratch. curriculum 의존 모델은 resume 불가
+
 ---
 
 ## V38 시리즈 최종 요약
@@ -224,3 +232,5 @@ CaT는 "나쁜 자세를 벌주는" 채널이지, "좋은 자세를 보상하는
 6. **CaT에도 local optimum 한계 존재** — 벌칙만으로는 한계, positive incentive 필요
 7. **CaT 효과 판정은 "작동"과 "교정"을 구분** — splay% 상승 ≠ 성공, 4개 지표 동시 확인 필수
 8. **수렴 확정 시 조기 중단** — 정체 구간에서 GPU 시간 낭비 금지
+9. **resume 중 reward weight 변경 금지** — critic 무효화로 성과 소실 (교훈 #4 재확인)
+10. **Isaac Lab resume은 curriculum 미복원** — CaT ramp 등 curriculum 의존 모델은 resume 후 ramp 재시작됨
