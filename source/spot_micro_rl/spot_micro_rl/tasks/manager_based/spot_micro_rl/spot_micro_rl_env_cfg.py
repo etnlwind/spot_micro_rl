@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V39.1"
+TRAIN_VERSION = "V39.1.1"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -541,7 +541,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V39: Phase-conditioned contact reward (CPG trot 유도)
         self.rewards.phase_contact = RewTerm(
             func=custom_mdp.phase_contact_reward,
-            weight=10.0,
+            weight=20.0,  # V39.1.1: 10→20 (shape +1/-1 수정과 함께)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "frequency": 2.0,

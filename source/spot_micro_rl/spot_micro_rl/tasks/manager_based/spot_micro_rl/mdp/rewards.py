@@ -99,9 +99,10 @@ def phase_contact_reward(
     # Expected contact state: stance → 1 (should touch), swing → 0 (should lift)
     expected_contact = (phase_norm < stance_threshold).float()
 
-    # Reward: 1 if actual matches expected, 0 otherwise
+    # Reward: +1 if match, -1 if mismatch → baseline=0 (no free lunch)
     match = (is_contact == expected_contact).float()
-    return match.mean(dim=1)  # 4다리 평균
+    score = 2.0 * match - 1.0  # match=1→+1, mismatch=0→-1
+    return score.mean(dim=1)  # 4다리 평균, 범위 [-1, +1]
 
 
 def _contact_force_peak(contact_sensor: ContactSensor, body_ids) -> torch.Tensor:
