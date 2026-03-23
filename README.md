@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V38.1 훈련 중 (CaT: shoulder splay 위반 시 확률적 에피소드 종료로 anti-splay 해결 시도)
+**현재 상태**: V39 설계 중 (CPG/Phase Clock + Soft CaT + Reward 정리). V38 시리즈에서 CaT로 shoulder dev 0.54→0.45 달성, 0.45 이하는 구조적 gait 유도 필요.
 
 ### 기술 스택
 
@@ -209,34 +209,40 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V38.1` (CaT: Constraints as Terminations for anti-splay)
+- 학습 버전: `V38.3` 완료, `V39` 설계 중 (CPG/Phase Clock)
 - active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
-- 참고 문서: `plan/V38_PLAN.md` (현재), `plan/HANDOFF.md`, `plan/QUADRUPED_RL_RESEARCH.md`
+- 참고 문서: `plan/V39_PLAN.md` (다음), `plan/V38_PLAN.md` (완료), `plan/HANDOFF.md`
 
 ---
 
 ## Reward Design
 
-### V38.1 CaT (Constraints as Terminations) 커리큘럼 (현재)
+### V38.3 Soft CaT (현재 최종)
 
-V37.2에서 L2 penalty의 구조적 한계 확인 후, **CaT 방식**으로 전환:
+V37.2에서 L2 penalty의 구조적 한계 확인 후, **CaT → Soft CaT**로 발전:
 - L2 penalty는 reward 채널 — agent가 다른 양의 보상으로 상쇄 가능
 - CaT는 **discount factor 채널** — terminated=True면 미래 보상=0, 상쇄 불가
+- **Soft CaT** (V38.2+): 종료 확률이 dev에 비례 → phase transition 제거
+
+```
+prob(dev) = base_prob × clamp((max_dev - threshold) / margin, 0, 1)
+```
 
 | 구간 | Iteration 범위 | 내용 |
 |------|----------------|------|
 | Boot Phase | 0 ~ 300 | alive_bonus(+10/step), undesired_contacts -20→-100 ramp, 저속 command |
 | Velocity Restore | 0 ~ 500 | lin_vel_x (0.01,0.05) → (0.1,0.5) 선형 복원 |
-| Splay L2 (고정) | 500+ | shoulder -6.0 고정 (L2 weight escalation 중단) |
-| **CaT Ramp** | **800 ~ 2500** | **shoulder splay > threshold → 확률적 에피소드 종료** |
+| Splay L2 (고정) | 500+ | shoulder -6.0 고정 |
+| **Soft CaT Ramp** | **800 ~ 3000** | **probability 0→0.0015 ramp (threshold 0.3, margin 0.3 고정)** |
 | STAND→WALK Ramp | 1500 ~ 3000 | V32.1 soft-ramp 커리큘럼 |
 | WALK→TROT Ramp | 5500 ~ 8000 | 전체 gait 보상 활성 |
 
-**CaT 파라미터** (V38.1 — V38 붕괴 교훈 반영):
-- `threshold`: 0.8 → 0.45 (V38: 0.6→0.4에서 즉시 붕괴, 여유 확대)
-- `probability`: 0.03 → 0.15 (V38: 0.1→0.3에서 과도 종료, 대폭 완화)
-- `cat_ramp`: iter 800~2500 (V38: 500~1500에서 부팅 직후 충격, 시작 지연)
+**Soft CaT 결과** (V38.3): shoulder dev 0.54→0.45 (-16%), 0.45에서 local optimum 정체.
+
+### V39 방향 (다음)
+
+Soft CaT 유지 + **CPG/Phase Clock**으로 구조적 gait 유도 + reward 50→25개 정리. 상세: `plan/V39_PLAN.md`
 
 **부팅 안정화** (V35.5 검증 완료):
 - `alive_bonus=10.0`: 매 step 생존 보상
@@ -248,21 +254,21 @@ V37.2에서 L2 penalty의 구조적 한계 확인 후, **CaT 방식**으로 전�
 - `feet_air_time` threshold 0.25 (0.3에서 하향)
 - `swing_stride` weight 4.0 (2.0에서 강화)
 
-### V38.1 Reward Architecture
+### Reward Architecture (V38.3)
 
-V32.1 보상 구조 기반 + multi-layer 커리큘럼 + CaT:
+V32.1 보상 구조 기반 + multi-layer 커리큘럼 + Soft CaT:
 
 **부팅 안정화**: `alive_bonus(+10.0)`
 
-**자세 제어**: `standing_height(+10)`, `base_height_l2(-15, target 0.23)`, `flat_orientation_l2(-7)`, `shoulder_neutral(-6.0 고정)`, `stance_width_penalty(-3.0 고정)`
+**자세 제어**: `standing_height(+10)`, `base_height_l2(-15)`, `flat_orientation_l2(-7)`, `shoulder_neutral(-6.0)`, `stance_width(-3.0)`
 
-**CaT (V38 신규)**: `shoulder_splay` DoneTerm — splay > threshold면 확률적 에피소드 종료
+**Soft CaT**: `shoulder_splay` DoneTerm — dev에 비례한 확률적 에피소드 종료 (prob 0.0015)
 
-**Gait 패턴**: `feet_air_time(+20, thr=0.25)`, `diagonal_coupling(+25)`, `gait_cycle_period(+15)`, `trot_gait(+15)`
+**Gait 패턴**: `feet_air_time(+20)`, `diagonal_coupling(+25)`, `gait_cycle_period(+15)`, `trot_gait(+15)`
 
 **전진/보행**: `forward_velocity(+8)`, `stance_propulsion(+8)`, `rear_joint_velocity(+12)`, `stride_length(+15 ramp)`, `swing_stride(+4)`
 
-**Multi-layer 커리큘럼**: boot_ramp → stride_ramp → **CaT_ramp** → STAND→WALK → WALK→TROT
+**Multi-layer 커리큘럼**: boot_ramp → stride_ramp → **Soft CaT ramp** → STAND→WALK → WALK→TROT
 
 ### 리워드 함수 패턴
 
@@ -338,7 +344,10 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V37** | **03-20** | **Anti-splay 커리큘럼: shoulder -6→-15, stance -3→-8, height 0.23→0.22** | ❌ 실패 (iter 600에서 보행 붕괴, 리스크#1 적중) |
 | **V37.2** | **03-20** | **V37 완화: shoulder만 -6→-10, ramp 500~1500, stance/height 변경 없음** | 🟡 L2 한계 확인 (splay 0.532, 행동 변화 없음) |
 | **V38** | **03-21** | **CaT (Constraints as Terminations): shoulder splay → 확률적 종료** | ❌ 실패 (threshold 0.6 너무 타이트, iter 600 즉시 붕괴) |
-| **V38.1** | **03-21~** | **V38 완화: threshold 0.8→0.45, prob 0.03→0.15, ramp 800~2500** | 🔄 훈련 중 |
+| **V38.1** | **03-21** | **V38 완화: threshold 0.8→0.45, prob 0.03→0.15** | ❌ 실패 (phase transition, splay 57%) |
+| **V38.2** | **03-21~03-22** | **Soft CaT: prob ∝ dev, phase transition 제거** | 🟡 안정적이나 prob 0.0004 너무 약함 (shoulder dev 0.52 정체) |
+| **V38.3** | **03-22~03-23** | **Soft CaT prob 0.0015 (3.75x)** | 🟡 shoulder dev 0.54→0.45 (-16%, 역대 최대), 0.45 local optimum |
+| **V38.3.1** | **03-23** | **CaT + L2 병행 (resume + weight -12)** | ❌ 실패 (critic 무효화 + curriculum 미복원) |
 
 ### 핵심 교훈
 
@@ -362,6 +371,11 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 - **Barrier 함수, CaT(제약→종료) 등 최신 기법이 weight 커리큘럼보다 깔끔할 수 있음** (QUADRUPED_RL_RESEARCH.md 참조)
 - **CaT threshold는 실측 dev에 충분한 여유 필요**: V38에서 dev 0.54 대비 threshold 0.6으로 즉시 붕괴. 초기 threshold는 실측의 1.5배 이상 권장
 - **CaT probability는 극히 낮게 시작**: 0.1도 과도. 0.03~0.05에서 시작하여 점진 강화
+- **DoneTerm은 매 step 호출**: probability 설계 시 `(1-p)^ep_len`으로 에피소드 생존율 역산 필수
+- **Soft CaT는 phase transition 없이 안정적**: threshold 고정 + prob만 ramp → dev에 비례한 연속 압력
+- **CaT에도 local optimum 한계**: 벌칙만으로는 0.45 이하 불가, positive incentive + 구조적 gait 유도 필요
+- **resume 중 reward weight 변경 금지**: critic 무효화로 기존 성과 소실 (교훈 #4 재확인)
+- **Isaac Lab resume은 curriculum 미복원**: CaT ramp 등 curriculum은 iter 0부터 재시작됨
 
 ---
 
