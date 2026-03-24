@@ -46,7 +46,7 @@
 **V38 시리즈 결론**: CaT로 0.54→0.45 달성. 그 이상은 벌칙만으로 한계.
 **V38.3.1 실패**: resume + L2 강화 시도 → critic 무효화 + curriculum 미복원으로 성과 소실.
 
-**현재**: V39.1.1 조기 중단 (iter 4500). Reward 구조 분석 완료. 새 방향 검토 중.
+**현재**: V40-A 진행 중 (iter 4200). **0.45 돌파 성공, 0.384 도달. 새 plateau + ep_len 170.**
 
 **V39 경과**:
 - V39.1 (2.0 Hz): reward shape 결함 (공짜 baseline 0.50) → FAIL
@@ -82,17 +82,26 @@
 - CaT 30% 압력 하의 안전한 local optimum에 갇힘
 - contact가 안 무너지므로 CaT prob 추가 상향이 가능
 
-### 다음 단계: V40 실험 계획 (`plan/V40_PLAN.md`)
+### V40-A 결과 (CaT prob 0.003, 단일 변수) — `plan/V40_PLAN.md`
 
-**V40-A: 탐색 촉진 + Positive Incentive** (1순위)
-- contact 보호가 아닌 "탐색 촉진"으로 방향 전환
-- CaT prob 추가 상향 (contact 안 무너지니 가능)
-- positive posture reward (어깨 모으면 직접 보상)
-- CPG phase reward 강화 (V39.1.1보다 강한 weight)
+**가설 A 확정: CaT 압력 부족이 0.45 plateau의 원인.**
 
-**V40-B: Target band 편향 점검** → 정규화 분석으로 편향 없음 확인, 우선순위 하향
+| iter | shoulder dev | splay% | ep_len | stride |
+|------|-------------|--------|--------|--------|
+| 2000 | 0.448 | 31.9% | 210 | 6.09 |
+| 2500 | **0.416** | 42.1% | 198 | 5.71 |
+| 3000 | **0.386** | 51.0% | 177 | 5.47 |
+| 4000 | **0.384** | 51.1% | 170 | 5.18 |
 
-**V40-C: 구조적 검증** (A 실패 시)
+- 0.45→0.384 (-16%), 0.42 판정 기준 달성
+- 새 plateau 0.384 + ep_len 170 (splay 51%)
+- CaT prob 단독 상향의 천장 ~0.38
+
+### 다음 후보
+
+- prob 유지 + **positive posture reward** → ep_len 회복 + dev 추가 감소
+- prob 0.002 중간값 → ep_len 200+ 유지하면서 dev 0.40
+- **num_envs 8192** → 탐색 다양성으로 plateau 돌파
 
 ---
 
