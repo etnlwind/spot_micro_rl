@@ -46,30 +46,38 @@
 **V38 시리즈 결론**: CaT로 0.54→0.45 달성. 그 이상은 벌칙만으로 한계.
 **V38.3.1 실패**: resume + L2 강화 시도 → critic 무효화 + curriculum 미복원으로 성과 소실.
 
-**현재**: V39.1.1 훈련 중 (iter 1354 / 15000) — **스크리닝 통과, 15000 iter 완주 진행**
+**현재**: V39.1.1 조기 중단 (iter 4500). Reward 구조 분석 완료. 새 방향 검토 중.
 
 **V39 경과**:
-- V39.1 (2.0 Hz): phase_contact raw=0.507 (baseline=0.50) → **reward shape 결함 발견**
-  - match=1/mismatch=0 → 공짜 baseline 0.50. agent가 phase를 따를 동기 없음
-  - 주파수 스크리닝 중단, reward shape 수정으로 전환
-- **V39.1.1** (2.0 Hz, shape +1/-1, weight 20): **스크리닝 PASS** (phase=4.92, baseline=0)
-  - Run: `2026-03-23_22-14-10`
-  - phase_contact 양수 = agent가 phase clock 따르기 시작
+- V39.1 (2.0 Hz): reward shape 결함 (공짜 baseline 0.50) → FAIL
+- V39.1.1 (shape +1/-1, weight 20): 스크리닝 PASS, 하지만 본실험 실패
+  - shoulder dev 0.438 (V38.3의 0.45 대비 -0.012, 미미)
+  - stride 7.23→4.40 (-39% 악화)
+  - **CPG가 splay 해결 못하고 stride만 악화**
 
-### V39.1.1 진행 데이터 (iter 1354)
+### Reward 구조 분석 결과
 
-| iter | reward | ep_len | shoulder dev | phase | stride | FL/FR | splay% |
-|------|--------|--------|-------------|-------|--------|-------|--------|
-| 400 | 170.1 | 242 | 0.516 | 2.74 | 2.92 | 0.75/0.72 | 0.0% |
-| 600 | -3.5 | 248 | 0.535 | 4.18 | 5.08 | 0.84/0.82 | 0.0% |
-| 800 | -137.4 | 248 | 0.518 | 4.92 | 5.25 | 0.86/0.83 | 0.0% |
-| 1000 | -96.3 | 249 | 0.520 | 4.88 | 5.22 | 0.85/0.84 | 3.2% |
-| 1200 | -18.4 | 244 | 0.515 | 5.35 | 5.51 | 0.84/0.83 | 6.4% |
+0.45 장벽의 원인: **물리적 접지 안정성 한계점**
+- 0.54→0.45: splay 줄이면 순이익 (+4.17) → CaT가 밀어넣음
+- 0.45 이하: contact_band 손실 > stance_w 이득 → 정체
+- 좁은 stance에서 접지 안정성이 급격히 떨어지는 것이 근본 원인
+- reward 조정만으로는 해결 불가
 
-- phase_contact: 상승 추세 (2.74→5.35) — phase following 개선 중
-- CaT splay: iter 800부터 활성화 (3.2%→6.4%)
-- shoulder dev: 0.515~0.520 — 아직 초기, CaT 압력 축적 중
-- 판정: iter 5000+ (최근 500 iter 평균)
+### 가설 검증 완료
+
+| 가설 | 결과 |
+|------|------|
+| L2 penalty로 splay 교정 (V37) | ❌ reward 채널 상쇄 |
+| CaT discount 채널 (V38) | 🟡 0.45까지만 |
+| CPG gait 교정 → splay 해결 (V39) | ❌ stride 악화, splay 미변화 |
+| reward 불균형이 원인 | 🟡 부분 — 0.45가 물리적 손익분기점 |
+
+### 다음 방향 (검토 중)
+
+0.45 이하는 기구학적 접근 필요:
+- A. shoulder joint limit 축소 (물리적으로 splay 불가능하게)
+- B. 좁은 stance에서도 안정적 보행 패턴 유도
+- C. base mass/inertia 조정
 
 ---
 

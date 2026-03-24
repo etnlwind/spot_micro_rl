@@ -234,3 +234,4 @@ CaT는 "나쁜 자세를 벌주는" 채널이지, "좋은 자세를 보상하는
 8. **수렴 확정 시 조기 중단** — 정체 구간에서 GPU 시간 낭비 금지
 9. **resume 중 reward weight 변경 금지** — critic 무효화로 성과 소실 (교훈 #4 재확인)
 10. **Isaac Lab resume은 curriculum 미복원** — CaT ramp 등 curriculum 의존 모델은 resume 후 ramp 재시작됨
+11. **0.45는 물리적 손익분기점** — V38.3 reward 추적 결과, 0.54→0.45는 splay 줄이면 순이익이지만 0.45 이하는 contact_band 손실이 stance_w 이득을 초과. reward 조정이 아닌 기구학적 해결 필요
