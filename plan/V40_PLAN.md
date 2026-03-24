@@ -91,16 +91,16 @@ dev 0.40에서: V38.3=12% vs V40-A=**22%** (거의 2배).
 |------|------|----------|
 | shoulder dev < 0.42, ep_len > 200 | **CaT 압력 부족이었음**. contact 문제 아님 | 완주, 성공 |
 | shoulder dev < 0.42, ep_len < 180 | CaT가 밀어넣었지만 **ep_len 붕괴** — contact 문제 존재 | prob 중간값(0.002) 시도 |
-| shoulder dev ≈ 0.45 정체, ep_len > 200 | **0.45가 CaT 구조적 한계** — prob 올려도 안 됨 | V40-B 또는 positive reward |
+| shoulder dev ≈ 0.45 정체, ep_len > 200 | **CaT prob 단독 상향으로는 불충분** — 다른 레버 필요 | V40-B 또는 positive reward |
 | shoulder dev ≈ 0.45 정체, ep_len < 180 | CaT 과압 + contact 문제 | prob 하향 + 다른 접근 |
 
 ### 리스크
 
-1. **ep_len 붕괴** — prob 0.003이면 dev 0.54에서 45% 종료. ep_len ~137 예상
+1. **ep_len 하락 리스크** — dev가 0.54에 머무르는 초기 구간에서 ep_len이 크게 악화될 위험
    - 하지만 dev가 내려가면 종료율도 내려감 (Soft CaT 특성)
-   - dev 0.45에서 31%, dev 0.40에서 22% — 적응하면 ep_len 회복 가능
+   - 적응 시 ep_len 회복 가능. 고정 dev 가정의 이론값보다 실제는 나을 수 있음
 2. **V38.3과 동일 결과** — 0.45에서 또 정체
-   - 이 경우 "CaT의 구조적 한계"가 확정, 다른 접근 필요
+   - 이 경우 CaT prob 단독 상향으로는 불충분. threshold/margin 조정 또는 다른 접근 필요
 
 ---
 
@@ -135,23 +135,26 @@ A, B 결과를 보고 결정.
 
 ### V40-A 판정 (iter 3000~5000, 최근 500 iter 평균)
 
-**성과 지표:**
-1. shoulder dev < 0.42 (V38.3의 0.45 대비 명확한 개선)
-2. splay% 추이 (상승→안정→재하락 패턴)
+**성과 지표 (주 판정은 shoulder dev 기준, splay%는 보조):**
+1. **shoulder dev < 0.42** (주지표 — V38.3의 0.45 대비 명확한 개선)
+2. splay% 추이 (보조 — 상승→안정→재하락 패턴)
 3. ep_len > 200
 4. stride > 5.0
 
 **원인 진단 지표** (왜 좋아졌는지/안 좋아졌는지):
-5. **policy entropy** — 탐색 여력 확인
+5. **policy entropy** — 구간별 추적:
+   - iter 0~500: 초기 탐색이 살아있는지
+   - iter 500~1500: CaT 활성화 전후 탐색 변화
+   - iter 1500~3000+: plateau 진입 시 탐색이 말라붙는지
 6. **contact_band per-step** (ep_len 정규화) — contact 안정성 실제 추이
 7. **late_phase_band_exit per-step** — narrow stance에서의 접지 품질
-8. **splay% vs shoulder dev 동시 추이** — CaT 적응 패턴
 
 ### 판정 원칙
 
+주 판정은 shoulder dev 기준, splay%는 보조적으로 확인.
 V40의 최종 성공은 shoulder dev < 0.42 + ep_len > 200 동시 달성.
-shoulder dev가 내려가면서 ep_len도 유지되면 "CaT 압력 부족" 확정.
-shoulder dev는 내려가지만 ep_len 붕괴하면 "contact 문제 여전히 존재".
+shoulder dev가 내려가면서 ep_len도 유지되면 가설 A(CaT 압력 부족) 지지.
+shoulder dev는 내려가지만 ep_len 붕괴하면 가설 B(contact 문제 존재) 지지.
 
 ---
 
