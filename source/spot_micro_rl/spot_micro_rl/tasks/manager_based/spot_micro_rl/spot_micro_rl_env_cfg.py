@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V39.1.1"
+TRAIN_VERSION = "V40-A"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -275,7 +275,7 @@ class SpotMicroRewardCurriculumCfg:
             "cat_ramp_end": 3000,
             "cat_threshold": 0.3,
             "cat_margin": 0.3,
-            "cat_probability_final": 0.0015,
+            "cat_probability_final": 0.003,  # V40-A: 0.0015→0.003 (2x, 가설 A/B 검증)
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
@@ -320,11 +320,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.height_scanner = None
         self.observations.policy.height_scan = None
 
-        # V39: Phase clock observation (8-dim: sin/cos × 4 legs)
-        self.observations.policy.phase_clock = ObsTerm(
-            func=custom_mdp.phase_clock_obs,
-            params={"frequency": 2.0},
-        )
+        # V39 phase clock 제거 — V40은 V38.3 구성 복귀 (observation 48차원)
 
         # Terminations: base_contact 비활성화
         self.terminations.base_contact = None
@@ -538,17 +534,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # V39: Phase-conditioned contact reward (CPG trot 유도)
-        self.rewards.phase_contact = RewTerm(
-            func=custom_mdp.phase_contact_reward,
-            weight=20.0,  # V39.1.1: 10→20 (shape +1/-1 수정과 함께)
-            params={
-                "sensor_cfg": toe_contact_sensor_cfg,
-                "frequency": 2.0,
-                "duty_factor": 0.5,
-                "contact_threshold": 1.0,
-            },
-        )
+        # V39 phase_contact 제거 — V40은 CaT prob 단일 변수 실험
 
         # V17: 발 높이 보상 (target_clearance 낮춤 — 6cm 보폭)
         self.rewards.foot_clearance = RewTerm(

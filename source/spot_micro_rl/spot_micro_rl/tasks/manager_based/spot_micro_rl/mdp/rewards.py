@@ -3329,7 +3329,7 @@ def reward_weight_curriculum(
     cat_ramp_end: int = 0,
     cat_threshold: float = 0.3,
     cat_margin: float = 0.3,
-    cat_probability_final: float = 0.0015,
+    cat_probability_final: float = 0.003,
     # 업데이트 주기
     update_interval: int = 10,  # ramp 중 N iteration마다 가중치 갱신
     # Metric gating (보행 구조 보호)
