@@ -7,28 +7,33 @@
 
 ## 1. Context
 
-### 현재까지 확인된 것
+### 확인된 사실
 
 1. **CaT는 0.54→0.45까지 효과적** — Soft CaT (prob 0.0015, 30% 에피소드 종료)로 달성
 2. **0.45에서 plateau 형성** — 3000 iter 이상 정체
 3. **V39.1.1 CPG는 phase following이 약했음** (raw 0.26) — 유도 부족이지 불가능이 아님
-4. **ep_len 정규화 시 per-step contact/propulsion은 안정적** — contact_band 하락은 ep_len 감소의 confound 가능성
 
-### 아직 미확정인 것
+### 0.45 plateau 원인: 두 가지 경쟁 가설
 
-1. ep_len 정규화 결과가 "contact 완전 무관"을 의미하는지 — **과도한 해석 주의**
-   - 정규화된 episode 평균이 유지된다고 해서, 좁은 stance에서의 접지 분산/안정성/넘어짐 직전 품질이 동일하다고 단정할 수 없음
-   - "ep_len confound는 있다"는 맞지만 "contact는 무관하다"는 아직 이름
-2. 0.45 plateau가 policy 탐색 한계인지, contact 안정성 한계인지, reward target 편향인지
-3. CaT prob를 더 올리면 실제로 0.45 이하로 내려가는지
+**가설 A: CaT 압력 부족**
+- ep_len 정규화 분석에서 per-step contact/propulsion은 splay 수준과 무관하게 안정적
+- 이것이 맞다면 CaT prob를 올려도 contact가 무너지지 않으므로, 더 강한 압력으로 0.45를 돌파 가능
+- 단, 정규화 평균이 안정적이라고 해서 좁은 stance에서의 접지 분산/안정성까지 동일하다는 보장은 없음
+
+**가설 B: 좁은 stance에서의 접지 안정성 한계**
+- CaT가 더 강해져도 좁은 stance에서 넘어지거나 접지 품질이 떨어져 ep_len 붕괴
+- 정규화 평균은 유지되더라도 극단 구간(넘어지기 직전)에서의 품질 저하가 plateau 원인
+
+**현재 유력**: 가설 A가 유력하지만 확정 아님. V40-A 실험으로 직접 검증.
 
 ### 핵심 질문
 
 **"CaT prob를 0.003으로 올리면 0.45 plateau를 돌파할 수 있는가?"**
 
-이 실험 하나로 두 가지를 동시 검증:
-- **돌파 성공** → 0.45에서 멈춘 건 CaT 압력 부족이었음
-- **ep_len 붕괴** → 정규화 분석이 과도했음, contact 문제가 여전히 존재
+이 단일 변수 실험으로 가설 A/B를 구분:
+- **shoulder dev < 0.42 + ep_len > 200** → 가설 A 지지 (CaT 압력 부족이었음)
+- **ep_len < 180 붕괴** → 가설 B 지지 (contact 문제 여전히 존재)
+- **shoulder dev ≈ 0.45 정체 + ep_len 유지** → 둘 다 아닌 새로운 한계
 
 ---
 
