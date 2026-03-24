@@ -72,12 +72,24 @@
 | CPG gait 교정 → splay 해결 (V39) | ❌ stride 악화, splay 미변화 |
 | reward 불균형이 원인 | 🟡 부분 — 0.45가 물리적 손익분기점 |
 
-### 다음 방향 (검토 중)
+### 현재 위치 해석
 
-0.45 이하는 기구학적 접근 필요:
-- A. shoulder joint limit 축소 (물리적으로 splay 불가능하게)
-- B. 좁은 stance에서도 안정적 보행 패턴 유도
-- C. base mass/inertia 조정
+V38.3의 변화량 분석 결과, splay 억제는 0.54→0.45 구간까지는 실제로 순이익이었으며 CaT가 효과적으로 작동했다. 그러나 0.45 이하에서는 shoulder dev를 더 줄일수록 contact/propulsion 안정성 손실이 자세 관련 이득을 상회하여 plateau가 형성된다. 따라서 현재 병목은 단순 posture penalty 부족이 아니라, 좁은 stance에서 접지 안정성을 유지하지 못하는 보행 패턴 또는 target band 구조에 있으며, 이를 기구학적 한계로 단정하기 전에 narrow-stance gait가 가능한지와 contact/propulsion reward 정의의 편향을 먼저 검증할 필요가 있다.
+
+### 다음 방향 (우선순위 순)
+
+**1순위: narrow-stance gait 학습 가능성 검증**
+- "splay를 줄이면 contact가 무너진다 → contact를 유지하는 다른 보행 패턴이 학습 가능한가?"
+- V39.1.1 CPG는 phase following이 약했음 (raw 0.26) — 유도 실패가 불가능을 의미하진 않음
+
+**2순위: contact/propulsion target band 편향 검토**
+- contact_target_band가 wide stance에 유리하게 정의되어 있는지
+- propulsion_target_band가 narrow stance를 불리하게 두는지
+
+**3순위: 구조적 검토 (1, 2 실패 시)**
+- shoulder joint limit 축소
+- action space 제한
+- base mass/inertia 조정
 
 ---
 

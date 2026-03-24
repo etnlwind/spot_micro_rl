@@ -149,12 +149,11 @@ V38.3에서 shoulder dev 감소 시 reward 변화를 추적한 결과:
 
 ### 새 방향
 
-0.45 이하 진입에는 **reward 조정이 아닌 기구학적 해결**이 필요:
-- 좁은 stance에서도 안정적으로 접지할 수 있는 보행 패턴
-- 또는 shoulder joint limit 축소로 splay 가능 범위 자체를 제한
-- 또는 base mass/inertia 조정으로 안정성 요구치 변경
+현재 병목은 단순 posture penalty 부족이 아니라, **좁은 stance에서 접지 안정성을 유지하지 못하는 보행 패턴 또는 target band 구조**에 있다. 기구학적 한계로 단정하기 전에 아래 순서로 검증 필요:
 
-상세 분석: `plan/V40_PLAN.md` (예정)
+**1순위**: narrow-stance gait가 학습 가능한지 (V39.1.1 CPG는 phase following이 약해서 미검증)
+**2순위**: contact/propulsion target band가 wide stance 편향인지 검토
+**3순위**: joint limit, action space, mass 등 구조적 검토 (1, 2 실패 시)
 
 ---
 
