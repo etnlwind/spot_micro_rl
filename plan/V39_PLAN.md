@@ -137,7 +137,10 @@ V38.3에서 shoulder dev 감소 시 reward 변화를 추적한 결과:
 - **0.54→0.45**: splay 줄이면 순이익 → CaT가 여기까지 밀어넣음
 - **0.45 이하**: contact_band 손실 > stance_w 이득 → 정체
 
-**핵심**: 0.45는 reward 불균형이 아니라 **좁은 stance에서 접지 안정성이 급격히 떨어지는 물리적 한계점**. per_leg_contact_target_band가 0.45 이하에서 빠르게 감소하는 것은 실제로 접지가 불안정해지기 때문.
+**⚠️ 후속 분석으로 수정됨** (V40_PLAN.md 참조):
+ep_len으로 정규화하면 per-step contact/propulsion은 splay와 무관하게 동일.
+contact_band 하락은 CaT 에피소드 단축에 의한 누적값 감소일 뿐.
+0.45 plateau의 원인은 "contact 손실"이 아니라 "policy 탐색 한계" (entropy 수렴).
 
 ### 기존 가설 검증 결과
 

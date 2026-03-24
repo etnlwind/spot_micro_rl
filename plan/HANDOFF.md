@@ -74,23 +74,25 @@
 
 ### 현재 위치 해석
 
-V38.3 변화량 분석 결과, CaT는 shoulder dev를 0.54에서 0.45까지 낮추는 데 실제로 효과가 있었다. 다만 0.45 이하에서는 contact/propulsion 안정성 손실이 자세 개선 이득을 상회해 plateau가 형성되었다. V39.1.1의 CPG 실험은 narrow-stance gait의 불가능성을 증명한 것이 아니라, phase 유도 강도가 부족해 정책이 이를 충분히 따르지 않은 사례로 해석하는 것이 타당하다. 따라서 다음 단계는 narrow stance에서도 contact stability를 유지하는 gait를 더 강하게 유도할 수 있는지와, contact/propulsion target band 정의가 wide-stance 편향인지 먼저 검증하는 것이다.
+**중요 발견 (ep_len 정규화 분석):**
+이전 분석에서 "0.45 이하에서 contact 손실"로 결론지었으나, ep_len으로 정규화하면 **per-step contact/propulsion 품질은 splay와 무관하게 동일**. contact_band 하락은 CaT 에피소드 단축에 의한 누적값 감소일 뿐, 실제 접지 안정성 저하가 아님.
 
-### 다음 단계: V40 실험 계획
+따라서 0.45 plateau의 원인은 "contact 손실"이 아니라 **"policy의 탐색 한계"**:
+- entropy 0.3 이하로 수렴 → 새로운 행동 시도 불가
+- CaT 30% 압력 하의 안전한 local optimum에 갇힘
+- contact가 안 무너지므로 CaT prob 추가 상향이 가능
 
-**V40-A: Narrow-stance gait 유도 강화** (1순위)
-- 목표: 0.45 이하에서도 contact_band를 유지하는 gait를 학습할 수 있는지 확인
-- 방법: CPG/phase 보상을 더 강하게 + contact sequencing/diagonal timing 직접 유도
-- V39.1.1 실패는 "불가능"이 아닌 "유도 부족" — 더 강한 유도로 재시도
+### 다음 단계: V40 실험 계획 (`plan/V40_PLAN.md`)
 
-**V40-B: Contact/propulsion target band 편향 점검** (2순위)
-- 목표: target band 정의 자체가 wide stance에 유리한지 확인
-- 방법: per_leg_contact_target_band, per_leg_propulsion_target_band의 target 정의 점검/완화
-- "정책이 못 배우는가" vs "보상이 불공정한가"를 가르는 실험
+**V40-A: 탐색 촉진 + Positive Incentive** (1순위)
+- contact 보호가 아닌 "탐색 촉진"으로 방향 전환
+- CaT prob 추가 상향 (contact 안 무너지니 가능)
+- positive posture reward (어깨 모으면 직접 보상)
+- CPG phase reward 강화 (V39.1.1보다 강한 weight)
 
-**V40-C: 구조적 검증** (3순위, A+B 실패 시)
-- shoulder range 축소, action scale 제한, default pose 조정
-- 메인 해법이 아닌 마지막 검증용
+**V40-B: Target band 편향 점검** → 정규화 분석으로 편향 없음 확인, 우선순위 하향
+
+**V40-C: 구조적 검증** (A 실패 시)
 
 ---
 
