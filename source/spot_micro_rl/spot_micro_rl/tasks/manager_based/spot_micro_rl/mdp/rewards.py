@@ -105,6 +105,52 @@ def phase_contact_reward(
     return score.mean(dim=1)  # 4다리 평균, 범위 [-1, +1]
 
 
+def v42_boot_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    boot_ramp_end: int = 300,
+    boot_contact_initial: float = -20.0,
+    boot_contact_final: float = -100.0,
+    boot_vel_low_initial: float = 0.01,
+    boot_vel_high_initial: float = 0.05,
+    boot_vel_low_final: float = 0.1,
+    boot_vel_high_final: float = 0.5,
+    log_interval: int = 100,
+) -> torch.Tensor:
+    """V42: 간단한 부팅 커리큘럼 — undesired_contacts ramp + 초기 저속 command.
+
+    기존 reward_weight_curriculum(80+ params)을 대체하는 V42 전용 경량 버전.
+    부팅 3결합(V35.5)만 구현: contacts ramp + velocity restore.
+    """
+    iteration = env.common_step_counter
+    if iteration % 10 != 0:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    alpha = min(1.0, max(0.0, iteration / max(boot_ramp_end, 1)))
+
+    # 1. undesired_contacts ramp: -20 → -100
+    cur_contact = boot_contact_initial + (boot_contact_final - boot_contact_initial) * alpha
+    try:
+        cfg = env.reward_manager.get_term_cfg("undesired_contacts")
+        cfg.weight = cur_contact
+        env.reward_manager.set_term_cfg("undesired_contacts", cfg)
+    except Exception:
+        pass
+
+    # 2. velocity command ramp: (0.01,0.05) → (0.1,0.5)
+    cur_vel_low = boot_vel_low_initial + (boot_vel_low_final - boot_vel_low_initial) * alpha
+    cur_vel_high = boot_vel_high_initial + (boot_vel_high_final - boot_vel_high_initial) * alpha
+    try:
+        env.command_manager.get_term("base_velocity").cfg.ranges.lin_vel_x = (cur_vel_low, cur_vel_high)
+    except Exception:
+        pass
+
+    if iteration % log_interval == 0:
+        print(f"[V42-Boot] iter {iteration}: contacts={cur_contact:.0f}, vel=({cur_vel_low:.2f},{cur_vel_high:.2f}) alpha={alpha:.2f}")
+
+    return torch.zeros(env.num_envs, device=env.device)
+
+
 def _contact_force_peak(contact_sensor: ContactSensor, body_ids) -> torch.Tensor:
     """Return per-body peak contact force over the available sensor history window."""
     return contact_sensor.data.net_forces_w_history[:, :, body_ids, :].norm(dim=-1).max(dim=1)[0]
