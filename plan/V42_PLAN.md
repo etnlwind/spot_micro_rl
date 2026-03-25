@@ -1,4 +1,4 @@
-# V41-B Plan: Clean Reward Restart — 자연스러운 Trot
+# V42 Plan: Clean Reward Restart — 자연스러운 Trot
 
 > 작성: 2026-03-25
 > 상태: 설계 중
