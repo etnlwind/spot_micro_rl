@@ -1,7 +1,7 @@
 # V42 Plan: Clean Reward Restart — 자연스러운 Trot
 
 > 작성: 2026-03-25
-> 상태: 설계 중
+> 상태: 구현 완료, 훈련 대기
 
 ---
 
@@ -178,7 +178,32 @@ V41에서 가져온 아이디어:
 
 ---
 
-## 9. 참고
+## 9. 구현 상세
+
+### 코드 변경
+
+| 파일 | 변경 |
+|------|------|
+| `env_cfg.py` | TRAIN_VERSION="V42", V42 블록에서 기존 reward 전부 None → 16개만 설정 |
+| `rewards.py` | `v42_boot_curriculum()` 신규 (경량 부팅 커리큘럼) |
+| `.env` | TRAIN_ENVS=8192 |
+
+### V42 블록 구조 (`if TRAIN_VERSION.startswith("V42")`)
+- `num_envs = 8192`
+- Phase clock observation 복원
+- CaT DoneTerm = None
+- 기존 reward 전부 `None`
+- 16개 reward + `v42_boot_curriculum` 설정
+
+### v42_boot_curriculum
+기존 `reward_weight_curriculum`(80+ params)을 대체하는 경량 버전:
+- `undesired_contacts` ramp: -20→-100 (iter 0~300)
+- velocity command ramp: (0.01,0.05)→(0.1,0.5)
+- splay/CaT/band/residency ramp 없음
+
+---
+
+## 10. 참고
 
 - V35.5: 부팅 안정화 3결합 (검증됨)
 - V38: CaT framework (필요 시 재사용 가능)

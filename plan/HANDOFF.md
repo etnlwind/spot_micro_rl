@@ -46,7 +46,7 @@
 **V38 시리즈 결론**: CaT로 0.54→0.45 달성. 그 이상은 벌칙만으로 한계.
 **V38.3.1 실패**: resume + L2 강화 시도 → critic 무효화 + curriculum 미복원으로 성과 소실.
 
-**현재**: V40-A-2 훈련 중 (prob 0.002, sweet spot 실험). V40-A(prob 0.003)에서 dev 0.384 도달, ep_len 170.
+**현재**: V42 구현 완료, 훈련 대기. Clean Reward Restart — 16개 reward + 8192 envs + phase clock.
 
 **V39 경과**:
 - V39.1 (2.0 Hz): reward shape 결함 (공짜 baseline 0.50) → FAIL
