@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V43"
+TRAIN_VERSION = "V43-D"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -1220,7 +1220,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 params={"asset_cfg": SceneEntityCfg("robot")},
             )
 
-            # ── V42: 경량 부팅 커리큘럼 (V35.5 3결합만) ──
+            # ── V43-D: 5-Phase Boot-First Curriculum ──
+            # Phase 1 (0~300): Boot only — contacts ramp + velocity ramp, walking reward OFF
+            # Phase 2 (300~800): Direction — forward_velocity + stance_propulsion ramp
+            # Phase 3 (500~1500): Propulsion gating — gate_alpha 0→1
+            # Phase 4 (800~2000): Walking — gait_phase + stride_length ramp
+            # Phase 5 (1000~2500): Refinement — feet_air_time ramp + pose -0.3→-2.0
             self.rewards.curriculum = RewTerm(
                 func=custom_mdp.v42_boot_curriculum,
                 weight=1.0,
@@ -1232,6 +1237,19 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "boot_vel_high_initial": 0.05,
                     "boot_vel_low_final": 0.1,
                     "boot_vel_high_final": 0.5,
+                    "gate_ramp_start": 500,
+                    "gate_ramp_end": 1500,
+                    "pose_ramp_start": 1000,
+                    "pose_ramp_end": 2500,
+                    "pose_weight_initial": -0.3,
+                    "pose_weight_final": -2.0,
+                    "walk_ramp_config": {
+                        "forward_velocity":  {"target": 8.0,  "start": 300,  "end": 800},
+                        "stance_propulsion": {"target": 8.0,  "start": 300,  "end": 800},
+                        "gait_phase":        {"target": 15.0, "start": 800,  "end": 2000},
+                        "stride_length":     {"target": 5.0,  "start": 800,  "end": 2000},
+                        "feet_air_time":     {"target": 20.0, "start": 1000, "end": 2500},
+                    },
                     "log_interval": 100,
                 },
             )
@@ -1243,6 +1261,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 toe_body_v43 = SceneEntityCfg("robot", body_names=".*toe_link")
 
                 # forward_velocity → forward_velocity_gated (per-leg propulsion gating)
+                # V43-B: gate_alpha=0.0 (boot phase에서 gating 비활성), curriculum이 0→1 ramp
                 self.rewards.forward_velocity = RewTerm(
                     func=custom_mdp.forward_velocity_gated,
                     weight=8.0,
@@ -1252,10 +1271,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                         "foot_cfg": toe_body_v43,
                         "target_vel": 0.3,
                         "propulsion_threshold": 0.1,
+                        "gate_alpha": 0.0,
                     },
                 )
 
                 # gait_phase → gait_phase_contact (per-leg 접지+추진 연결)
+                # V43-B: push_alpha=0.0 (boot=contact only), curriculum이 0→1 ramp
                 self.rewards.gait_phase = RewTerm(
                     func=custom_mdp.gait_phase_contact_reward,
                     weight=15.0,
@@ -1267,6 +1288,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                         "duty_factor": 0.5,
                         "contact_threshold": 1.0,
                         "min_push": 0.05,
+                        "push_alpha": 0.0,
                     },
                 )
 
@@ -1290,12 +1312,20 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # joint_vel_l2 제거 (dof_acc와 중복)
                 self.rewards.joint_vel_l2 = None
 
-                # joint_default_pose 강화
+                # joint_default_pose: -0.3 (boot 자유 탐색), curriculum이 -2.0까지 ramp
                 self.rewards.joint_default_pose = RewTerm(
                     func=velocity_mdp.joint_deviation_l1,
-                    weight=-2.0,
+                    weight=-0.3,
                     params={"asset_cfg": SceneEntityCfg("robot")},
                 )
+
+                # V43-D: Walking reward 초기 weight=0 (curriculum이 순차 활성화)
+                # 이 설정 없으면 V42 공통 블록의 full weight가 iter 0에서 활성화됨
+                self.rewards.forward_velocity.weight = 0.0   # curriculum: iter 300~800 → 8.0
+                self.rewards.stance_propulsion.weight = 0.0   # curriculum: iter 300~800 → 8.0
+                self.rewards.gait_phase.weight = 0.0          # curriculum: iter 800~2000 → 15.0
+                self.rewards.stride_length.weight = 0.0       # curriculum: iter 800~2000 → 5.0
+                self.rewards.feet_air_time.weight = 0.0       # curriculum: iter 1000~2500 → 20.0
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

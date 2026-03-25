@@ -149,12 +149,13 @@ def forward_velocity_gated(
     foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     target_vel: float = 0.3,
     propulsion_threshold: float = 0.1,
+    gate_alpha: float = 1.0,
 ) -> torch.Tensor:
     """V43: 전진 보상 + soft propulsion gating.
 
     다리로 땅을 밀어서 전진할 때만 보상. 미끄러짐/기울어짐 exploit 방지.
-    gate = per-leg propulsion의 평균 (0~1). 다리 안 쓰면 gate ≈ 0.
-    soft gate: 부팅 때 약한 추진이라도 학습 신호 유지.
+    gate_alpha: 0.0=no gating (boot phase), 1.0=full gating.
+    V43-B: boot phase에서 gate_alpha=0으로 시작, curriculum이 점진적으로 1.0까지 올림.
     """
     asset = env.scene[asset_cfg.name]
     forward_vel = asset.data.root_lin_vel_b[:, 0]
@@ -168,7 +169,10 @@ def forward_velocity_gated(
     propulsion_gate = (stance_mask * push).mean(dim=1)  # 4다리 평균 추진력
     propulsion_gate = torch.clamp(propulsion_gate / propulsion_threshold, 0.0, 1.0)
 
-    return normalized_vel * orientation_quality * propulsion_gate
+    # gate_alpha blending: alpha=0 → no gating, alpha=1 → full gating
+    effective_gate = (1.0 - gate_alpha) + gate_alpha * propulsion_gate
+
+    return normalized_vel * orientation_quality * effective_gate
 
 
 def gait_phase_contact_reward(
@@ -180,19 +184,24 @@ def gait_phase_contact_reward(
     duty_factor: float = 0.5,
     contact_threshold: float = 1.0,
     min_push: float = 0.05,
+    push_alpha: float = 1.0,
 ) -> torch.Tensor:
     """V43: Phase + per-leg 접지·추진 연결.
 
     - stance phase: 접지 + per-leg 추진력 있으면 +1, 없으면 -1
     - swing phase: 미접지 시 +1, 접지 시 -1
-    stance에서 root vel이 아닌 각 발의 실제 추진력을 확인.
-    기둥처럼 서있기만 해도 -1. 한쪽만 밀어도 나머지는 -1.
+    push_alpha: 0.0=contact only (V42 behavior), 1.0=contact+push (V43 full).
+    V43-B: boot phase에서 push_alpha=0으로 시작, curriculum이 점진적으로 1.0까지 올림.
     """
     stance_mask, push = _per_leg_propulsion(env, sensor_cfg, foot_cfg, asset_cfg, contact_threshold)
 
     # per-leg: 접지 중이면서 실제로 밀고 있는가
     is_pushing = (stance_mask > 0.5) & (push > min_push)
-    is_good_stance = is_pushing.float()
+
+    # push_alpha blending: alpha=0 → contact only, alpha=1 → contact+push
+    is_good_stance_push = is_pushing.float()     # V43: contact + push required
+    is_good_stance_contact = stance_mask          # V42: contact only
+    is_good_stance = push_alpha * is_good_stance_push + (1.0 - push_alpha) * is_good_stance_contact
 
     is_contact = stance_mask  # 접지 상태
 
@@ -223,12 +232,25 @@ def v42_boot_curriculum(
     boot_vel_high_initial: float = 0.05,
     boot_vel_low_final: float = 0.1,
     boot_vel_high_final: float = 0.5,
+    gate_ramp_start: int = 500,
+    gate_ramp_end: int = 1500,
+    pose_ramp_start: int = 1000,
+    pose_ramp_end: int = 2500,
+    pose_weight_initial: float = -0.3,
+    pose_weight_final: float = -2.0,
+    walk_ramp_config: dict | None = None,
     log_interval: int = 100,
 ) -> torch.Tensor:
-    """V42: 간단한 부팅 커리큘럼 — undesired_contacts ramp + 초기 저속 command.
+    """V43-D: 5-Phase Boot-First Curriculum.
 
-    기존 reward_weight_curriculum(80+ params)을 대체하는 V42 전용 경량 버전.
-    부팅 3결합(V35.5)만 구현: contacts ramp + velocity restore.
+    Phase 1 (0~300): Boot — contacts ramp + velocity ramp, walking rewards OFF
+    Phase 2 (300~800): Direction — forward_velocity + stance_propulsion ramp
+    Phase 3 (500~1500): Propulsion gating — gate_alpha 0→1
+    Phase 4 (800~2000): Walking — gait_phase + stride_length ramp
+    Phase 5 (1000~2500): Refinement — feet_air_time + pose weight ramp
+
+    V43-D 핵심: walking reward를 boot에서 OFF하고 순차 활성화.
+    V38.3의 gait_gate 철학을 clean reward 구조에 통합.
     """
     iteration = env.common_step_counter
     if iteration % 10 != 0:
@@ -253,8 +275,66 @@ def v42_boot_curriculum(
     except Exception:
         pass
 
+    # 3. V43-D: Walking reward weight ramp (0 → target, 순차 활성화)
+    walk_log_parts = []
+    if walk_ramp_config:
+        for name, cfg in walk_ramp_config.items():
+            target_w = cfg["target"]
+            ramp_start = cfg["start"]
+            ramp_end = cfg["end"]
+            if iteration < ramp_start:
+                cur_w = 0.0
+            elif iteration >= ramp_end:
+                cur_w = target_w
+            else:
+                walk_alpha = (iteration - ramp_start) / (ramp_end - ramp_start)
+                cur_w = target_w * walk_alpha
+            try:
+                term_cfg = env.reward_manager.get_term_cfg(name)
+                term_cfg.weight = cur_w
+                env.reward_manager.set_term_cfg(name, term_cfg)
+            except Exception:
+                pass
+            if iteration % log_interval == 0:
+                walk_log_parts.append(f"{name}={cur_w:.1f}/{target_w:.0f}")
+
+    # 4. Propulsion gate alpha ramp (0 → 1)
+    gate_alpha_val = 0.0
+    if gate_ramp_start > 0 and gate_ramp_end > gate_ramp_start:
+        gate_alpha_val = min(1.0, max(0.0, (iteration - gate_ramp_start) / (gate_ramp_end - gate_ramp_start)))
+        if iteration < gate_ramp_start:
+            gate_alpha_val = 0.0
+        try:
+            fv_cfg = env.reward_manager.get_term_cfg("forward_velocity")
+            fv_cfg.params["gate_alpha"] = gate_alpha_val
+            env.reward_manager.set_term_cfg("forward_velocity", fv_cfg)
+        except Exception:
+            pass
+        try:
+            gp_cfg = env.reward_manager.get_term_cfg("gait_phase")
+            gp_cfg.params["push_alpha"] = gate_alpha_val
+            env.reward_manager.set_term_cfg("gait_phase", gp_cfg)
+        except Exception:
+            pass
+
+    # 5. joint_default_pose weight ramp (-0.3 → -2.0)
+    cur_pose_weight = pose_weight_initial
+    if pose_ramp_start > 0 and pose_ramp_end > pose_ramp_start:
+        pose_alpha = min(1.0, max(0.0, (iteration - pose_ramp_start) / (pose_ramp_end - pose_ramp_start)))
+        if iteration < pose_ramp_start:
+            pose_alpha = 0.0
+        cur_pose_weight = pose_weight_initial + (pose_weight_final - pose_weight_initial) * pose_alpha
+        try:
+            pose_cfg = env.reward_manager.get_term_cfg("joint_default_pose")
+            pose_cfg.weight = cur_pose_weight
+            env.reward_manager.set_term_cfg("joint_default_pose", pose_cfg)
+        except Exception:
+            pass
+
     if iteration % log_interval == 0:
-        print(f"[V42-Boot] iter {iteration}: contacts={cur_contact:.0f}, vel=({cur_vel_low:.2f},{cur_vel_high:.2f}) alpha={alpha:.2f}")
+        walk_str = " | ".join(walk_log_parts) if walk_log_parts else "N/A"
+        print(f"[V43-D] iter {iteration}: contacts={cur_contact:.0f} vel=({cur_vel_low:.2f},{cur_vel_high:.2f}) gate={gate_alpha_val:.2f} pose={cur_pose_weight:.2f}")
+        print(f"  walk: {walk_str}")
 
     return torch.zeros(env.num_envs, device=env.device)
 

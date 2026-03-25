@@ -1,13 +1,13 @@
 # HANDOFF.md
 
-> 마지막 업데이트: 2026-03-22
+> 마지막 업데이트: 2026-03-25
 > 최신 커밋: develop 브랜치
 
 ---
 
 ## 1. 현재 목표
 
-**Anti-Splay 해결 — V38.3: Soft CaT prob 0.0015, 15000 iter 완주 중**
+**자연스러운 Trot 보행 — V43-D: Boot-First Walking Reward Gating (설계 완료, 구현 대기)**
 
 | 버전 | 결과 | 비고 |
 |------|------|------|
@@ -46,7 +46,24 @@
 **V38 시리즈 결론**: CaT로 0.54→0.45 달성. 그 이상은 벌칙만으로 한계.
 **V38.3.1 실패**: resume + L2 강화 시도 → critic 무효화 + curriculum 미복원으로 성과 소실.
 
-**현재**: V42 구현 완료, 훈련 대기. Clean Reward Restart — 16개 reward + 8192 envs + phase clock.
+**V42~V43 시리즈** (Clean Reward Restart):
+
+| 버전 | 변경 | 결과 | 교훈 |
+|------|------|------|------|
+| V42 | 50→16개 reward, 8192 envs | 구현 완료, exploit 발견 | 독립 reward는 exploit 가능 |
+| V43 | 15개 connected reward (per-leg propulsion gating) | boot 실패 (ep_len=8) | gating 이전에 boot 문제 |
+| V43-B | gate_alpha ramp (boot에서 gating OFF) | boot 실패 (V43 동일) | gating ≠ 원인 |
+| V43-C | joint_default_pose -2.0→-0.3 | boot 실패 (V43 동일) | pose ≠ 원인 |
+| **V43-D** | **Walking reward boot gating** | **설계 완료** | **근본 원인: gait_gate 제거** |
+
+### V43 시리즈 근본 원인 발견
+
+**V42 clean restart에서 기존 `reward_weight_curriculum`의 gait_gate를 제거.**
+- V38.3 (boot 성공): ep_len < 200이면 feet_air_time=0 (GATED)
+- V43 (boot 실패): iter 0부터 feet_air_time=20 (ACTIVE)
+- Walking reward(56) vs Boot reward(57) = 50:50 충돌 → "서라"와 "걸어라"가 싸움
+
+V43-D: 기존 gait_gate 철학 복원 + 5-Phase 순차 활성화로 해결 예정.
 
 **V39 경과**:
 - V39.1 (2.0 Hz): reward shape 결함 (공짜 baseline 0.50) → FAIL
@@ -195,21 +212,19 @@
 
 ## 6. 향후 로드맵
 
-### 단기 (V38.1~V39)
+### 현재 (V43-D)
 | 단계 | 핵심 변경 | 목표 |
 |------|----------|------|
-| **V38.1** (현재) | CaT 파라미터 완화 (threshold 0.8->0.45, prob 0.03->0.15) | shoulder_dev < 0.35 |
-| V38.2 (필요 시) | CaT 추가 조정 | V38.1 결과에 따라 |
+| **V43-D** | Walking reward boot gating (5-Phase) | boot 성공 + trot 학습 |
+| V43-E (필요 시) | ep_len 기반 gating, feet_air_time weight 조정 | V43-D 결과에 따라 |
 
-### 중기 (V39~V40)
-| 단계 | 핵심 변경 | 목표 |
-|------|----------|------|
-| V39 | Energy regularization + 보상 정리 (50->25개) | 자연스러운 보행 |
-| V40 | Gait phase clock 또는 CPG layer | 명시적 trot 강제 |
+### 중기
+- Splay 재평가: clean reward + gait_gate로 trot이 되면 splay 자연 해결 관찰
+- CaT 재도입 (필요 시): V38.3에서 검증된 Soft CaT
 
 ### 장기
-- Sim-to-real (Solo-12 논문 참고, 경량 로봇은 domain randomization 적음)
-- 보상 15~20개로 최종 정리
+- Sim-to-real (Solo-12 논문 참고)
+- 최종 reward 15개 + 검증된 boot gating
 
 ### 참고 논문 (V38+ 핵심)
 - CaT: Constraints as Terminations (IROS 2024) — [arXiv 2403.18765](https://arxiv.org/abs/2403.18765)

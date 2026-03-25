@@ -1,7 +1,7 @@
 # V43 Plan: Connected Trot — 전진·발들기·phase·접지추진의 연결
 
 > 작성: 2026-03-25
-> 상태: 설계 중
+> 상태: **훈련 완료 — boot 실패 (ep_len 8 고착)**
 
 ---
 
@@ -23,200 +23,99 @@ reward도 이 네 축을 분리하지 말고 연결해야 한다.
 
 ---
 
-## 2. V43 Reward 구조
+## 2. V43 Reward 구조 (15개)
 
-### V42 유지 (변경 없음): 10개
-
+### 생존/안정 (4개)
 ```
-[생존/안정] 4개 — 그대로
-  1. alive_bonus          (+10)
-  2. base_height_l2       (-15)
-  3. flat_orientation_l2  (-7)
-  4. undesired_contacts   (ramp)
-
-[전진 추종] 2개 — 그대로
-  5. track_lin_vel_xy     (+1)
-  6. track_ang_vel_z      (+0.5)
-
-[정규화] 4개 — 그대로
-  7. action_rate_l2       (-0.5)
-  8. dof_acc_l2           (-0.001)
-  9. dof_pos_limits       (-5)
-  10. joint_default_pose  (-2.0)  ← V42 -0.5에서 상향
+1. alive_bonus          (+10)
+2. base_height_l2       (-15)
+3. flat_orientation_l2  (-7)
+4. undesired_contacts   (ramp -20→-100)
 ```
 
-### V42에서 수정: 4개 → 5개 (연결 강화)
-
+### 전진 추종 (2개)
 ```
-[연결된 보행] 5개
-
-  11. forward_velocity_gated  (+8)
-      → 전진 보상 + stride > 0 gating
-      → 실제 보폭 없이 미끄러지면 보상 없음
-
-  12. feet_air_time_gated     (+20)
-      → V42와 동일하되, command velocity > threshold일 때만 보상
-      → 제자리 발 들기 방지
-      → (Isaac Lab feet_air_time에 이미 command gating 있는지 확인 필요)
-
-  13. gait_phase_contact      (+15)
-      → stance phase: 접지 + 추진력 있으면 보상
-      → swing phase: 발이 떠있으면 보상
-      → 공중에서 phase만 맞추는 exploit 방지
-
-  14. stance_propulsion        (+8)
-      → 발이 땅에 닿은 상태에서 전진 방향으로 미는 힘 보상
-      → "다리로 걷기"의 핵심 연결 고리
-
-  15. stride_length            (+5)
-      → 보폭 (V42 그대로)
+5. track_lin_vel_xy     (+1)
+6. track_ang_vel_z      (+0.5)
 ```
 
-### V42에서 제거: 2개
-
+### 정규화 (4개)
 ```
-  - forward_velocity (독립) → forward_velocity_gated로 교체
-  - diagonal_coupling → gait_phase_contact에 흡수 (phase가 대각 동기화 포함)
-  - joint_vel_l2 → dof_acc_l2와 중복, 제거
+7.  action_rate_l2       (-0.5)
+8.  dof_acc_l2           (-0.001)
+9.  dof_pos_limits       (-5)
+10. joint_default_pose   (-2.0)  ← V42 -0.5에서 상향
 ```
 
-### 총 15개 reward
+### 연결된 보행 (5개) — V43 핵심
+```
+11. forward_velocity_gated  (+8)   — per-leg propulsion gating
+12. feet_air_time           (+20)  — 발 들기
+13. gait_phase_contact      (+15)  — phase + contact + push 연결
+14. stance_propulsion       (+8)   — 접지 추진
+15. stride_length           (+5)   — 보폭
+```
+
+### V42에서 제거
+- `forward_velocity` (독립) → `forward_velocity_gated`로 교체
+- `diagonal_coupling` → `gait_phase_contact`에 흡수
+- `joint_vel_l2` → `dof_acc_l2`와 중복
 
 ---
 
-## 3. 연결 설계 상세
+## 3. 구현 핵심 함수
 
-### 11. forward_velocity_gated
-
+### `_per_leg_propulsion()` — V43 공통 helper
 ```python
-def forward_velocity_gated(env, asset_cfg, stride_threshold=1.0):
-    """전진 보상 + soft stride gating.
-    gate = min(1, stride / threshold) → 보폭 없이 미끄러지면 보상 감소.
-    hard gate가 아닌 soft gate: 부팅 때 stride=0이어도 학습 신호 완전 차단 안 됨."""
-    forward_vel = ...
-    current_stride = ...
-    gate = torch.clamp(current_stride / stride_threshold, 0.0, 1.0)
-    return forward_vel * gate
+# 각 발의 foot-body heading 상대 속도로 추진력 계산
+# stance_mask (num_envs, 4) + push_magnitude (num_envs, 4) 반환
+# forward_velocity_gated, gait_phase_contact_reward, stance_propulsion_reward에서 공유
 ```
 
-### 12. feet_air_time_gated
-
-Isaac Lab의 `velocity_mdp.feet_air_time`이 이미 `command_name` 파라미터로 velocity gating을 할 수 있는지 확인 필요.
-- 있으면: command velocity > threshold일 때만 보상하도록 설정
-- 없으면: 커스텀 wrapper 작성
-
-### 13. gait_phase_contact
-
+### `forward_velocity_gated()` — per-leg propulsion gating
 ```python
-def gait_phase_contact(env, sensor_cfg, frequency, duty_factor, min_propulsion=0.05):
-    """Phase + 실제 접지·추진 연결.
-    - stance phase: 접지 + 최소 추진력(min_propulsion) 있으면 +1, 없으면 -1
-    - swing phase: 미접지 시 +1, 접지 시 -1
-    V42와 다른 점: stance에서 단순 접지가 아닌 "접지 + 추진"을 요구.
-    기둥처럼 서있기만 해도 -1 (정적 버팀 exploit 방지)."""
-    # V42의 +1/-1 shape 유지
-    # stance 판정: contact force > threshold AND forward propulsion > min_propulsion
+# gate = mean(stance_mask * push) / threshold
+# 다리로 안 밀면 gate ≈ 0 → 전진 보상 차단
 ```
 
-### 14. stance_propulsion
-
+### `gait_phase_contact_reward()` — phase + contact + push
 ```python
-def stance_propulsion(env, sensor_cfg, asset_cfg, min_vel):
-    """발이 땅에 닿은 상태에서 전진 방향 추진력 보상.
-    기존 프로젝트의 stance_propulsion 함수 재사용 가능."""
-    # 이미 rewards.py에 구현되어 있음 (기존 50개 중 하나)
+# stance phase: 접지 + 실제 추진력 있으면 +1, 없으면 -1
+# swing phase: 미접지 +1, 접지 -1
+# 기둥처럼 서있기만 해도 -1
 ```
 
 ---
 
-## 4. Exploit 방지 검증
+## 4. 훈련 결과
 
-### iter 300~500 조기 판정
+- **Run**: `2026-03-25_16-11-35`
+- **Envs**: 8192
+- **결과**: **boot 실패**
 
-| 지표 | 정상 | exploit 의심 |
-|------|------|------------|
-| forward_velocity > 0 **AND** stride > 0 | 함께 올라감 | velocity만 올라가고 stride = 0 |
-| feet_air_time > 0 **AND** forward_velocity > 0 | 함께 | air_time만 높고 velocity = 0 |
-| gait_phase > 0 **AND** contact_ratio > 0.2 | 함께 | phase만 높고 contact = 0 |
-| stance_propulsion > 0 | 존재 | 0이면 다리로 안 밀고 있음 |
+### 핵심 지표 (iter 500)
 
-### 6개 동시 확인
+| 지표 | 값 | 목표 | 판정 |
+|------|-----|------|------|
+| ep_len | **8.3** | > 230 | FAIL |
+| forward_velocity | 0.015 | > 1.0 | FAIL |
+| stride_length | 0.011 | > 6.0 | FAIL |
+| gait_phase | 0.17 | > 0 | OK (유일) |
+| stance_propulsion | 0.16 | > 0 | OK |
 
-```
-forward_velocity, stride_length, stance_propulsion,
-feet_air_time, FL/FR contact ratio, shoulder_dev
-→ 6개가 같이 올라가야 정상 보행
-```
+### 실패 분석
 
----
+분석팀 피드백: "stance_propulsion은 올라가는데 forward_velocity가 안 붙으면 gait exploit, 둘 다 안 붙으면 threshold 빡빡"
 
-## 5. 설계 원칙
+**초기 진단**: propulsion_threshold=0.1이 boot phase에서 전진 신호를 차단 → V43-B로 gate ramp 시도
 
-1. **15개 유지** — V42의 깨끗함 유지
-2. **연결이 핵심** — 독립 reward 금지, 축 간 gating/coupling
-3. **exploit 조기 감지** — iter 300에서 6개 지표 동시 확인
-4. **기존 함수 재사용** — stance_propulsion은 이미 구현됨
-5. **8192 envs 유지**
+**최종 진단 (V43-C 이후)**: propulsion gating이 아닌 **walking reward가 boot phase에서 충돌**하는 것이 근본 원인. feet_air_time(+20)이 boot에서 "발을 들어라" 신호를 보내 alive_bonus(+10) "서있어라"와 충돌. → V43-D에서 해결.
 
 ---
 
-## 6. 판정 기준
+## 5. 교훈
 
-**진짜 목표: 자연스러운 trot으로 잘 걷는 로봇**
-
-주 지표 (6개 동시 달성):
-1. stride > 6.0
-2. ep_len > 230
-3. forward_velocity > 1.0
-4. stance_propulsion > 0
-5. feet_air_time > 0 (velocity gated)
-6. gait_phase_contact > 0
-
-관찰:
-7. shoulder dev — 직접 공격 없이 자연 감소 관찰
-8. FL/FR contact ratio
-9. diagonal_coupling_raw
-
----
-
-## 7. V42 → V43 변경 요약
-
-| V42 | V43 | 이유 |
-|-----|-----|------|
-| forward_velocity (독립) | **forward_velocity_gated** (stride gating) | 미끄러짐 방지 |
-| feet_air_time (독립) | **feet_air_time_gated** (velocity gating) | 제자리 발들기 방지 |
-| gait_phase (+1/-1) | **gait_phase_contact** (contact 연결) | 공중 흔들기 방지 |
-| 없음 | **stance_propulsion** (+8) | 접지 추진 핵심 |
-| diagonal_coupling | 제거 (phase에 흡수) | |
-| joint_vel_l2 | 제거 (dof_acc와 중복) | |
-| joint_default_pose (-0.5) | **(-2.0)** | exploit 억제 강화 |
-
----
-
-## 8. 리스크
-
-1. **gating이 너무 엄격하면 초기 학습 신호 부족**
-   - 완화: **soft gate** 사용 (hard 0/1이 아닌 연속 0~1)
-   - forward_velocity_gated: `min(1, stride/threshold)` — stride 0이어도 신호 완전 차단 안 됨
-   - boot 구간에서는 gating 자연스럽게 약함 (stride 작으니까)
-
-2. **stance_propulsion이 splay를 간접 유도할 수 있음**
-   - 감시: shoulder_dev 추이
-   - joint_default_pose -2.0이 어느 정도 억제
-
-3. **joint_default_pose (-2.0) 역효과**
-   - iter 300~500에서 shoulder_dev + stride + stance_propulsion 동시 확인
-   - shoulder_dev는 내려가는데 stride/propulsion이 죽으면 → weight 하향 (-1.0)
-   - 모두 올라가면 → 유지
-
-4. **15개로 줄였는데 여전히 학습 신호 부족**
-   - V42 iter 100에서 ep_len 10이었음
-   - V43은 stance_propulsion 추가로 "다리 밀기" 신호가 더 있어 부팅 개선 기대
-
----
-
-## 9. 참고
-
-- V42: 깨끗한 16개 구조 (exploit 발견)
-- V35.5: 부팅 3결합 (유지)
-- 기존 rewards.py: stance_propulsion 함수 이미 구현됨
+1. **per-leg propulsion gating 자체는 올바른 설계** — exploit 방지에 효과적
+2. **boot failure는 gating 문제가 아니라 reward 충돌 문제** — 15개 reward가 boot에서 서로 싸움
+3. **V42 clean restart 시 gait_gate 메커니즘을 함께 제거한 것이 근본 원인**
+4. **reward 설계 시 phase별 상호작용 분석이 필수** (개별 reward만 보면 놓침)
