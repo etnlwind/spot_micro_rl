@@ -1206,9 +1206,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 func=velocity_mdp.joint_acc_l2, weight=-0.001,
             )
             self.rewards.joint_vel_l2 = RewTerm(
-                func=custom_mdp.joint_vel_l2_reward,
+                func=isaaclab_mdp.joint_vel_l2,
                 weight=-0.05,
-                params={"asset_cfg": SceneEntityCfg("robot")},
             )
             self.rewards.dof_pos_limits = RewTerm(
                 func=velocity_mdp.joint_pos_limits,
