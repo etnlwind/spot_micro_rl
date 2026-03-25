@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V40-A"
+TRAIN_VERSION = "V40-A-2"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -275,7 +275,7 @@ class SpotMicroRewardCurriculumCfg:
             "cat_ramp_end": 3000,
             "cat_threshold": 0.3,
             "cat_margin": 0.3,
-            "cat_probability_final": 0.003,  # V40-A: 0.0015→0.003 (2x, 가설 A/B 검증)
+            "cat_probability_final": 0.002,  # V40-A2: 0.003→0.002 (sweet spot 탐색)
             "update_interval": 10,
             "gait_gate_enabled": True,
             "gait_gate_min_ep_len": 200.0,
