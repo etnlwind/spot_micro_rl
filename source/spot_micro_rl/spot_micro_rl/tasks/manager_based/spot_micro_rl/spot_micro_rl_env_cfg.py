@@ -1220,28 +1220,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 params={"asset_cfg": SceneEntityCfg("robot")},
             )
 
-            # ── 커리큘럼 단순화 (부팅 3결합만) ──
-            self.rewards.curriculum = RewTerm(
-                func=custom_mdp.reward_weight_curriculum,
-                weight=1.0,
-                params={
-                    "boot_ramp_start": 0,
-                    "boot_ramp_end": 300,
-                    "boot_contact_initial": -20.0,
-                    "boot_contact_final": -100.0,
-                    "boot_vel_initial_low": 0.01,
-                    "boot_vel_initial_high": 0.05,
-                    "boot_vel_final_low": 0.1,
-                    "boot_vel_final_high": 0.5,
-                    "update_interval": 10,
-                    "log_interval": 100,
-                    # V42: splay ramp/CaT ramp 비활성화
-                    "splay_ramp_start": 0,
-                    "splay_ramp_end": 0,
-                    "cat_ramp_start": 0,
-                    "cat_ramp_end": 0,
-                },
-            )
+            # ── V42: curriculum 제거 (기존 reward_weight_curriculum 불필요) ──
+            # 부팅 안정화는 undesired_contacts weight(-100)와
+            # 초기 저속 command(0.01~0.05)로 이미 처리됨
+            # splay ramp/CaT ramp 불필요 (reward 16개 구조에서는)
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)
