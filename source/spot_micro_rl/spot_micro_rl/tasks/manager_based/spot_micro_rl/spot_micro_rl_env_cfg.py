@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V42"
+TRAIN_VERSION = "V43"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -1114,7 +1114,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V42: Clean Reward Restart — 16개 reward만 사용
         # 기존 50+ reward 전부 비활성화 후 16개만 설정
         # ══════════════════════════════════════════════════════════
-        if TRAIN_VERSION.startswith("V42"):
+        if TRAIN_VERSION.startswith("V42") or TRAIN_VERSION.startswith("V43"):
             # num_envs 8192 (탐색 다양성)
             self.scene.num_envs = 8192
 
@@ -1235,6 +1235,64 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "log_interval": 100,
                 },
             )
+
+            # ── V43: Connected Trot — 독립 reward를 연결된 reward로 교체 ──
+            if TRAIN_VERSION.startswith("V43"):
+                toe_cfg_v43 = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+
+                # forward_velocity → forward_velocity_gated (soft stride gating)
+                self.rewards.forward_velocity = RewTerm(
+                    func=custom_mdp.forward_velocity_gated,
+                    weight=8.0,
+                    params={
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "sensor_cfg": toe_cfg_v43,
+                        "target_vel": 0.3,
+                        "stride_threshold": 1.0,
+                        "min_vel": 0.05,
+                    },
+                )
+
+                # gait_phase → gait_phase_contact (접지+추진 연결)
+                self.rewards.gait_phase = RewTerm(
+                    func=custom_mdp.gait_phase_contact_reward,
+                    weight=15.0,
+                    params={
+                        "sensor_cfg": toe_cfg_v43,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "frequency": 2.0,
+                        "duty_factor": 0.5,
+                        "contact_threshold": 1.0,
+                        "min_propulsion": 0.05,
+                    },
+                )
+
+                # stance_propulsion 추가 (접지 추진 핵심)
+                self.rewards.stance_propulsion = RewTerm(
+                    func=custom_mdp.stance_propulsion_reward,
+                    weight=8.0,
+                    params={
+                        "sensor_cfg": toe_cfg_v43,
+                        "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "contact_threshold": 1.0,
+                        "target_push_vel": 0.3,
+                        "min_vel": 0.05,
+                    },
+                )
+
+                # diagonal_coupling 제거 (gait_phase_contact에 흡수)
+                self.rewards.diagonal_coupling = None
+
+                # joint_vel_l2 제거 (dof_acc와 중복)
+                self.rewards.joint_vel_l2 = None
+
+                # joint_default_pose 강화
+                self.rewards.joint_default_pose = RewTerm(
+                    func=velocity_mdp.joint_deviation_l1,
+                    weight=-2.0,
+                    params={"asset_cfg": SceneEntityCfg("robot")},
+                )
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

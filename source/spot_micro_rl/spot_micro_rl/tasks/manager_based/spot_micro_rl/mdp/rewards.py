@@ -105,6 +105,94 @@ def phase_contact_reward(
     return score.mean(dim=1)  # 4다리 평균, 범위 [-1, +1]
 
 
+# ═══════════════════════════════════════════
+# V43: Connected Trot rewards
+# ═══════════════════════════════════════════
+
+def forward_velocity_gated(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    target_vel: float = 0.3,
+    stride_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """V43: 전진 보상 + soft stride gating.
+
+    forward_velocity_reward에 stride-based soft gate 추가.
+    gate = min(1, stride/threshold) → 보폭 없이 미끄러지면 보상 감소.
+    부팅 때 stride 작아도 학습 신호 완전 차단 안 됨.
+    """
+    asset = env.scene[asset_cfg.name]
+    forward_vel = asset.data.root_lin_vel_b[:, 0]
+    normalized_vel = torch.clamp(forward_vel / target_vel, -1.0, 1.0)
+    # orientation quality (기울어지면 보상 감소)
+    gravity_xy = asset.data.projected_gravity_b[:, :2]
+    orientation_quality = torch.exp(-7.0 * torch.sum(torch.square(gravity_xy), dim=1))
+    # soft stride gate
+    contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
+    stride_val = _compute_stride_length(env, contact_sensor, sensor_cfg.body_ids, asset)
+    stride_gate = torch.clamp(stride_val / stride_threshold, 0.0, 1.0)
+    return normalized_vel * orientation_quality * stride_gate
+
+
+def _compute_stride_length(env, contact_sensor, body_ids, asset):
+    """stride_length를 간략 계산 — 전진 속도와 feet_air_time으로 추정."""
+    # 간단한 proxy: forward_vel * mean_air_time
+    vel_x = asset.data.root_lin_vel_b[:, 0]
+    return torch.clamp(vel_x, min=0.0)  # 전진 중이면 양수, 비전진이면 0
+
+
+def gait_phase_contact_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    frequency: float = 2.0,
+    duty_factor: float = 0.5,
+    contact_threshold: float = 1.0,
+    min_propulsion: float = 0.05,
+) -> torch.Tensor:
+    """V43: Phase + 접지·추진 연결.
+
+    - stance phase: 접지 + 최소 추진력 있으면 +1, 없으면 -1
+    - swing phase: 미접지 시 +1, 접지 시 -1
+    V42 gait_phase와 다른 점: stance에서 "접지 + 추진"을 요구.
+    기둥처럼 서있기만 해도 -1 (정적 버팀 exploit 방지).
+    """
+    contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
+    is_contact = (forces > contact_threshold).float()
+
+    # 추진력 계산: 발의 동체-상대 heading 방향 속도
+    foot_asset = env.scene[sensor_cfg.name.replace("contact_forces", "robot")] if hasattr(env.scene, sensor_cfg.name) else env.scene[asset_cfg.name]
+    robot = env.scene[asset_cfg.name]
+    # 간략 propulsion: 전진 속도가 있으면 stance 중 추진 있는 것으로 간주
+    vel_x = robot.data.root_lin_vel_b[:, 0]  # (num_envs,)
+    has_propulsion = (vel_x > min_propulsion).float().unsqueeze(1).expand_as(is_contact)
+
+    # stance에서는 접지 + 추진이 모두 필요
+    is_good_stance = is_contact * has_propulsion  # 접지 AND 추진
+
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = 2.0 * math.pi * frequency * t
+    fl_phase = base_phase
+    fr_phase = base_phase + math.pi
+    rl_phase = base_phase + math.pi
+    rr_phase = base_phase
+    phases = torch.stack([fl_phase, fr_phase, rl_phase, rr_phase], dim=1)
+    phase_norm = phases % (2.0 * math.pi)
+    stance_threshold = duty_factor * 2.0 * math.pi
+    in_stance = (phase_norm < stance_threshold).float()
+
+    # stance phase: 접지+추진이면 +1, 아니면 -1
+    # swing phase: 미접지이면 +1, 접지이면 -1
+    stance_score = 2.0 * is_good_stance - 1.0  # 접지+추진=+1, 아니면=-1
+    swing_score = 2.0 * (1.0 - is_contact) - 1.0  # 미접지=+1, 접지=-1
+
+    score = in_stance * stance_score + (1.0 - in_stance) * swing_score
+    return score.mean(dim=1)
+
+
 def v42_boot_curriculum(
     env: ManagerBasedRLEnv,
     boot_ramp_end: int = 300,
