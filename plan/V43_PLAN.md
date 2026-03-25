@@ -89,11 +89,13 @@ reward도 이 네 축을 분리하지 말고 연결해야 한다.
 ### 11. forward_velocity_gated
 
 ```python
-def forward_velocity_gated(env, asset_cfg, min_stride=0.5):
-    """전진 보상 + stride gating. 보폭 없이 미끄러지면 보상 없음."""
-    forward_vel = ...  # 전진 속도
-    current_stride = ...  # 현재 stride_length
-    gate = (current_stride > min_stride).float()
+def forward_velocity_gated(env, asset_cfg, stride_threshold=1.0):
+    """전진 보상 + soft stride gating.
+    gate = min(1, stride / threshold) → 보폭 없이 미끄러지면 보상 감소.
+    hard gate가 아닌 soft gate: 부팅 때 stride=0이어도 학습 신호 완전 차단 안 됨."""
+    forward_vel = ...
+    current_stride = ...
+    gate = torch.clamp(current_stride / stride_threshold, 0.0, 1.0)
     return forward_vel * gate
 ```
 
@@ -106,13 +108,14 @@ Isaac Lab의 `velocity_mdp.feet_air_time`이 이미 `command_name` 파라미터�
 ### 13. gait_phase_contact
 
 ```python
-def gait_phase_contact(env, sensor_cfg, frequency, duty_factor):
-    """Phase + 실제 접지/추진 연결.
-    - stance phase: 접지(contact force > threshold) 시 +1, 미접지 시 -1
+def gait_phase_contact(env, sensor_cfg, frequency, duty_factor, min_propulsion=0.05):
+    """Phase + 실제 접지·추진 연결.
+    - stance phase: 접지 + 최소 추진력(min_propulsion) 있으면 +1, 없으면 -1
     - swing phase: 미접지 시 +1, 접지 시 -1
-    V42 gait_phase와 다른 점: stance에서 단순 접지가 아닌 추진력 확인 가능"""
+    V42와 다른 점: stance에서 단순 접지가 아닌 "접지 + 추진"을 요구.
+    기둥처럼 서있기만 해도 -1 (정적 버팀 exploit 방지)."""
     # V42의 +1/-1 shape 유지
-    # 추가: stance phase에서 contact force 확인
+    # stance 판정: contact force > threshold AND forward propulsion > min_propulsion
 ```
 
 ### 14. stance_propulsion
@@ -193,14 +196,20 @@ feet_air_time, FL/FR contact ratio, shoulder_dev
 ## 8. 리스크
 
 1. **gating이 너무 엄격하면 초기 학습 신호 부족**
-   - 완화: gate threshold를 낮게 시작 (stride > 0.5, velocity > 0.05)
-   - boot 구간에서는 gating 완화
+   - 완화: **soft gate** 사용 (hard 0/1이 아닌 연속 0~1)
+   - forward_velocity_gated: `min(1, stride/threshold)` — stride 0이어도 신호 완전 차단 안 됨
+   - boot 구간에서는 gating 자연스럽게 약함 (stride 작으니까)
 
 2. **stance_propulsion이 splay를 간접 유도할 수 있음**
    - 감시: shoulder_dev 추이
    - joint_default_pose -2.0이 어느 정도 억제
 
-3. **15개로 줄였는데 여전히 학습 신호 부족**
+3. **joint_default_pose (-2.0) 역효과**
+   - iter 300~500에서 shoulder_dev + stride + stance_propulsion 동시 확인
+   - shoulder_dev는 내려가는데 stride/propulsion이 죽으면 → weight 하향 (-1.0)
+   - 모두 올라가면 → 유지
+
+4. **15개로 줄였는데 여전히 학습 신호 부족**
    - V42 iter 100에서 ep_len 10이었음
    - V43은 stance_propulsion 추가로 "다리 밀기" 신호가 더 있어 부팅 개선 기대
 
