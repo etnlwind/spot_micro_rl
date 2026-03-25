@@ -7,7 +7,7 @@
 
 ## 1. 현재 목표
 
-**자연스러운 Trot 보행 — V43-E: Boot Standing Rewards + Walking Gating (훈련 중)**
+**자연스러운 Trot 보행 — V43-E 수렴 (boot 성공, 종종걸음), V44 설계 대기**
 
 | 버전 | 결과 | 비고 |
 |------|------|------|
@@ -55,7 +55,18 @@
 | V43-B | gate_alpha ramp (boot에서 gating OFF) | boot 실패 (V43 동일) | gating ≠ 원인 |
 | V43-C | joint_default_pose -2.0→-0.3 | boot 실패 (V43 동일) | pose ≠ 원인 |
 | V43-D | Walking reward boot gating (5-Phase) | ep_len 10 (+20%), fwd_vel 7x↑ | 방향 맞지만 positive 부족 |
-| **V43-E** | **+ boot_standing + boot_contact** | **훈련 중** | **V41 bootstrap + penalty→positive 전환** |
+| **V43-E** | **+ boot_standing + boot_contact** | **boot 성공! ep_len=248, shoulder=0.40** | stride=0.39, coupling=0.0 (종종걸음) |
+
+### V43-E 결과 요약 (2026-03-26)
+
+**성공**: boot 해결 (한 달 만에 처음), ep_len 248, shoulder_dev 0.40 (역대 최고), bad_orientation 0.8%
+**한계**: stride 0.39 (목표 6.0의 6%), diagonal_coupling 0.0 (trot 미형성)
+
+종종걸음 수렴 원인: forward_vel(5.97) >> stride(0.42) = 14배 불균형 + pose penalty(-11.69) = 전체 penalty의 51% + coupling reward 부재
+
+### 다음: V44 (설계 대기)
+
+diagonal_coupling 복원(+10) + joint_default_pose 완화(-2.0→-0.5). 두 변경은 독립적 축(패턴 vs 크기)이라 동시 적용 타당.
 
 ### V43 시리즈 근본 원인 발견
 
@@ -213,11 +224,11 @@ V43-D: 기존 gait_gate 철학 복원 + 5-Phase 순차 활성화로 해결 예�
 
 ## 6. 향후 로드맵
 
-### 현재 (V43-D)
+### 현재 (V44 설계 대기)
 | 단계 | 핵심 변경 | 목표 |
 |------|----------|------|
-| **V43-D** | Walking reward boot gating (5-Phase) | boot 성공 + trot 학습 |
-| V43-E (필요 시) | ep_len 기반 gating, feet_air_time weight 조정 | V43-D 결과에 따라 |
+| **V44** | diagonal_coupling 복원 + pose 완화 | stride > 3.0, coupling > 0.2 |
+| V44+ (필요 시) | stride weight 상향, V38.3 reward 선별 복원 | stride > 6.0 |
 
 ### 중기
 - Splay 재평가: clean reward + gait_gate로 trot이 되면 splay 자연 해결 관찰
