@@ -122,6 +122,24 @@ V43에서 제거한 이유: gait_phase_contact에 흡수
 - coupling 올라가면 → coupling reward 효과
 - 둘 다 올라가면 → 두 변경 모두 필요했음
 
+### 분석팀 피드백 반영
+
+**1. coupling은 walking ramp에 포함 (iter 800~2000)**
+- 처음부터 full on이면 boot 회귀 위험
+- V43-E의 boot 성공을 보호하는 것이 최우선
+- walk_ramp_config에 `"diagonal_coupling": {"target": 10.0, "start": 800, "end": 2000}` 추가
+
+**2. pose -0.5 직행 + adaptive safety**
+- 수학적으로 -1.0은 불충분 (net -0.17, 여전히 BLOCKED)
+- -0.5에서 비로소 net +0.70 (POSSIBLE)
+- 대신 adaptive safety로 splay/boot 퇴행 감지 시 -1.0 fallback
+
+**3. Adaptive safety: smoothed 평균 + 이중 조건**
+- 단일 시점값은 PPO 탐색 노이즈에 과민 반응 → EMA(alpha=0.03, ~230 iter 반응) 사용
+- shoulder_dev > 0.45 (splay 축) OR ep_len < 200 (boot 축) → pose -1.0 fallback
+- V44 문서의 다른 판정도 구간 기반 → EMA로 일관성 유지
+- 두 조건 OR: V44의 핵심 리스크 2개(splay 복귀, boot 퇴행)를 동급으로 방어
+
 ### 나머지 V43-E 구조 유지
 
 - boot_standing + boot_contact ramp: 그대로
@@ -129,6 +147,7 @@ V43에서 제거한 이유: gait_phase_contact에 흡수
 - gate_alpha ramp: 그대로
 - forward_velocity_gated: 그대로
 - 8192 envs: 그대로
+- 기능 플래그: `_CLEAN_REWARDS=True`, `_CONNECTED_TROT=True`
 
 ---
 

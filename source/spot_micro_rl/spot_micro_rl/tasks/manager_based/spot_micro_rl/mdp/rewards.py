@@ -278,13 +278,17 @@ def v42_boot_curriculum(
     gate_ramp_end: int = 1500,
     pose_ramp_start: int = 1000,
     pose_ramp_end: int = 2500,
-    pose_weight_initial: float = -0.3,
-    pose_weight_final: float = -2.0,
+    pose_weight_initial: float = -0.5,
+    pose_weight_final: float = -0.5,
     walk_ramp_config: dict | None = None,
     boot_ramp_config: dict | None = None,
+    pose_safety_threshold_dev: float = 0.45,
+    pose_safety_threshold_ep: float = 200.0,
+    pose_safety_fallback: float = -1.0,
+    pose_safety_ema_alpha: float = 0.01,
     log_interval: int = 100,
 ) -> torch.Tensor:
-    """V43-E: 5-Phase Boot-First Curriculum + Boot Standing Rewards.
+    """V44: Boot-First Curriculum + Adaptive Pose Safety.
 
     Phase 1 (0~300): Boot — contacts ramp + velocity ramp, walking rewards OFF
     Phase 2 (300~800): Direction — forward_velocity + stance_propulsion ramp
@@ -383,24 +387,55 @@ def v42_boot_curriculum(
         except Exception:
             pass
 
-    # 5. joint_default_pose weight ramp (-0.3 → -2.0)
-    cur_pose_weight = pose_weight_initial
-    if pose_ramp_start > 0 and pose_ramp_end > pose_ramp_start:
-        pose_alpha = min(1.0, max(0.0, (iteration - pose_ramp_start) / (pose_ramp_end - pose_ramp_start)))
-        if iteration < pose_ramp_start:
-            pose_alpha = 0.0
-        cur_pose_weight = pose_weight_initial + (pose_weight_final - pose_weight_initial) * pose_alpha
-        try:
-            pose_cfg = env.reward_manager.get_term_cfg("joint_default_pose")
-            pose_cfg.weight = cur_pose_weight
-            env.reward_manager.set_term_cfg("joint_default_pose", pose_cfg)
-        except Exception:
-            pass
+    # 5. V44: Adaptive Pose Safety — smoothed shoulder_dev + ep_len 기반
+    # EMA 초기화 (첫 호출 시)
+    if not hasattr(env, '_v44_shoulder_ema'):
+        env._v44_shoulder_ema = 0.30  # 낙관적 초기값
+        env._v44_ep_len_ema = 250.0   # 낙관적 초기값
+        env._v44_pose_in_fallback = False
+
+    # Smoothed metrics 업데이트 (매 curriculum step)
+    try:
+        metrics = compute_v23_raw_metrics(env)
+        if metrics:
+            cur_shoulder = metrics["shoulder_mean_abs_dev_from_target_raw"].mean().item()
+            env._v44_shoulder_ema = (1.0 - pose_safety_ema_alpha) * env._v44_shoulder_ema + pose_safety_ema_alpha * cur_shoulder
+    except Exception:
+        pass
+    cur_ep_len = env.episode_length_buf.float().mean().item()
+    env._v44_ep_len_ema = (1.0 - pose_safety_ema_alpha) * env._v44_ep_len_ema + pose_safety_ema_alpha * cur_ep_len
+
+    # Adaptive 판정: smoothed shoulder_dev > threshold OR smoothed ep_len < threshold
+    safety_triggered = (env._v44_shoulder_ema > pose_safety_threshold_dev) or \
+                       (env._v44_ep_len_ema < pose_safety_threshold_ep and iteration > 500)
+    # iter 500 이전에는 ep_len이 낮을 수 있으므로 (boot 진행 중) ep_len 조건 비활성
+
+    if safety_triggered:
+        cur_pose_weight = pose_safety_fallback  # -1.0 방어 모드
+        if not env._v44_pose_in_fallback:
+            env._v44_pose_in_fallback = True
+            print(f"[V44-Safety] iter {iteration}: FALLBACK pose→{pose_safety_fallback:.1f} "
+                  f"(shoulder_ema={env._v44_shoulder_ema:.3f}, ep_len_ema={env._v44_ep_len_ema:.1f})")
+    else:
+        cur_pose_weight = pose_weight_initial  # -0.5 정상 모드
+        if env._v44_pose_in_fallback:
+            env._v44_pose_in_fallback = False
+            print(f"[V44-Safety] iter {iteration}: RESTORED pose→{pose_weight_initial:.1f} "
+                  f"(shoulder_ema={env._v44_shoulder_ema:.3f}, ep_len_ema={env._v44_ep_len_ema:.1f})")
+
+    try:
+        pose_cfg = env.reward_manager.get_term_cfg("joint_default_pose")
+        pose_cfg.weight = cur_pose_weight
+        env.reward_manager.set_term_cfg("joint_default_pose", pose_cfg)
+    except Exception:
+        pass
 
     if iteration % log_interval == 0:
         walk_str = " | ".join(walk_log_parts) if walk_log_parts else "N/A"
         boot_str = " | ".join(boot_log_parts) if boot_log_parts else "N/A"
-        print(f"[V43-E] iter {iteration}: contacts={cur_contact:.0f} vel=({cur_vel_low:.2f},{cur_vel_high:.2f}) gate={gate_alpha_val:.2f} pose={cur_pose_weight:.2f}")
+        safety_str = "FALLBACK" if env._v44_pose_in_fallback else "OK"
+        print(f"[V44] iter {iteration}: contacts={cur_contact:.0f} vel=({cur_vel_low:.2f},{cur_vel_high:.2f}) gate={gate_alpha_val:.2f} pose={cur_pose_weight:.2f} [{safety_str}]")
+        print(f"  shoulder_ema={env._v44_shoulder_ema:.3f} ep_len_ema={env._v44_ep_len_ema:.1f}")
         print(f"  boot: {boot_str}")
         print(f"  walk: {walk_str}")
 

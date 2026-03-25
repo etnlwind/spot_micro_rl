@@ -4,7 +4,22 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V43-E"
+TRAIN_VERSION = "V44"
+
+# ── 기능 플래그 ──
+# 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
+#
+# _CLEAN_REWARDS = 50개 reward → 15개 clean 구조 (V42에서 도입)
+#   True:  50개 비활성화, 15~17개만 재정의, 8192 envs, phase clock, boot curriculum
+#   False: 기존 50개 reward 그대로 (V41 이하)
+#
+# _CONNECTED_TROT = 서기→전진→걷기 순차 학습 커리큘럼 (V43에서 도입, _CLEAN_REWARDS 필요)
+#   True:  per-leg propulsion gating, boot standing rewards, walking reward 순차 활성화,
+#          adaptive pose safety (V43-D gating, V43-E boot standing, V44 adaptive safety)
+#   False: V42 기본 independent reward (순차 학습 없음)
+#
+_CLEAN_REWARDS = True
+_CONNECTED_TROT = True
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -1114,7 +1129,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V42: Clean Reward Restart — 16개 reward만 사용
         # 기존 50+ reward 전부 비활성화 후 16개만 설정
         # ══════════════════════════════════════════════════════════
-        if TRAIN_VERSION.startswith("V42") or TRAIN_VERSION.startswith("V43"):
+        if _CLEAN_REWARDS:
             # num_envs 8192 (탐색 다양성)
             self.scene.num_envs = 8192
 
@@ -1241,25 +1256,30 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "gate_ramp_end": 1500,
                     "pose_ramp_start": 1000,
                     "pose_ramp_end": 2500,
-                    "pose_weight_initial": -0.3,
-                    "pose_weight_final": -2.0,
+                    "pose_weight_initial": -0.5,
+                    "pose_weight_final": -0.5,
                     "walk_ramp_config": {
-                        "forward_velocity":  {"target": 8.0,  "start": 300,  "end": 800},
-                        "stance_propulsion": {"target": 8.0,  "start": 300,  "end": 800},
-                        "gait_phase":        {"target": 15.0, "start": 800,  "end": 2000},
-                        "stride_length":     {"target": 5.0,  "start": 800,  "end": 2000},
-                        "feet_air_time":     {"target": 20.0, "start": 1000, "end": 2500},
+                        "forward_velocity":    {"target": 8.0,  "start": 300,  "end": 800},
+                        "stance_propulsion":   {"target": 8.0,  "start": 300,  "end": 800},
+                        "diagonal_coupling":   {"target": 10.0, "start": 800,  "end": 2000},
+                        "gait_phase":          {"target": 15.0, "start": 800,  "end": 2000},
+                        "stride_length":       {"target": 5.0,  "start": 800,  "end": 2000},
+                        "feet_air_time":       {"target": 20.0, "start": 1000, "end": 2500},
                     },
                     "boot_ramp_config": {
                         "boot_standing": {"initial": 15.0, "ramp_down_start": 200, "ramp_down_end": 500},
                         "boot_contact":  {"initial": 5.0,  "ramp_down_start": 300, "ramp_down_end": 600},
                     },
+                    "pose_safety_threshold_dev": 0.45,
+                    "pose_safety_threshold_ep": 200.0,
+                    "pose_safety_fallback": -1.0,
+                    "pose_safety_ema_alpha": 0.03,
                     "log_interval": 100,
                 },
             )
 
-            # ── V43: Connected Trot — 독립 reward를 연결된 reward로 교체 ──
-            if TRAIN_VERSION.startswith("V43"):
+            # ── V43/V44: Connected Trot — 독립 reward를 연결된 reward로 교체 ──
+            if _CONNECTED_TROT:
                 toe_cfg_v43 = SceneEntityCfg("contact_forces", body_names=".*toe_link")
 
                 toe_body_v43 = SceneEntityCfg("robot", body_names=".*toe_link")
@@ -1310,25 +1330,28 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     },
                 )
 
-                # diagonal_coupling 제거 (gait_phase_contact에 흡수)
-                self.rewards.diagonal_coupling = None
+                # V44: diagonal_coupling 복원 (V43에서 제거했지만 coupling=0.0 → 재추가)
+                # V42 블록의 weight=10 정의 유지, walking reward 초기화 블록에서 weight=0 설정
+                # curriculum walk_ramp에서 iter 800~2000에 0→10 순차 활성화
 
                 # joint_vel_l2 제거 (dof_acc와 중복)
                 self.rewards.joint_vel_l2 = None
 
-                # joint_default_pose: -0.3 (boot 자유 탐색), curriculum이 -2.0까지 ramp
+                # V44: joint_default_pose -0.5 (큰 보폭 허용)
+                # adaptive safety: shoulder_dev > 0.45 OR ep_len < 200이면 -1.0으로 복귀
                 self.rewards.joint_default_pose = RewTerm(
                     func=velocity_mdp.joint_deviation_l1,
-                    weight=-0.3,
+                    weight=-0.5,
                     params={"asset_cfg": SceneEntityCfg("robot")},
                 )
 
-                # V43-D: Walking reward 초기 weight=0 (curriculum이 순차 활성화)
-                self.rewards.forward_velocity.weight = 0.0   # curriculum: iter 300~800 → 8.0
-                self.rewards.stance_propulsion.weight = 0.0   # curriculum: iter 300~800 → 8.0
-                self.rewards.gait_phase.weight = 0.0          # curriculum: iter 800~2000 → 15.0
-                self.rewards.stride_length.weight = 0.0       # curriculum: iter 800~2000 → 5.0
-                self.rewards.feet_air_time.weight = 0.0       # curriculum: iter 1000~2500 → 20.0
+                # V43-D/V44: Walking reward 초기 weight=0 (curriculum이 순차 활성화)
+                self.rewards.forward_velocity.weight = 0.0    # curriculum: iter 300~800 → 8.0
+                self.rewards.stance_propulsion.weight = 0.0    # curriculum: iter 300~800 → 8.0
+                self.rewards.diagonal_coupling.weight = 0.0    # curriculum: iter 800~2000 → 10.0
+                self.rewards.gait_phase.weight = 0.0           # curriculum: iter 800~2000 → 15.0
+                self.rewards.stride_length.weight = 0.0        # curriculum: iter 800~2000 → 5.0
+                self.rewards.feet_air_time.weight = 0.0        # curriculum: iter 1000~2500 → 20.0
 
                 # V43-E: Boot standing rewards (curriculum이 ramp down)
                 toe_cfg_boot = SceneEntityCfg("contact_forces", body_names=".*toe_link")
