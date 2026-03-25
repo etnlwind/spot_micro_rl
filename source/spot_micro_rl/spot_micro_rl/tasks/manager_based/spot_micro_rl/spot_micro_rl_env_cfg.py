@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V43-D"
+TRAIN_VERSION = "V43-E"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -1250,6 +1250,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                         "stride_length":     {"target": 5.0,  "start": 800,  "end": 2000},
                         "feet_air_time":     {"target": 20.0, "start": 1000, "end": 2500},
                     },
+                    "boot_ramp_config": {
+                        "boot_standing": {"initial": 15.0, "ramp_down_start": 200, "ramp_down_end": 500},
+                        "boot_contact":  {"initial": 5.0,  "ramp_down_start": 300, "ramp_down_end": 600},
+                    },
                     "log_interval": 100,
                 },
             )
@@ -1320,12 +1324,31 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 )
 
                 # V43-D: Walking reward 초기 weight=0 (curriculum이 순차 활성화)
-                # 이 설정 없으면 V42 공통 블록의 full weight가 iter 0에서 활성화됨
                 self.rewards.forward_velocity.weight = 0.0   # curriculum: iter 300~800 → 8.0
                 self.rewards.stance_propulsion.weight = 0.0   # curriculum: iter 300~800 → 8.0
                 self.rewards.gait_phase.weight = 0.0          # curriculum: iter 800~2000 → 15.0
                 self.rewards.stride_length.weight = 0.0       # curriculum: iter 800~2000 → 5.0
                 self.rewards.feet_air_time.weight = 0.0       # curriculum: iter 1000~2500 → 20.0
+
+                # V43-E: Boot standing rewards (curriculum이 ramp down)
+                toe_cfg_boot = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+                self.rewards.boot_standing = RewTerm(
+                    func=custom_mdp.boot_standing_reward,
+                    weight=15.0,
+                    params={
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "target_height": 0.23,
+                        "height_k": 100.0,
+                    },
+                )
+                self.rewards.boot_contact = RewTerm(
+                    func=custom_mdp.boot_foot_contact,
+                    weight=5.0,
+                    params={
+                        "sensor_cfg": toe_cfg_boot,
+                        "contact_threshold": 1.0,
+                    },
+                )
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

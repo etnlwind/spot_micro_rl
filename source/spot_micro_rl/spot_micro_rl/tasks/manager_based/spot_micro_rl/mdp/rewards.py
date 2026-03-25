@@ -106,6 +106,48 @@ def phase_contact_reward(
 
 
 # ═══════════════════════════════════════════
+# V43-E: Boot Standing rewards
+# ═══════════════════════════════════════════
+
+def boot_standing_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_height: float = 0.23,
+    height_k: float = 100.0,
+) -> torch.Tensor:
+    """V43-E: 목표 높이 근접 + 수평 자세 보상. 서있으면 ~1.0, 넘어지면 ~0.0.
+
+    height_score = exp(-k * (height - target)^2): k=100이면 fallen(0.05m)에서 0.04
+    orientation_score = exp(-7 * gravity_xy^2): 기울어지면 감소
+    두 점수의 곱 → 높이 OK + 자세 OK일 때만 높은 보상.
+    alive_bonus(flat +10)와 달리 방향성 있는 gradient 제공.
+    """
+    asset = env.scene[asset_cfg.name]
+    height = asset.data.root_pos_w[:, 2]
+    height_score = torch.exp(-height_k * torch.square(height - target_height))
+
+    gravity_xy = asset.data.projected_gravity_b[:, :2]
+    orientation_score = torch.exp(-7.0 * torch.sum(torch.square(gravity_xy), dim=1))
+
+    return height_score * orientation_score
+
+
+def boot_foot_contact(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """V43-E: 4발 접지율 보상. 4발 모두 접지=1.0, 2발=0.5, 0발=0.0.
+
+    Boot phase에서 "발을 땅에 대라"는 positive gradient.
+    Weight +5로 약하게, iter 300~600에서 ramp down.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    is_contact = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)
+    return is_contact.float().mean(dim=1)
+
+
+# ═══════════════════════════════════════════
 # V43: Connected Trot rewards
 # ═══════════════════════════════════════════
 
@@ -239,9 +281,10 @@ def v42_boot_curriculum(
     pose_weight_initial: float = -0.3,
     pose_weight_final: float = -2.0,
     walk_ramp_config: dict | None = None,
+    boot_ramp_config: dict | None = None,
     log_interval: int = 100,
 ) -> torch.Tensor:
-    """V43-D: 5-Phase Boot-First Curriculum.
+    """V43-E: 5-Phase Boot-First Curriculum + Boot Standing Rewards.
 
     Phase 1 (0~300): Boot — contacts ramp + velocity ramp, walking rewards OFF
     Phase 2 (300~800): Direction — forward_velocity + stance_propulsion ramp
@@ -298,6 +341,29 @@ def v42_boot_curriculum(
             if iteration % log_interval == 0:
                 walk_log_parts.append(f"{name}={cur_w:.1f}/{target_w:.0f}")
 
+    # 3b. V43-E: Boot reward ramp-DOWN (target → 0, standing→walking 전환)
+    boot_log_parts = []
+    if boot_ramp_config:
+        for name, cfg in boot_ramp_config.items():
+            initial_w = cfg["initial"]
+            ramp_down_start = cfg["ramp_down_start"]
+            ramp_down_end = cfg["ramp_down_end"]
+            if iteration < ramp_down_start:
+                cur_w = initial_w
+            elif iteration >= ramp_down_end:
+                cur_w = 0.0
+            else:
+                down_alpha = (iteration - ramp_down_start) / (ramp_down_end - ramp_down_start)
+                cur_w = initial_w * (1.0 - down_alpha)
+            try:
+                term_cfg = env.reward_manager.get_term_cfg(name)
+                term_cfg.weight = cur_w
+                env.reward_manager.set_term_cfg(name, term_cfg)
+            except Exception:
+                pass
+            if iteration % log_interval == 0:
+                boot_log_parts.append(f"{name}={cur_w:.1f}/{initial_w:.0f}")
+
     # 4. Propulsion gate alpha ramp (0 → 1)
     gate_alpha_val = 0.0
     if gate_ramp_start > 0 and gate_ramp_end > gate_ramp_start:
@@ -333,7 +399,9 @@ def v42_boot_curriculum(
 
     if iteration % log_interval == 0:
         walk_str = " | ".join(walk_log_parts) if walk_log_parts else "N/A"
-        print(f"[V43-D] iter {iteration}: contacts={cur_contact:.0f} vel=({cur_vel_low:.2f},{cur_vel_high:.2f}) gate={gate_alpha_val:.2f} pose={cur_pose_weight:.2f}")
+        boot_str = " | ".join(boot_log_parts) if boot_log_parts else "N/A"
+        print(f"[V43-E] iter {iteration}: contacts={cur_contact:.0f} vel=({cur_vel_low:.2f},{cur_vel_high:.2f}) gate={gate_alpha_val:.2f} pose={cur_pose_weight:.2f}")
+        print(f"  boot: {boot_str}")
         print(f"  walk: {walk_str}")
 
     return torch.zeros(env.num_envs, device=env.device)

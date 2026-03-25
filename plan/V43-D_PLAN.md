@@ -1,7 +1,7 @@
 # V43-D Plan: Boot-First Walking Reward Gating
 
 > 작성: 2026-03-25
-> 상태: **설계 완료, 구현 대기**
+> 상태: **훈련 완료 — boot 개선(+20%) but 부족, V43-E로 발전**
 
 ---
 

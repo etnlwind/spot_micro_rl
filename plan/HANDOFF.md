@@ -7,7 +7,7 @@
 
 ## 1. 현재 목표
 
-**자연스러운 Trot 보행 — V43-D: Boot-First Walking Reward Gating (설계 완료, 구현 대기)**
+**자연스러운 Trot 보행 — V43-E: Boot Standing Rewards + Walking Gating (훈련 중)**
 
 | 버전 | 결과 | 비고 |
 |------|------|------|
@@ -54,7 +54,8 @@
 | V43 | 15개 connected reward (per-leg propulsion gating) | boot 실패 (ep_len=8) | gating 이전에 boot 문제 |
 | V43-B | gate_alpha ramp (boot에서 gating OFF) | boot 실패 (V43 동일) | gating ≠ 원인 |
 | V43-C | joint_default_pose -2.0→-0.3 | boot 실패 (V43 동일) | pose ≠ 원인 |
-| **V43-D** | **Walking reward boot gating** | **설계 완료** | **근본 원인: gait_gate 제거** |
+| V43-D | Walking reward boot gating (5-Phase) | ep_len 10 (+20%), fwd_vel 7x↑ | 방향 맞지만 positive 부족 |
+| **V43-E** | **+ boot_standing + boot_contact** | **훈련 중** | **V41 bootstrap + penalty→positive 전환** |
 
 ### V43 시리즈 근본 원인 발견
 
