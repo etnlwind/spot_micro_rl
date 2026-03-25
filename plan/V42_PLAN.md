@@ -31,7 +31,7 @@ splay를 직접 공격하지 않음. 깨끗한 reward로 trot이 학습되면 sp
 
 ---
 
-## 2. V42 Reward 구조 (15개)
+## 2. V42 Reward 구조 (16개)
 
 ### 검증된 성공 패턴 기반
 
@@ -49,16 +49,19 @@ splay를 직접 공격하지 않음. 깨끗한 reward로 trot이 학습되면 sp
 
 [Gait 패턴] 4개
   8. feet_air_time        (+20)     — 발 들기 (thr=0.25)
-  9. gait_phase_reward    (+15)     — Phase clock trot 유도 (V39 교훈 반영, 강한 weight)
+  9. gait_phase_reward    (+15)     — Phase clock trot 유도 (V39 교훈: +1/-1 shape, 강한 weight)
   10. diagonal_coupling   (+10)     — 대각 커플링
   11. stride_length       (+5)      — 보폭
 
-[정규화] 4개
+[정규화] 5개
   12. action_rate_l2      (-0.5)    — 부드러운 동작
   13. dof_acc_l2          (-0.001)  — 관절 가속도 억제
   14. joint_vel_l2        (-0.05)   — 과도한 관절 속도 억제
   15. dof_pos_limits      (-5)      — 관절 한계 보호
+  16. joint_default_pose  (-0.5)    — 12개 관절 전체 기본 자세 정규화 (splay 직접 공격 아님)
 ```
+
+**#16 joint_default_pose**: 성공한 프로젝트들의 표준 패턴. 모든 관절이 기본 자세에서 벗어나면 약한 penalty. shoulder 특정이 아닌 전체 관절 정규화. weight -0.5은 전체의 ~0.5%로 학습 방해 없이 극단적 자세를 자연스럽게 억제.
 
 ### 제거 대상 (기존 50개에서 35개 제거)
 
@@ -103,7 +106,7 @@ V41에서 가져온 아이디어:
 
 ## 4. 설계 원칙
 
-1. **15개 이하 유지** — 추가하고 싶어도 참는다
+1. **16개 유지** — 추가하고 싶어도 참는다
 2. **splay를 직접 공격하지 않음** — shoulder_neutral, CaT 없음
 3. **gait phase가 자세를 교정** — trot이 되면 splay 자연 해결
 4. **부팅 안정화는 검증된 것만** — V35.5 3결합

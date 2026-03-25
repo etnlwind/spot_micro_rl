@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V40-A-2"
+TRAIN_VERSION = "V42"
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -1109,6 +1109,140 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.commands.base_velocity.ranges.lin_vel_x = (0.1, 0.5)  # V17: (0,0.3)→(0.1,0.5)
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (-0.5, 0.5)
+
+        # ══════════════════════════════════════════════════════════
+        # V42: Clean Reward Restart — 16개 reward만 사용
+        # 기존 50+ reward 전부 비활성화 후 16개만 설정
+        # ══════════════════════════════════════════════════════════
+        if TRAIN_VERSION.startswith("V42"):
+            # num_envs 8192 (탐색 다양성)
+            self.scene.num_envs = 8192
+
+            # Phase clock observation 복원 (8-dim)
+            self.observations.policy.phase_clock = ObsTerm(
+                func=custom_mdp.phase_clock_obs,
+                params={"frequency": 2.0},
+            )
+
+            # CaT DoneTerm 제거
+            self.terminations.shoulder_splay = None
+
+            # ── 기존 reward 전부 비활성화 ──
+            for attr in list(vars(self.rewards).keys()):
+                if not attr.startswith('_'):
+                    try:
+                        setattr(self.rewards, attr, None)
+                    except Exception:
+                        pass
+
+            toe_contact_cfg = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+
+            # ── V42 reward: 16개만 설정 ──
+
+            # [생존/안정] 4개
+            self.rewards.alive_bonus = RewTerm(
+                func=custom_mdp.alive_bonus, weight=10.0,
+            )
+            self.rewards.base_height_l2 = RewTerm(
+                func=velocity_mdp.base_height_l2,
+                weight=-15.0,
+                params={"asset_cfg": SceneEntityCfg("robot"), "target_height": 0.23},
+            )
+            self.rewards.flat_orientation_l2 = RewTerm(
+                func=velocity_mdp.flat_orientation_l2,
+                weight=-7.0,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+            self.rewards.undesired_contacts = RewTerm(
+                func=velocity_mdp.undesired_contacts,
+                weight=-100.0,
+                params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base_link|.*shoulder_link|.*leg_link"), "threshold": 1.0},
+            )
+
+            # [전진/추진] 3개
+            self.rewards.forward_velocity = RewTerm(
+                func=custom_mdp.forward_velocity_reward,
+                weight=8.0,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+            self.rewards.track_lin_vel_xy_exp = RewTerm(
+                func=velocity_mdp.track_lin_vel_xy_exp,
+                weight=1.0,
+                params={"command_name": "base_velocity", "std": 0.5},
+            )
+            self.rewards.track_ang_vel_z_exp = RewTerm(
+                func=velocity_mdp.track_ang_vel_z_exp,
+                weight=0.5,
+                params={"command_name": "base_velocity", "std": 0.5},
+            )
+
+            # [Gait 패턴] 4개
+            self.rewards.feet_air_time = RewTerm(
+                func=velocity_mdp.feet_air_time,
+                weight=20.0,
+                params={"sensor_cfg": toe_contact_cfg, "command_name": "base_velocity", "threshold": 0.25},
+            )
+            self.rewards.gait_phase = RewTerm(
+                func=custom_mdp.phase_contact_reward,
+                weight=15.0,
+                params={"sensor_cfg": toe_contact_cfg, "frequency": 2.0, "duty_factor": 0.5, "contact_threshold": 1.0},
+            )
+            self.rewards.diagonal_coupling = RewTerm(
+                func=custom_mdp.diagonal_joint_coupling_reward,
+                weight=10.0,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+            self.rewards.stride_length = RewTerm(
+                func=custom_mdp.stride_length_reward,
+                weight=5.0,
+                params={"sensor_cfg": toe_contact_cfg, "asset_cfg": SceneEntityCfg("robot"), "min_vel": 0.05},
+            )
+
+            # [정규화] 5개
+            self.rewards.action_rate_l2 = RewTerm(
+                func=velocity_mdp.action_rate_l2, weight=-0.5,
+            )
+            self.rewards.dof_acc_l2 = RewTerm(
+                func=velocity_mdp.joint_acc_l2, weight=-0.001,
+            )
+            self.rewards.joint_vel_l2 = RewTerm(
+                func=custom_mdp.joint_vel_l2_reward,
+                weight=-0.05,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+            self.rewards.dof_pos_limits = RewTerm(
+                func=velocity_mdp.joint_pos_limits,
+                weight=-5.0,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+            self.rewards.joint_default_pose = RewTerm(
+                func=velocity_mdp.joint_deviation_l1,
+                weight=-0.5,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+
+            # ── 커리큘럼 단순화 (부팅 3결합만) ──
+            self.rewards.curriculum = RewTerm(
+                func=custom_mdp.reward_weight_curriculum,
+                weight=1.0,
+                params={
+                    "boot_ramp_start": 0,
+                    "boot_ramp_end": 300,
+                    "boot_contact_initial": -20.0,
+                    "boot_contact_final": -100.0,
+                    "boot_vel_initial_low": 0.01,
+                    "boot_vel_initial_high": 0.05,
+                    "boot_vel_final_low": 0.1,
+                    "boot_vel_final_high": 0.5,
+                    "update_interval": 10,
+                    "log_interval": 100,
+                    # V42: splay ramp/CaT ramp 비활성화
+                    "splay_ramp_start": 0,
+                    "splay_ramp_end": 0,
+                    "cat_ramp_start": 0,
+                    "cat_ramp_end": 0,
+                },
+            )
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)
