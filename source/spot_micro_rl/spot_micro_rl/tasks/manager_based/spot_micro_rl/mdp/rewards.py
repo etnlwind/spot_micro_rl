@@ -107,7 +107,6 @@ def phase_contact_reward(
 
 def v42_boot_curriculum(
     env: ManagerBasedRLEnv,
-    env_ids: torch.Tensor,
     boot_ramp_end: int = 300,
     boot_contact_initial: float = -20.0,
     boot_contact_final: float = -100.0,
