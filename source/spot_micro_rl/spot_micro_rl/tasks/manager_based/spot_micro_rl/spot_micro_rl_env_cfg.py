@@ -1240,30 +1240,33 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             if TRAIN_VERSION.startswith("V43"):
                 toe_cfg_v43 = SceneEntityCfg("contact_forces", body_names=".*toe_link")
 
-                # forward_velocity → forward_velocity_gated (soft stride gating)
+                toe_body_v43 = SceneEntityCfg("robot", body_names=".*toe_link")
+
+                # forward_velocity → forward_velocity_gated (per-leg propulsion gating)
                 self.rewards.forward_velocity = RewTerm(
                     func=custom_mdp.forward_velocity_gated,
                     weight=8.0,
                     params={
                         "asset_cfg": SceneEntityCfg("robot"),
                         "sensor_cfg": toe_cfg_v43,
+                        "foot_cfg": toe_body_v43,
                         "target_vel": 0.3,
-                        "stride_threshold": 1.0,
-                        "min_vel": 0.05,
+                        "propulsion_threshold": 0.1,
                     },
                 )
 
-                # gait_phase → gait_phase_contact (접지+추진 연결)
+                # gait_phase → gait_phase_contact (per-leg 접지+추진 연결)
                 self.rewards.gait_phase = RewTerm(
                     func=custom_mdp.gait_phase_contact_reward,
                     weight=15.0,
                     params={
                         "sensor_cfg": toe_cfg_v43,
+                        "foot_cfg": toe_body_v43,
                         "asset_cfg": SceneEntityCfg("robot"),
                         "frequency": 2.0,
                         "duty_factor": 0.5,
                         "contact_threshold": 1.0,
-                        "min_propulsion": 0.05,
+                        "min_push": 0.05,
                     },
                 )
 

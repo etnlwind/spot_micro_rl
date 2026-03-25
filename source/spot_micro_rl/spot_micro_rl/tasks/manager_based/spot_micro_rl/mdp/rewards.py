@@ -109,69 +109,92 @@ def phase_contact_reward(
 # V43: Connected Trot rewards
 # ═══════════════════════════════════════════
 
+def _per_leg_propulsion(env, sensor_cfg, foot_cfg, asset_cfg, contact_threshold=1.0):
+    """Helper: per-leg 추진력 계산 (stance_propulsion_reward 로직 재사용).
+
+    Returns:
+        stance_mask: (num_envs, 4) — 접지 상태
+        push_magnitude: (num_envs, 4) — 각 발의 추진력 (0~1 normalized)
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    stance_mask = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()
+
+    foot_asset = env.scene[foot_cfg.name]
+    foot_vel_w = foot_asset.data.body_vel_w[:, foot_cfg.body_ids, :3]
+
+    robot = env.scene[asset_cfg.name]
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    heading_x = 1.0 - 2.0 * (y * y + z * z)
+    heading_y = 2.0 * (x * y + w * z)
+
+    foot_heading_vel = (
+        foot_vel_w[:, :, 0] * heading_x.unsqueeze(1) +
+        foot_vel_w[:, :, 1] * heading_y.unsqueeze(1)
+    )
+    body_vel_w = robot.data.root_lin_vel_w
+    body_heading_vel = body_vel_w[:, 0] * heading_x + body_vel_w[:, 1] * heading_y
+
+    relative_vel = foot_heading_vel - body_heading_vel.unsqueeze(1)
+    push_magnitude = torch.clamp(-relative_vel, min=0.0)  # 뒤로 밀기 = 양수
+    normalized_push = torch.clamp(push_magnitude / 0.3, 0.0, 1.0)
+
+    return stance_mask, normalized_push
+
+
 def forward_velocity_gated(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     target_vel: float = 0.3,
-    stride_threshold: float = 1.0,
-    min_vel: float = 0.05,
+    propulsion_threshold: float = 0.1,
 ) -> torch.Tensor:
-    """V43: 전진 보상 + soft stride gating.
+    """V43: 전진 보상 + soft propulsion gating.
 
-    forward_velocity_reward에 stride-based soft gate 추가.
-    gate = min(1, stride/threshold) → 보폭 없이 미끄러지면 보상 감소.
-    부팅 때 stride 작아도 학습 신호 완전 차단 안 됨.
+    다리로 땅을 밀어서 전진할 때만 보상. 미끄러짐/기울어짐 exploit 방지.
+    gate = per-leg propulsion의 평균 (0~1). 다리 안 쓰면 gate ≈ 0.
+    soft gate: 부팅 때 약한 추진이라도 학습 신호 유지.
     """
     asset = env.scene[asset_cfg.name]
     forward_vel = asset.data.root_lin_vel_b[:, 0]
     normalized_vel = torch.clamp(forward_vel / target_vel, -1.0, 1.0)
-    # orientation quality (기울어지면 보상 감소)
+
     gravity_xy = asset.data.projected_gravity_b[:, :2]
     orientation_quality = torch.exp(-7.0 * torch.sum(torch.square(gravity_xy), dim=1))
-    # soft stride gate
-    contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
-    stride_val = _compute_stride_length(env, contact_sensor, sensor_cfg.body_ids, asset)
-    stride_gate = torch.clamp(stride_val / stride_threshold, 0.0, 1.0)
-    return normalized_vel * orientation_quality * stride_gate
 
+    # per-leg propulsion으로 soft gate
+    stance_mask, push = _per_leg_propulsion(env, sensor_cfg, foot_cfg, asset_cfg)
+    propulsion_gate = (stance_mask * push).mean(dim=1)  # 4다리 평균 추진력
+    propulsion_gate = torch.clamp(propulsion_gate / propulsion_threshold, 0.0, 1.0)
 
-def _compute_stride_length(env, contact_sensor, body_ids, asset):
-    """stride_length를 간략 계산 — 전진 속도와 feet_air_time으로 추정."""
-    # 간단한 proxy: forward_vel * mean_air_time
-    vel_x = asset.data.root_lin_vel_b[:, 0]
-    return torch.clamp(vel_x, min=0.0)  # 전진 중이면 양수, 비전진이면 0
+    return normalized_vel * orientation_quality * propulsion_gate
 
 
 def gait_phase_contact_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     frequency: float = 2.0,
     duty_factor: float = 0.5,
     contact_threshold: float = 1.0,
-    min_propulsion: float = 0.05,
+    min_push: float = 0.05,
 ) -> torch.Tensor:
-    """V43: Phase + 접지·추진 연결.
+    """V43: Phase + per-leg 접지·추진 연결.
 
-    - stance phase: 접지 + 최소 추진력 있으면 +1, 없으면 -1
+    - stance phase: 접지 + per-leg 추진력 있으면 +1, 없으면 -1
     - swing phase: 미접지 시 +1, 접지 시 -1
-    V42 gait_phase와 다른 점: stance에서 "접지 + 추진"을 요구.
-    기둥처럼 서있기만 해도 -1 (정적 버팀 exploit 방지).
+    stance에서 root vel이 아닌 각 발의 실제 추진력을 확인.
+    기둥처럼 서있기만 해도 -1. 한쪽만 밀어도 나머지는 -1.
     """
-    contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
-    forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
-    is_contact = (forces > contact_threshold).float()
+    stance_mask, push = _per_leg_propulsion(env, sensor_cfg, foot_cfg, asset_cfg, contact_threshold)
 
-    # 추진력 계산: 발의 동체-상대 heading 방향 속도
-    foot_asset = env.scene[sensor_cfg.name.replace("contact_forces", "robot")] if hasattr(env.scene, sensor_cfg.name) else env.scene[asset_cfg.name]
-    robot = env.scene[asset_cfg.name]
-    # 간략 propulsion: 전진 속도가 있으면 stance 중 추진 있는 것으로 간주
-    vel_x = robot.data.root_lin_vel_b[:, 0]  # (num_envs,)
-    has_propulsion = (vel_x > min_propulsion).float().unsqueeze(1).expand_as(is_contact)
+    # per-leg: 접지 중이면서 실제로 밀고 있는가
+    is_pushing = (stance_mask > 0.5) & (push > min_push)
+    is_good_stance = is_pushing.float()
 
-    # stance에서는 접지 + 추진이 모두 필요
-    is_good_stance = is_contact * has_propulsion  # 접지 AND 추진
+    is_contact = stance_mask  # 접지 상태
 
     t = env.episode_length_buf.float() * env.step_dt
     base_phase = 2.0 * math.pi * frequency * t
@@ -181,13 +204,11 @@ def gait_phase_contact_reward(
     rr_phase = base_phase
     phases = torch.stack([fl_phase, fr_phase, rl_phase, rr_phase], dim=1)
     phase_norm = phases % (2.0 * math.pi)
-    stance_threshold = duty_factor * 2.0 * math.pi
-    in_stance = (phase_norm < stance_threshold).float()
+    stance_threshold_val = duty_factor * 2.0 * math.pi
+    in_stance = (phase_norm < stance_threshold_val).float()
 
-    # stance phase: 접지+추진이면 +1, 아니면 -1
-    # swing phase: 미접지이면 +1, 접지이면 -1
-    stance_score = 2.0 * is_good_stance - 1.0  # 접지+추진=+1, 아니면=-1
-    swing_score = 2.0 * (1.0 - is_contact) - 1.0  # 미접지=+1, 접지=-1
+    stance_score = 2.0 * is_good_stance - 1.0
+    swing_score = 2.0 * (1.0 - is_contact) - 1.0
 
     score = in_stance * stance_score + (1.0 - in_stance) * swing_score
     return score.mean(dim=1)
