@@ -1,7 +1,7 @@
 # V44 Plan: Trot Quality — Coupling 복원 + Pose 완화
 
 > 작성: 2026-03-26
-> 상태: **설계 완료, 구현 대기**
+> 상태: **훈련 완료 — stride 개선(0.39→2.0) but splay 악화(0.40→0.53), coupling 0.0**
 
 ---
 

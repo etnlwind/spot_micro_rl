@@ -224,11 +224,11 @@ V43-D: 기존 gait_gate 철학 복원 + 5-Phase 순차 활성화로 해결 예�
 
 ## 6. 향후 로드맵
 
-### 현재 (V44 설계 대기)
+### 현재 (V45 설계 완료)
 | 단계 | 핵심 변경 | 목표 |
 |------|----------|------|
-| **V44** | diagonal_coupling 복원 + pose 완화 | stride > 3.0, coupling > 0.2 |
-| V44+ (필요 시) | stride weight 상향, V38.3 reward 선별 복원 | stride > 6.0 |
+| **V45** | shoulder/leg 분리 + pair coupling + leg_lift | stride > 3.0, coupling > 0.2, shoulder < 0.45 |
+| V45+ (필요 시) | stride weight 상향, V38.3 추가 reward 복원 | stride > 6.0 |
 
 ### 중기
 - Splay 재평가: clean reward + gait_gate로 trot이 되면 splay 자연 해결 관찰
