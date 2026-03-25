@@ -1,4 +1,4 @@
-# V41 Plan: Narrow-Stance Bootstrap Curriculum
+# V41-A Plan: Narrow-Stance Bootstrap Curriculum
 
 작성: 2026-03-24  
 상태: 설계 초안
