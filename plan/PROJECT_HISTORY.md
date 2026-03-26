@@ -1,22 +1,34 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-03-18
-**Project Status**: V31.2 훈련 진행 중 — Front swing 강제 (Joint-Level 접근)
-**Current Active Run**: `2026-03-18_17-43-22` / TRAIN_VERSION=”V31.2”
+**Last Updated**: 2026-03-26
+**Project Status**: V46 설계 완료 — V38.3 기반 + boot gating + shoulder-leg 분리 (~30 curated reward)
+**Current Active Run**: V44 훈련 중 (`2026-03-26_01-55-13`)
 
 > 최신 핸드오프: `plan/HANDOFF.md` 참조
 
 ---
 
-## 📌 Current Status Snapshot (V31.2 active)
+## Current Status Snapshot (V46 설계 완료)
 
 | 항목 | 값 |
 |------|-----|
-| TRAIN_VERSION | `”V31.2”` |
-| 상태 | 훈련 진행 중 (run 2026-03-18_17-43-22) |
-| 진입점 | 프로젝트 루트 `supervisor.cmd` |
-| 핵심 변경 | contact-level 패널티 전폐, front_joint_velocity(+15) + front_joint_frozen(-40) 신규 |
-| 이전 버전 | V31.1 실패 (front_both_ground + min_swing_ratio도 대각 역할 분리 유발 → RL 붕괴) |
+| TRAIN_VERSION | `”V44”` (훈련 중), `”V46”` (다음) |
+| 상태 | V44 수렴 확정, V46 설계 완료 |
+| 진입점 | `isaac_ops/listen.cmd` (listener), `isaac_ops/cli.cmd` (CLI) |
+| V46 핵심 | V38.3 기반 ~30 reward + boot gating(V43-E) + shoulder_neutral 분리(V44) |
+
+### V42~V46 학습 버전 요약
+
+| 버전 | 판정 | 핵심 교훈 |
+|------|------|-----------|
+| V42 | 미실행 | 50→16개 clean restart 설계, exploit 발견 |
+| V43 | boot 실패 | walking reward가 boot에서 충돌 |
+| V43-B~C | boot 실패 | gating, pose 모두 원인 아님 |
+| V43-D | 부분 성공 | walking gating → fwd_vel 7x↑, but positive 부족 |
+| **V43-E** | **boot 성공** | boot_standing → ep_len 248, shoulder 0.40 (역대 최고) |
+| V44 | 부분 성공 | stride 1.3~2.4↑, but splay 0.53↑, coupling 0.0 |
+| V45 | 미구현 | shoulder-leg 분리 설계 (V46에 통합) |
+| **V46** | **설계 완료** | V38.3 + boot gating + shoulder 분리 = best of both worlds |
 
 ### 학습 버전 요약 (V23~V31.1)
 

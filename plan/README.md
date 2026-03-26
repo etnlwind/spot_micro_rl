@@ -1,6 +1,6 @@
-# SpotMicro RL 실험 흐름 요약 (V1 ~ V39)
+# SpotMicro RL 실험 흐름 요약 (V1 ~ V46)
 
-이 문서는 `plan` 폴더의 V1~V39 흐름을 바탕으로,
+이 문서는 `plan` 폴더의 V1~V46 흐름을 바탕으로,
 각 버전이 **무엇을 해결하려던 실험이었는지**를 짧고 쉽게 정리하면서도,
 전체 맥락이 보이도록 해설을 덧붙인 요약 문서임.
 
@@ -178,6 +178,49 @@ Rough 지형으로 넘어가자,
 
 ---
 
+# 6기 — Clean Reward + Boot 해결 시대 (V42 ~ V44)
+
+## 이 시기의 핵심
+
+50개 reward의 복잡한 상호작용이 splay를 유지시킨다는 가설로, reward를 15개로 줄이는 “Clean Restart” 시도. Boot 실패(서지도 못함)를 거쳐 근본 원인을 발견하고 해결.
+
+> **”reward 수를 줄이는 것이 정답이 아니라, 어떤 reward가 있는가가 핵심”**
+
+## 버전별 한 줄 요약
+
+- **V42** — 50개→16개 clean reward. 구현 완료했지만 독립 reward의 exploit 가능성 발견 → V43으로 연결 전환.
+- **V43** — 15개 connected reward (per-leg propulsion gating). Boot 실패 (ep_len=8). walking reward가 boot에서 충돌하는 것이 원인.
+- **V43-B** — propulsion gate를 boot에서 OFF. Boot 여전히 실패. gating이 원인이 아님을 확인.
+- **V43-C** — joint_default_pose -2.0→-0.3 완화. Boot 여전히 실패. pose가 원인이 아님을 확인.
+- **V43-D** — Walking reward boot gating (5-Phase). ep_len 10 (V43 대비 +20%), fwd_vel 7배 향상. 방향은 맞지만 positive signal 부족.
+- **V43-E** — boot_standing + boot_foot_contact 추가 (V41 bootstrap 철학). **Boot 성공 (ep_len 248, shoulder 0.40)**. 하지만 stride 0.39, coupling 0.0 (종종걸음).
+- **V44** — diagonal_coupling 복원 + pose -0.5 완화. stride 1.3~2.4 (개선), 하지만 shoulder 0.53 (악화), coupling 0.0 (변화 없음). shoulder-leg trade-off 확인.
+
+## 핵심 교훈
+
+- walking reward가 boot에서 충돌 → boot gating 필수 (V43-D)
+- boot에 positive signal 필요 → boot_standing reward (V43-E)
+- joint_default_pose가 shoulder와 leg를 동시 제어 → 분리 필요 (V44)
+- coupling reward의 sparse gradient → output=0이면 weight 올려도 0 (V44)
+- 15개 reward는 splay 해결(0.40)하지만 보행 품질 부족(stride 0.39)
+
+---
+
+# 7기 — 통합 시대 (V45 ~ V46)
+
+## 이 시기의 핵심
+
+15개 clean reward와 50개 rich reward 각각의 장점을 합치는 방향. “reward 수가 아니라 어떤 reward가 있는가”가 핵심.
+
+> **V38.3의 검증된 보행 품질 + V42~V44에서 발견한 boot/splay 개선을 통합**
+
+## 버전별 한 줄 요약
+
+- **V45** — shoulder-leg 분리 + pair coupling + leg_lift. 설계만 완료 (미구현). V46으로 전략 전환.
+- **V46** — V38.3 기반(~30개 curated reward) + boot gating(V43-E) + shoulder_neutral 분리(V44). 설계 완료, 구현 대기.
+
+---
+
 # 전체 흐름을 가장 짧게 다시 요약하면
 
 - **V1~V8**: 일단 걷게 만들기
@@ -185,6 +228,8 @@ Rough 지형으로 넘어가자,
 - **V18~V23**: 커리큘럼과 판정 체계 만들기
 - **V24~V35**: 4발 참여를 속이는 꼼수와 loophole 막기
 - **V36~V39**: splay를 직접 누르다가, 결국 정상 gait 구조를 가르치는 단계로 전환
+- **V42~V44**: reward를 줄였더니 splay는 해결, 보행은 부족 → boot gating, shoulder 분리 발견
+- **V46**: V38.3의 보행 품질 + V42~V44의 교훈을 통합하는 ~30개 curated reward
 
 ---
 
@@ -192,5 +237,5 @@ Rough 지형으로 넘어가자,
 
 이 프로젝트의 흐름은,
 
-> **“걷게 만들기”에서 시작해, “로봇이 쓰는 꼼수를 막고”, 마지막에는 “정상적인 trot 구조를 직접 가르치는 방향”으로 발전해 온 실험의 연속**이라고 볼 수 있음.
+> **”걷게 만들기”에서 시작해, “꼼수를 막고”, “reward를 줄여보고”, 결국 “좋은 reward를 선별하는 것이 핵심”이라는 결론에 도달한 실험의 연속**이라고 볼 수 있음.
 

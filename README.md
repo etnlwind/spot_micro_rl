@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V39 설계 중 (CPG/Phase Clock + Soft CaT + Reward 정리). V38 시리즈에서 CaT로 shoulder dev 0.54→0.45 달성, 0.45 이하는 구조적 gait 유도 필요.
+**현재 상태**: V46 설계 완료 (V38.3 기반 + boot gating + shoulder-leg 분리). V42~V44에서 clean reward 실험 완료 — boot 성공(V43-E, ep_len 248), stride/coupling은 풍부한 reward 필요 확인. V46은 V38.3의 검증된 보행 품질(stride 6.94) + 한 달간의 교훈(boot gating, shoulder 분리)을 통합하는 ~30개 curated reward 구조.
 
 ### 기술 스택
 
@@ -17,7 +17,7 @@ NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈
 | Python | 3.10 (conda env `env_isaaclab`) |
 | 알고리즘 | PPO ([RSL-RL](https://github.com/leggedrobotics/rsl_rl)) |
 | GPU | NVIDIA RTX 5080 Laptop 16GB |
-| 병렬 환경 수 | 20,480 |
+| 병렬 환경 수 | 8,192 (V42+), 20,480 (V41 이하) |
 | 최대 iteration | 15,000 |
 
 ### 등록된 환경
