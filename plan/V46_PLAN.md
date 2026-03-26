@@ -62,7 +62,7 @@ V43-E의 안정된 boot/posture 위에 V38.3의 검증된 gait reward를 추가�
   swing_stride(+)          — 스윙 중 보폭 (1.27)
   foot_clearance(+)        — 발 높이 (0.52)
   trot_gait(+)             — trot 패턴 (0.67)
-  diagonal_coupling(+10)   — 대각 커플링 (V38.3에서 0.52 작동)
+  diagonal_coupling(+10)   — 대각 커플링 (V38.3에서 0.52 작동, 단독 driving이 아닌 gait cluster 일부로 유지)
 ```
 
 모두 walk_ramp에 포함 (iter 800~2000): boot에서는 OFF.
@@ -112,6 +112,8 @@ V38.3 stride: 6.94
 ```
 제거: joint_default_pose
 추가: shoulder_neutral(-3.0, shoulder 4 joints only)
+      (근거: V38.3의 -6.0은 50개 reward 환경에서도 splay 0.46. V43-E는 pose 없이도 0.40.
+       ~25개 reward에서는 -3.0(중간값)이면 0.40~0.43 기대)
 제거: stance_width_penalty (있으면)
 ```
 
