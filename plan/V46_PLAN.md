@@ -86,17 +86,22 @@ V38.3 stride: 6.94
 
 ### 판정 기준
 
-| iter | 성공 | 실패 |
-|------|------|------|
+| iter | 성공 → Run B 진입 | 실패 → 중단/재검토 |
+|------|-------------------|-------------------|
 | 300 | ep_len > 30 | < 15 → boot 퇴행, 중단 |
 | 1000 | ep_len > 200 | < 100 → 중단 |
-| **3000** | **stride > 2.0** | < 1.0 → gait reward 부족 가설 약함 |
-| **3000** | **coupling > 0** | 0.0 → coupling은 Run C에서 별도 해결 |
+| **3000** | **stride > 2.0** (2.0~4.0 = Run B 진입 가능) | < 1.0 → gait reward 부족 가설 약함 |
+| **3000** | **coupling > 0** (0.1~0.3 = Run B 진입 가능) | 0.0 → coupling은 Run C에서 별도 해결 |
+
+### 미포함 reward 상태 명시
+
+- **four_limb_cooperation**: V43-E에서 None. Run A에서도 **미추가** (V38.3에서 2.71이었지만, splay 유발 가능성 있어 관찰 대상으로 보류. Run A 결과 보고 필요 시 Run B/C에서 검토)
 
 ### 리스크
 
 1. **V38.3 gait reward가 boot 충돌**: rear_* reward가 boot에서 noise → 완화: walk_ramp으로 OFF
 2. **rear_* reward가 splay 유발**: 교훈 #9 "다리별 전용 보상은 역할 분리 유발" → 감시: shoulder_dev > 0.50
+   - **splay 재발 시 감축 우선순위**: rear_joint_velocity(가장 큰 positive 9.98) → rear_alternation(4.38) 순으로 weight 하향
 3. **pose -2.0이 여전히 stride 차단**: V38.3은 극복했지만 구조가 다름 → 감시: iter 2000에서 stride < 1.0이면 가설 재검토
 
 ---
