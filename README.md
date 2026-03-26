@@ -209,10 +209,11 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V38.3` 완료, `V39` 설계 중 (CPG/Phase Clock)
+- 학습 버전: `V44` 훈련 중, `V46` 설계 완료 (다음)
 - active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
-- 참고 문서: `plan/V39_PLAN.md` (다음), `plan/V38_PLAN.md` (완료), `plan/HANDOFF.md`
+- 기능 플래그: `_CLEAN_REWARDS`, `_CONNECTED_TROT` (env_cfg.py 상단)
+- 참고 문서: `plan/V46_PLAN.md` (다음), `plan/V43-E_PLAN.md` (boot 성공), `plan/HANDOFF.md`
 
 ---
 
@@ -240,9 +241,9 @@ prob(dev) = base_prob × clamp((max_dev - threshold) / margin, 0, 1)
 
 **Soft CaT 결과** (V38.3): shoulder dev 0.54→0.45 (-16%), 0.45에서 local optimum 정체.
 
-### V39 방향 (다음)
+### V46 방향 (다음)
 
-Soft CaT 유지 + **CPG/Phase Clock**으로 구조적 gait 유도 + reward 50→25개 정리. 상세: `plan/V39_PLAN.md`
+V38.3 기반 ~30개 curated reward + boot gating(V43-E 검증) + shoulder_neutral 분리(V44 교훈). 상세: `plan/V46_PLAN.md`
 
 **부팅 안정화** (V35.5 검증 완료):
 - `alive_bonus=10.0`: 매 step 생존 보상
@@ -348,6 +349,18 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V38.2** | **03-21~03-22** | **Soft CaT: prob ∝ dev, phase transition 제거** | 🟡 안정적이나 prob 0.0004 너무 약함 (shoulder dev 0.52 정체) |
 | **V38.3** | **03-22~03-23** | **Soft CaT prob 0.0015 (3.75x)** | 🟡 shoulder dev 0.54→0.45 (-16%, 역대 최대), 0.45 local optimum |
 | **V38.3.1** | **03-23** | **CaT + L2 병행 (resume + weight -12)** | ❌ 실패 (critic 무효화 + curriculum 미복원) |
+| **V39** | **03-23~03-24** | **CPG/Phase Clock + reward shape 실험** | 🟡 shape 교훈 획득, stride -39% 악화 |
+| **V40-A** | **03-24** | **CaT prob 0.003 단일 변수 실험** | 🟡 0.45→0.384 달성, ep_len 170 (천장 확인) |
+| **V41** | **03-24** | **Narrow-stance bootstrap 설계** | 미구현 (V42로 전환) |
+| **V42** | **03-25** | **Clean Reward Restart: 50→16개, 8192 envs** | 설계 완료, exploit 발견 → V43 |
+| **V43** | **03-25** | **15개 connected reward (per-leg propulsion gating)** | ❌ boot 실패 (ep_len=8, walking reward 충돌) |
+| **V43-B** | **03-25** | **propulsion gate를 boot에서 OFF** | ❌ boot 실패 (gating ≠ 원인) |
+| **V43-C** | **03-25** | **joint_default_pose -2.0→-0.3** | ❌ boot 실패 (pose ≠ 원인) |
+| **V43-D** | **03-25** | **Walking reward boot gating (5-Phase 순차 활성화)** | 🟡 ep_len 10(+20%), fwd_vel 7x↑, positive 부족 |
+| **V43-E** | **03-25** | **boot_standing + boot_foot_contact (V41 bootstrap 적용)** | ✅ **boot 성공 (ep_len 248, shoulder 0.40 역대 최고)**, stride 0.39 |
+| **V44** | **03-26** | **diagonal_coupling 복원 + pose -0.5 + adaptive safety** | 🟡 stride 1.3~2.4↑, shoulder 0.53↑ (trade-off), coupling 0.0 |
+| **V45** | **03-26** | **shoulder-leg 분리 + pair coupling + leg_lift** | 미구현 (V46으로 전략 전환) |
+| **V46** | **03-26** | **V38.3 기반(~30 curated reward) + boot gating + shoulder 분리** | 설계 완료, 구현 대기 |
 
 ### 핵심 교훈
 
@@ -376,6 +389,14 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 - **CaT에도 local optimum 한계**: 벌칙만으로는 0.45 이하 불가, positive incentive + 구조적 gait 유도 필요
 - **resume 중 reward weight 변경 금지**: critic 무효화로 기존 성과 소실 (교훈 #4 재확인)
 - **Isaac Lab resume은 curriculum 미복원**: CaT ramp 등 curriculum은 iter 0부터 재시작됨
+- **walking reward가 boot에서 충돌**: feet_air_time(+20) "발 들어"가 alive_bonus(+10) "서있어"와 50:50 충돌 → boot gating 필수 (V43-D)
+- **boot에 positive signal 필수**: reward를 끄는 것과 대체하는 것은 다름. penalty만 남으면 "빨리 죽는 게 이득" (V43-E)
+- **net reward 부호가 학습 방향 결정**: net negative면 ep_len 감소가 최적해 (V43-D 분석)
+- **reward 수를 줄이는 것 ≠ 정답**: 15개 clean → splay 해결(0.40) but 보행 부족(stride 0.39). 50개에서 stride 6.94. 핵심은 "어떤 reward" (V42~V44)
+- **joint_default_pose는 shoulder와 leg를 분리해야 함**: 12개 관절 동일 penalty → stride↔splay trade-off (V44)
+- **output=0 reward는 weight를 올려도 0**: coupling reward 1500+ iter 무효 (V44, 교훈#1 재확인)
+- **구체적 보행 신호 없이 RL은 가장 쉬운 방법(종종걸음)을 찾음**: leg_lift, rear_alternation 등 필요 (V43-E vs V38.3)
+- **reward 설계 시 phase별 상호작용/충돌 분석 필수**: 개별 reward는 합리적이어도 동시 작동 시 충돌 가능 (V43 boot 실패)
 
 ---
 
