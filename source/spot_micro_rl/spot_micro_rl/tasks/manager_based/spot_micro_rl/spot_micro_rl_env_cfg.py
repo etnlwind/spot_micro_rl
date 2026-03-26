@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V46-A"
+TRAIN_VERSION = "V46-B"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1254,10 +1254,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "boot_vel_high_final": 0.5,
                     "gate_ramp_start": 500,
                     "gate_ramp_end": 1500,
-                    "pose_ramp_start": 1000,
-                    "pose_ramp_end": 2500,
-                    "pose_weight_initial": -0.3,
-                    "pose_weight_final": -2.0,
+                    "pose_ramp_start": 0,
+                    "pose_ramp_end": 0,
+                    "pose_weight_initial": -3.0,
+                    "pose_weight_final": -3.0,
                     "walk_ramp_config": {
                         "forward_velocity":    {"target": 8.0,  "start": 300,  "end": 800},
                         "stance_propulsion":   {"target": 8.0,  "start": 300,  "end": 800},
@@ -1344,11 +1344,17 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # joint_vel_l2 제거 (dof_acc와 중복)
                 self.rewards.joint_vel_l2 = None
 
-                # V46-A: joint_default_pose V43-E 방식 복원 (-0.3, curriculum이 -2.0까지 ramp)
-                self.rewards.joint_default_pose = RewTerm(
-                    func=velocity_mdp.joint_deviation_l1,
-                    weight=-0.3,
-                    params={"asset_cfg": SceneEntityCfg("robot")},
+                # V46-B: joint_default_pose 제거 → shoulder_neutral로 교체 (shoulder만 제어, leg 자유)
+                self.rewards.joint_default_pose = None
+                self.rewards.shoulder_neutral = RewTerm(
+                    func=custom_mdp.shoulder_neutral_penalty,
+                    weight=-3.0,
+                    params={
+                        "shoulder_cfg": SceneEntityCfg("robot", joint_names=[
+                            "front_left_shoulder", "front_right_shoulder",
+                            "rear_left_shoulder", "rear_right_shoulder"]),
+                        "target_angles": [-0.04, -0.04, -0.04, -0.04],
+                    },
                 )
 
                 # V46-A: V38.3 gait reward 8개 추가 (보행 품질 복원)
