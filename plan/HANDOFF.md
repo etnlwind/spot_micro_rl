@@ -7,7 +7,7 @@
 
 ## 1. 현재 목표
 
-**자연스러운 Trot 보행 — V46-A/B/C 3-Run 실험 (설계 완료, Run A 구현 대기)**
+**자연스러운 Trot 보행 — V47: V38.3 순정 + Boot 가속 (설계 완료, 구현 대기)**
 
 ### 프로젝트 한 줄 요약
 
@@ -38,37 +38,28 @@ SpotMicro 4족 로봇이 PPO(Isaac Lab)로 자연스러운 trot 보행을 학습
 
 ---
 
-## 3. V46 3-Run 실험 계획
+## 3. V47 실험 계획
 
-### 전략: V43-E(검증된 boot) + V38.3(검증된 gait) 순차 통합
+### 전략 전환: V38.3 순정 + boot 가속만
 
-한 번에 "V46 full"이 아니라, **3개 가설을 독립 실험으로 검증**:
+V46 3-Run 실험(A/B/C)에서 확인: gait reward 추가(stride 1.45)와 shoulder 분리(0.44)로는 V38.3 수준(stride 6.79)에 도달 불가. 제거한 band/residency reward(+37.56)가 stride의 핵심 동력이었음.
 
-### Run A (V46-A): V43-E + V38.3 gait reward 추가
+**결론: 작동하는 시스템(V38.3)을 고치지 말고, 부족한 것(boot)만 더하자.**
 
-```
-가설: "V43-E의 종종걸음은 gait reward 부족 때문이다"
-baseline: V43-E 그대로 (boot, pose -0.3→-2.0 ramp, 8192 envs)
-추가: leg_lift, rear_alternation, rear_joint_vel, rear_swing,
-      swing_stride, foot_clearance, trot_gait, diagonal_coupling (8개)
-금지: shoulder-leg 분리, coupling 재설계
-판정: 3000 iter — stride > 2.0 → Run B로
-```
-
-### Run B (V46-B): Run A + shoulder-leg 분리
+### V47: V38.3 순정 + boot_standing + boot_contact
 
 ```
-가설: "stride↔splay trade-off는 shoulder와 leg를 분리하면 해소된다"
-변경: joint_default_pose 제거 → shoulder_neutral(-3.0, 4 joints only)
-판정: 3000 iter — stride 유지 + shoulder < 0.45 → Run C로
+유지: V38.3 reward 77개 전부, 기존 curriculum, CaT, shoulder -6.0
+추가: boot_standing(+15), boot_contact(+5) — ramp down
+검증: "V38.3의 stride 6.79가 boot 가속과 함께 재현되는가?"
+판정: iter 3000 — stride > 5.0, coupling > 0.3
 ```
 
-### Run C (V46-C): Run B + coupling shaping 보강
+### 이후 경로
 
 ```
-가설: "coupling 0.0은 sparse gradient 때문이며, 보조 gait reward로 진입 가능"
-변경: coupling 진입 경로 추가 (rear_alternation + trot_gait이 자연 지원)
-판정: 3000 iter — coupling > 0.2 → 성공
+V47.1: shoulder 개선 (shoulder_neutral -6→-3 등)
+V47.2: coupling 추가 개선 (필요 시)
 ```
 
 ### 중단 기준 (전 Run 공통)
