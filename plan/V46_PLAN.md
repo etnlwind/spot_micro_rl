@@ -1,319 +1,199 @@
-# V46 Plan: V38.3 기반 + 한 달의 교훈 통합
+# V46 Plan: 3-Run 실험 — V43-E Boot + V38.3 Gait 순차 통합
 
 > 작성: 2026-03-26
-> 상태: **설계 완료, 구현 대기**
+> 상태: **Run A 구현 대기**
 
 ---
 
-## 1. 전략 전환
+## 1. 전략
 
-### 왜 V38.3 기반으로 돌아가는가
+### 왜 3-Run 분해인가
 
-한 달간 V42~V44 (8+ 실험)에서 배운 것:
+V44에서 coupling + pose를 동시 변경했더니 **stride는 올랐지만 splay도 올라서, 어떤 변경이 무엇을 일으켰는지 분리 불가**. 이 프로젝트의 반복된 교훈: **동시에 많이 바꾸면 해석이 안 된다**.
 
-| 접근 | 결과 | 교훈 |
+V46의 3개 가설을 독립 실험으로 분해:
+
+| Run | 가설 | 변경 | 판정 |
+|-----|------|------|------|
+| **A** | gait reward 부족이 종종걸음 원인 | V43-E + V38.3 gait 8개 추가 | stride > 2.0 |
+| **B** | shoulder-leg 분리로 trade-off 해소 | Run A + shoulder_neutral 교체 | shoulder < 0.45 |
+| **C** | coupling은 보조 gait reward로 진입 | Run B + coupling shaping | coupling > 0.2 |
+
+### 왜 V43-E baseline인가
+
+| baseline 후보 | 상태 | 적합성 |
+|--------------|------|--------|
+| V38.3 | stride 6.94, splay 0.46, boot gating 없음 | boot 퇴행 위험 |
+| V44 | stride 1.69, splay 0.53 | trade-off에 오염 |
+| **V43-E** | ep_len 248, shoulder 0.40, stride 0.39 | **문제가 단일 축(gait 부족)으로 정리** |
+
+V43-E는 boot/posture가 해결된 상태에서 **gait만 부족**. 실험 설계에 가장 깔끔한 baseline.
+
+---
+
+## 2. Run A (V46-A): V43-E + V38.3 Gait Reward
+
+### 목적
+
+> "V43-E의 종종걸음은 gait-specific reward 부족 때문이다"
+
+V43-E의 안정된 boot/posture 위에 V38.3의 검증된 gait reward를 추가하여, stride와 coupling이 살아나는지 확인.
+
+### 유지 (V43-E 그대로)
+
+```
+[Boot]      boot_standing(+15↓), boot_foot_contact(+5↓), boot gating curriculum
+[생존]      alive_bonus(+10), base_height_l2(-15), flat_orientation(-7), undesired_contacts(ramp)
+[전진]      forward_velocity_gated(+8), track_lin(+1), track_ang(+0.5)
+[보행]      gait_phase_contact(+15), stride_length(+5), feet_air_time(+20), stance_propulsion(+8)
+[정규화]    action_rate(-0.5), dof_acc(-0.001), dof_pos_limits(-5)
+[자세]      joint_default_pose(-0.3→-2.0 ramp) ← V43-E 그대로
+[설정]      8192 envs, gate_alpha ramp, push_alpha ramp
+```
+
+### 추가 (V38.3에서 8개)
+
+```
+[보행 품질] — V38.3에서 stride 6.94를 만든 핵심
+  leg_lift(+)              — 발 들기 (V38.3 최대 positive 7.15)
+  rear_alternation(+)      — 뒷발 교대 (stride 핵심 4.38)
+  rear_joint_velocity(+)   — 뒷발 움직임 (9.98)
+  rear_swing(+)            — 뒷발 스윙 (1.08)
+  swing_stride(+)          — 스윙 중 보폭 (1.27)
+  foot_clearance(+)        — 발 높이 (0.52)
+  trot_gait(+)             — trot 패턴 (0.67)
+  diagonal_coupling(+10)   — 대각 커플링 (V38.3에서 0.52 작동)
+```
+
+모두 walk_ramp에 포함 (iter 800~2000): boot에서는 OFF.
+
+### 건드리지 않는 것 (Run B/C 영역)
+
+- joint_default_pose → shoulder_neutral 교체 (Run B)
+- stance_width_penalty 제거 (Run B)
+- coupling shaping 재설계 (Run C)
+
+### 왜 pose -0.3→-2.0에서도 stride가 올라올 수 있는가
+
+```
+V38.3 pose-related penalties: -28.5 (V43-E의 2.4배 더 강함)
+V38.3 stride: 6.94
+
+→ V38.3은 더 강한 pose penalty에서도 stride 6.94 달성
+→ 충분히 강한 gait positive reward가 있으면 pose penalty 극복 가능
+→ Run A에서 gait reward 8개 추가 시 같은 메커니즘 기대
+```
+
+### 판정 기준
+
+| iter | 성공 | 실패 |
 |------|------|------|
-| 50개→15개 (V42~V43-E) | splay 0.40 (좋음), stride 0.39 (나쁨) | clean = splay 해결, 보행 부족 |
-| 15개+coupling+pose완화 (V44) | stride 1.69 (개선), splay 0.53 (나쁨) | trade-off 미해결 |
-| 15개에서 계속 추가 (V45 방향) | 미실행 | 결국 50개로 수렴할 것 |
+| 300 | ep_len > 30 | < 15 → boot 퇴행, 중단 |
+| 1000 | ep_len > 200 | < 100 → 중단 |
+| **3000** | **stride > 2.0** | < 1.0 → gait reward 부족 가설 약함 |
+| **3000** | **coupling > 0** | 0.0 → coupling은 Run C에서 별도 해결 |
 
-**핵심 발견**: reward 수를 줄이는 것이 정답이 아니라, **어떤 reward가 있는가**가 핵심.
+### 리스크
 
-- V38.3의 50개 reward → stride 6.94, coupling 0.52 (좋은 보행)
-- V43-E의 15개 reward → stride 0.39, coupling 0.0 (나쁜 보행)
-- 차이: `leg_lift`, `rear_alternation`, `swing_stride` 등 **구체적 보행 신호**
-
-### V46 전략
-
-> **V38.3의 검증된 보행 품질 (stride 6.94, coupling 0.52)**
-> **+ V42~V44에서 발견한 개선점 (boot gating, shoulder-leg 분리, boot standing)**
-> **- V42에서 확인한 문제 reward (band/residency/validity 복잡 상호작용)**
+1. **V38.3 gait reward가 boot 충돌**: rear_* reward가 boot에서 noise → 완화: walk_ramp으로 OFF
+2. **rear_* reward가 splay 유발**: 교훈 #9 "다리별 전용 보상은 역할 분리 유발" → 감시: shoulder_dev > 0.50
+3. **pose -2.0이 여전히 stride 차단**: V38.3은 극복했지만 구조가 다름 → 감시: iter 2000에서 stride < 1.0이면 가설 재검토
 
 ---
 
-## 2. V38.3 → V46 변경 사항
+## 3. Run B (V46-B): Run A + Shoulder-Leg 분리
 
-### KEEP: 28개 (V38.3에서 검증된 핵심)
+### 목적
 
-```
-[생존/안정] 6개
-  alive_bonus(+10), base_height_l2(-15), flat_orientation_l2(-7),
-  undesired_contacts(ramp), standing_height(+), height_bonus(+)
+> "stride↔splay trade-off는 shoulder와 leg를 분리하면 해소된다"
 
-[전진] 4개
-  forward_velocity(+8), forward_velocity_bootstrap(+),
-  track_lin_vel_xy(+1), track_ang_vel_z(+0.5)
-
-[보행 품질] 12개 — V38.3 stride 6.94의 핵심
-  leg_lift(+)         — V38.3 최대 positive (7.15)
-  stride_length(+5)   — 보폭
-  rear_alternation(+) — 뒷발 교대 (stride의 핵심, 4.38)
-  rear_joint_vel(+)   — 뒷발 움직임 (9.98)
-  rear_fwd_stride(+)  — 뒷발 전진 보폭
-  rear_swing(+)       — 뒷발 스윙
-  swing_stride(+)     — 스윙 중 보폭
-  foot_clearance(+)   — 발 높이
-  swing_gate_vel(+)   — 스윙 속도
-  trot_gait(+)        — trot 패턴
-  diagonal_coupling(+10) — 대각 커플링 (V38.3에서 0.52 작동!)
-  stance_propulsion(+8)  — 추진력
-
-[정규화] 5개
-  action_rate_l2(-0.5), dof_acc_l2(-), dof_pos_limits(-5),
-  ang_vel_xy_l2(-), lin_vel_z_l2(-)
-```
-
-### REMOVE: ~25개 (V42에서 확인된 문제)
+### 변경 (Run A 대비)
 
 ```
-[band/residency/validity] ~15개 — "복잡한 상호작용 → splay 유지 인센티브"
-  per_leg_contact_target_band, per_leg_propulsion_target_band,
-  limb_usage_target_band, late_phase_band_exit(-15.57!),
-  contact_residency, prop_residency, usage_residency,
-  residency_ema_*(4개), per_leg_contact_floor,
-  limb_usage_min_penalty, single_limb_validity_penalty
-
-[좌우/앞뒤 차이 벌칙] ~7개
-  front_left_right_*_penalty(2개), rear_left_right_*_penalty(2개),
-  front_rear_support_balance, rear_pair_*(3개)
-
-[중복/비활성] ~8개
-  joint_vel_l2(dof_acc 중복), joint_deviation(pose 중복),
-  joint_oscillation, foot_extension(-6.89, 큰 보폭 억제!),
-  stance_width_penalty(-10.99, shoulder_neutral이 대체),
-  dof_torques_l2, feet_below_knees, 비활성 8개
+제거: joint_default_pose
+추가: shoulder_neutral(-3.0, shoulder 4 joints only)
+제거: stance_width_penalty (있으면)
 ```
 
-### MODIFY: 2개
+### 판정 기준
 
-```
-shoulder_neutral: -6.0 → -3.0 (V44 교훈: shoulder만 타겟, leg 자유)
-joint_default_pose: 제거 (shoulder_neutral이 대체)
-```
-
-### ADD: 3개 (V43-E에서 검증)
-
-```
-boot_standing_reward(+15↓): boot phase positive gradient
-boot_foot_contact(+5↓): boot phase 접지 보상
-boot gating curriculum: walking reward OFF during boot, 순차 활성화
-```
-
-### 최종: ~30개 reward
-
----
-
-## 3. Boot Gating Curriculum (V43-E에서 검증)
-
-V38.3에는 기존 `reward_weight_curriculum`(80+ params)의 gait_gate가 있었음.
-V46에서는 V43-E의 경량 boot curriculum으로 대체:
-
-```
-Phase 1 (iter 0~300): Boot only
-  - boot_standing(+15) + boot_contact(+5) active
-  - walking rewards (leg_lift, rear_*, stride, coupling 등) = OFF
-  - contacts ramp -20→-100, velocity ramp
-
-Phase 2 (iter 300~800): Direction
-  - forward_velocity + stance_propulsion ramp up
-  - boot rewards ramp down
-
-Phase 3 (iter 800~2000): Gait quality
-  - leg_lift, rear_alternation, diagonal_coupling, stride 등 ramp up
-  - trot_gait, swing_stride, foot_clearance 등 ramp up
-
-Phase 4 (iter 1000~2500): Refinement
-  - feet_air_time ramp up
-```
-
-### V38.3의 기존 gait_gate vs V46의 boot curriculum
-
-| 항목 | V38.3 gait_gate | V46 boot curriculum |
-|------|----------------|-------------------|
-| Gate 기준 | ep_len < 200 | iteration 기반 + boot_standing |
-| 적용 범위 | 전체 gait reward 일괄 | 그룹별 순차 활성화 |
-| Boot positive | 없음 | boot_standing(+15) + boot_contact(+5) |
-| Ramp | 없음 (hard gate) | smooth ramp |
-
-V46은 V38.3의 gait_gate보다 **더 정교**: boot positive reward + 순차 활성화.
-
----
-
-## 4. Shoulder-Leg 분리 (V44에서 확인)
-
-### V38.3의 문제
-
-```
-shoulder_neutral(-6.0) + stance_width_penalty(-10.99) + joint_default_pose
-= shoulder는 잡히지만, 이 벌칙들이 leg 움직임도 간접 억제
-= shoulder_dev 0.46 (벌칙 -6에서도 splay)
-```
-
-### V46의 해결
-
-```
-shoulder_neutral(-3.0) — shoulder 4개 joint만 타겟
-joint_default_pose — 제거 (leg 자유)
-stance_width_penalty — 제거 (shoulder_neutral이 대체)
-```
-
-V44 교훈: joint_default_pose가 12개 관절을 동시 제어하면 stride↔splay trade-off 발생.
-V46: shoulder_neutral이 4개 shoulder만 제어 → leg는 자유 → trade-off 해소.
-
-shoulder_neutral weight -3.0 선택 이유:
-```
-V38.3: -6.0 → shoulder_dev 0.46 (50개 reward에서)
-V43-E: joint_default_pose 없이 → shoulder_dev 0.40 (15개 clean reward에서)
-V46: -3.0 (중간값) + 문제 reward 제거 → shoulder_dev ~0.40 기대
-```
-
----
-
-## 5. 제거 reward의 영향 분석
-
-### 제거 시 가장 큰 변화
-
-```
-제거되는 큰 Positive:
-  per_leg_contact_target_band:  +13.39
-  per_leg_propulsion_target_band: +9.21
-  limb_usage_target_band:       +8.04
-  → 총 +30.64 positive 소실
-
-제거되는 큰 Negative:
-  late_phase_band_exit:         -15.57
-  stance_width_penalty:         -10.99
-  foot_extension:               -6.89
-  joint_vel_l2:                 -7.32
-  → 총 -40.77 negative 소실
-```
-
-**Net 효과**: negative(-40.77)가 positive(+30.64)보다 더 많이 제거됨.
-→ 전체적으로 net reward 증가 (positive 방향).
-→ boot 안정성 + 학습 속도 개선 기대.
-
-### 보행 품질 핵심 reward는 유지
-
-```
-유지되는 보행 Positive (V38.3 검증):
-  rear_joint_velocity:  +9.98
-  leg_lift:             +7.15
-  stride_length:        +6.94
-  stance_propulsion:    +4.92
-  rear_alternation:     +4.38
-  forward_vel_bootstrap: +3.80
-  four_limb_cooperation: +2.71
-  diagonal_coupling:    +1.54
-  → 이것들이 stride 6.94의 핵심
-```
-
----
-
-## 6. 예상 결과
-
-| 지표 | V38.3 (50개) | V43-E (17개) | V44 (18개) | V46 (~30개) |
-|------|:----------:|:----------:|:--------:|:----------:|
-| ep_len | 206 | 248 | 250 | **> 230** |
-| stride | **6.94** | 0.39 | 1.69 | **4.0~6.0** |
-| coupling | **0.52** | 0.0 | 0.0 | **0.3~0.5** |
-| shoulder | 0.46 | **0.40** | 0.53 | **~0.42** |
-| forward_vel | 0.95 | 5.88 | 7.07 | **3.0~5.0** |
-
-**V46 = V38.3의 보행 품질 + V43-E의 boot/splay 개선**
-
----
-
-## 7. 판정 기준
-
-### iter 300: Boot 성공
-| 지표 | 성공 | 실패 |
+| iter | 성공 | 실패 |
 |------|------|------|
-| ep_len | > 30 | < 15 |
+| 3000 | stride 유지 + shoulder < 0.45 | shoulder > 0.50 (splay 제어 실패) |
 
-### iter 1000: Boot 안정화
-| 지표 | 성공 | 실패 |
+---
+
+## 4. Run C (V46-C): Run B + Coupling Shaping
+
+### 목적
+
+> "coupling 0.0은 sparse gradient 때문이며, 풍부한 gait reward 환경에서는 자연 해소 가능"
+
+Run A/B에서 rear_alternation, trot_gait, swing_stride 등이 함께 작동하면 diagonal_coupling이 자연스럽게 올라올 수 있음. Run B까지 coupling이 여전히 0이면, Run C에서 추가 shaping.
+
+### 판정 기준
+
+| iter | 성공 | 실패 |
 |------|------|------|
-| ep_len | > 200 | < 100 |
-| shoulder_dev | < 0.45 | > 0.50 |
-
-### iter 3000: 보행 품질
-| 지표 | 성공 | 부분 | 실패 |
-|------|------|------|------|
-| stride | > 4.0 | 2.0~4.0 | < 1.0 |
-| coupling | > 0.3 | 0.1~0.3 | 0.0 |
-| shoulder | < 0.43 | < 0.46 | > 0.50 |
-
-### iter 5000: 최종
-| 지표 | 목표 |
-|------|------|
-| ep_len | > 230 |
-| stride | > 5.0 |
-| coupling | > 0.4 |
-| shoulder_dev | < 0.45 |
+| 3000 | coupling > 0.2 | 0.0 → 구조적 접근 (CPG/trajectory) 필요 |
 
 ---
 
-## 8. 리스크
+## 5. Run A 예상 Reward Budget
 
-### 1. 30개 reward가 다시 splay 유발
-- band/residency/validity는 제거했지만, rear_* reward가 여전히 역할 분리 유발 가능
-- 감지: shoulder_dev > 0.46
-- 대비: rear_* weight 하향 또는 대칭 버전으로 교체
+### V43-E (현재, 17개 reward)
+```
+Positive: gait_phase(12) + alive(10) + prop(7) + fwd(6) + stride(0.4) = ~36
+Negative: pose(-12) + action(-4) + limits(-4) + acc(-3) + feet(-1) = ~-24
+```
 
-### 2. Boot 실패 (V43 재현)
-- V38.3의 gait reward가 boot에서 충돌할 수 있음
-- 완화: boot gating으로 walking reward OFF (V43-E 검증)
-- 감지: iter 300 ep_len < 15
+### V46-A (예상, 25개 reward)
+```
+Positive: gait_phase(12) + alive(10) + rear_joint_vel(~10) + prop(7) + leg_lift(~7)
+          + fwd(6) + rear_alt(~4) + fwd_bootstrap(~4) + coupling(~2) + stride(~2)
+          + others(~5) = ~69
+Negative: pose(-12) + action(-4) + limits(-4) + acc(-3) + feet(-1) = ~-24
+```
 
-### 3. 제거한 reward가 사실 필요했음
-- band/residency가 없으면 contact 안정성 하락 가능
-- 감지: contact_ratio 불안정, ep_len 진동
-- 대비: 핵심 band reward만 선별 복원
-
-### 4. four_limb_cooperation 이 splay 유발
-- V38.3에서 큰 positive (2.71), 하지만 V42에서 "복잡한 상호작용"으로 제거 후보였음
-- 감지: cooperation↑ + shoulder↑ 동시 상승
-- 대비: 제거하고 diagonal_coupling만 유지
+Positive가 36→69로 거의 2배 증가. net reward가 크게 개선되어 policy가 적극적으로 보행을 시도할 인센티브.
 
 ---
 
-## 9. 구현 가이드
+## 6. 전체 타임라인
 
-### 접근 방식
+```
+Run A (V46-A): 3000 iter (~3시간)
+  → stride > 2.0? → Yes → Run B
+  → No → 분석, gait reward weight 조정 후 재시도
 
-V38.3의 기존 env_cfg.py 코드를 **대부분 유지**하되:
-1. `_CLEAN_REWARDS` 플래그 대신 새로운 `_V46_HYBRID` 플래그
-2. 제거 대상 reward만 `= None` 처리
-3. `joint_default_pose = None`, `stance_width_penalty = None`
-4. `shoulder_neutral.weight = -3.0`
-5. boot curriculum 추가 (V43-E 코드 재사용)
-6. boot_standing + boot_contact 추가
+Run B (V46-B): 3000 iter (~3시간)
+  → stride 유지 + shoulder < 0.45? → Yes → Run C
+  → No → shoulder_neutral weight 조정
 
-### 기존 V38.3 reward_weight_curriculum과의 관계
+Run C (V46-C): 3000 iter (~3시간)
+  → coupling > 0.2? → Yes → 성공! 15000 iter 완주
+  → No → CPG/trajectory 접근 검토
+```
 
-V38.3의 80+ param curriculum은 제거. V46의 경량 boot curriculum으로 대체.
-V38.3의 gait_gate 기능은 V46의 walk_ramp_config로 대체.
-
----
-
-## 10. V42~V46 전체 여정
-
-| 버전 | 전략 | 결과 | 핵심 교훈 |
-|------|------|------|----------|
-| V38.3 | 50개 reward + CaT | stride 6.94, splay 0.46 | rich reward = 좋은 보행 |
-| V42~V43 | 50개→15개 clean | boot 실패 | gait_gate 제거가 원인 |
-| V43-D | + walking gating | ep_len 10→10 (20%) | positive 부족 |
-| V43-E | + boot standing | **ep_len 248, splay 0.40** | boot 해결, 종종걸음 |
-| V44 | + coupling + pose↓ | stride 1.69, splay 0.53 | shoulder-leg trade-off |
-| V45 | shoulder 분리 (미구현) | 설계만 | - |
-| **V46** | **V38.3 + 배운 것 통합** | 설계 완료 | **best of both worlds** |
+총 예상: 9시간 (3 × 3000 iter). 15000 완주 대비 60% 시간 절약.
 
 ---
 
-## 11. 참고
+## 7. V42~V46 전체 여정
 
-- V38.3: 보행 품질 기준 (stride 6.94, coupling 0.52, 77개 reward)
-- V43-E: boot 성공 + splay 0.40 (boot gating + boot standing)
-- V44: shoulder-leg trade-off 확인 (pose↔stride 연동)
-- V42 PLAN: 제거 대상 reward 분류 (band/residency/validity)
-- V45 PLAN: shoulder-leg 분리 개념 (V46에 통합)
+| 버전 | 전략 | shoulder | stride | coupling | 핵심 교훈 |
+|------|------|:--------:|:------:|:--------:|----------|
+| V38.3 | 50개 reward | 0.46 | **6.94** | **0.52** | rich reward = 좋은 보행 |
+| V43-E | 15개 clean + boot | **0.40** | 0.39 | 0.0 | clean = splay 해결, 보행 부족 |
+| V44 | + coupling + pose↓ | 0.53 | 1.69 | 0.0 | trade-off 미해결 |
+| **V46-A** | **V43-E + gait 8개** | ~0.42? | **2~4?** | 0~0.3? | **gait reward 부족 가설 검증** |
+
+---
+
+## 8. 참고
+
+- V43-E: Boot 성공 baseline (ep_len 248, shoulder 0.40)
+- V38.3: Gait 품질 기준 (stride 6.94, coupling 0.52, 77개 reward)
+- V44: Shoulder-leg trade-off 확인 (pose -0.5 → stride↑ splay↑)
+- V45: Shoulder-leg 분리 개념 (Run B에 통합)
+- 분석팀 피드백: 3-Run 분해, V43-E baseline, 3000 iter 중단, KPI 우선순위
