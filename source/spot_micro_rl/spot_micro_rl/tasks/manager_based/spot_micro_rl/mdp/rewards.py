@@ -3672,6 +3672,10 @@ def reward_weight_curriculum(
     # Metric gating (보행 구조 보호)
     gait_gate_enabled: bool = True,
     gait_gate_min_ep_len: float = 200.0,  # ep_len < 이 값이면 ramp 일시정지
+    # V47: boot reward ramp-down (gait_gate 연동)
+    boot_standing_initial: float = 0.0,   # 0이면 비활성
+    boot_contact_initial: float = 0.0,    # 0이면 비활성
+    boot_ramp_down_iters: int = 300,      # gait_gate 해제 후 몇 iter에 걸쳐 0으로 감소
     # 로깅
     log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
@@ -3994,6 +3998,43 @@ def reward_weight_curriculum(
             env._crr_gate_paused = False
             print(f"[Curriculum] ▶ Ramp RESUMED @ iter {iteration} "
                   f"(ep_len={mean_ep_len:.1f})")
+
+    # ── V47: Boot reward ramp-down (gait_gate 연동) ──
+    if boot_standing_initial > 0 or boot_contact_initial > 0:
+        if not hasattr(env, '_v47_boot_gate_released_iter'):
+            env._v47_boot_gate_released_iter = -1  # gait_gate 해제 시점 기록
+
+        if gait_gate_enabled and not gait_paused and env._v47_boot_gate_released_iter < 0:
+            # gait_gate가 처음 해제된 시점 기록
+            env._v47_boot_gate_released_iter = iteration
+            print(f"[V47-Boot] iter {iteration}: gait_gate released, boot ramp-down starts")
+
+        if env._v47_boot_gate_released_iter > 0:
+            elapsed = iteration - env._v47_boot_gate_released_iter
+            down_alpha = min(1.0, elapsed / max(boot_ramp_down_iters, 1))
+            boot_st_w = boot_standing_initial * (1.0 - down_alpha)
+            boot_ct_w = boot_contact_initial * (1.0 - down_alpha)
+        else:
+            boot_st_w = boot_standing_initial
+            boot_ct_w = boot_contact_initial
+
+        try:
+            if boot_standing_initial > 0:
+                bst_cfg = env.reward_manager.get_term_cfg("boot_standing")
+                bst_cfg.weight = boot_st_w
+                env.reward_manager.set_term_cfg("boot_standing", bst_cfg)
+        except Exception:
+            pass
+        try:
+            if boot_contact_initial > 0:
+                bct_cfg = env.reward_manager.get_term_cfg("boot_contact")
+                bct_cfg.weight = boot_ct_w
+                env.reward_manager.set_term_cfg("boot_contact", bct_cfg)
+        except Exception:
+            pass
+
+        if iteration % log_interval == 0:
+            print(f"  [V47-Boot] boot_standing={boot_st_w:.1f} boot_contact={boot_ct_w:.1f}")
 
     # ── Alpha 진행 (한 주기당 최대 증가량 제한) ──
     max_step_12 = update_interval / max(1, ramp1_end - ramp1_start)

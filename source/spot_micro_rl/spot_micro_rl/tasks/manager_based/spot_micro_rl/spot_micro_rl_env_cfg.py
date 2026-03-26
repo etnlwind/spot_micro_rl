@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V46-B"
+TRAIN_VERSION = "V47"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -18,8 +18,8 @@ TRAIN_VERSION = "V46-B"
 #          adaptive pose safety (V43-D gating, V43-E boot standing, V44 adaptive safety)
 #   False: V42 기본 independent reward (순차 학습 없음)
 #
-_CLEAN_REWARDS = True
-_CONNECTED_TROT = True
+_CLEAN_REWARDS = False   # V47: V38.3 순정 reward 구조 사용
+_CONNECTED_TROT = False  # V47: V43+ 구조 사용 안 함
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -1124,6 +1124,37 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.commands.base_velocity.ranges.lin_vel_x = (0.1, 0.5)  # V17: (0,0.3)→(0.1,0.5)
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (-0.5, 0.5)
+
+        # ══════════════════════════════════════════════════════════
+        # V47: V38.3 순정 + Boot 가속 (boot_standing + boot_contact만 추가)
+        # ══════════════════════════════════════════════════════════
+        if TRAIN_VERSION.startswith("V47"):
+            toe_cfg_boot = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+
+            # boot_standing_reward: 높이 + 자세 gradient (V43-E에서 검증)
+            self.rewards.boot_standing = RewTerm(
+                func=custom_mdp.boot_standing_reward,
+                weight=15.0,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "target_height": 0.23,
+                    "height_k": 100.0,
+                },
+            )
+            # boot_foot_contact: 4발 접지율 (V43-E에서 검증)
+            self.rewards.boot_contact = RewTerm(
+                func=custom_mdp.boot_foot_contact,
+                weight=5.0,
+                params={
+                    "sensor_cfg": toe_cfg_boot,
+                    "contact_threshold": 1.0,
+                },
+            )
+
+            # 기존 reward_weight_curriculum에 boot ramp-down 파라미터 추가
+            self.curriculum.reward_weights.params["boot_standing_initial"] = 15.0
+            self.curriculum.reward_weights.params["boot_contact_initial"] = 5.0
+            self.curriculum.reward_weights.params["boot_ramp_down_iters"] = 300
 
         # ══════════════════════════════════════════════════════════
         # V42: Clean Reward Restart — 16개 reward만 사용
