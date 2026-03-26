@@ -4,7 +4,7 @@
 
 ## Overview
 
-NVIDIA Isaac Lab 위에서 24,576개 병렬 환경으로 SpotMicro 로봇을 훈련합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
+NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니다. V41 이하는 20,480개, V42 이후는 8,192개 환경을 사용합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
 **현재 상태**: V46 설계 완료 (V38.3 기반 + boot gating + shoulder-leg 분리). V42~V44에서 clean reward 실험 완료 — boot 성공(V43-E, ep_len 248), stride/coupling은 풍부한 reward 필요 확인. V46은 V38.3의 검증된 보행 품질(stride 6.94) + 한 달간의 교훈(boot gating, shoulder 분리)을 통합하는 ~30개 curated reward 구조.
 
