@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V44"
+TRAIN_VERSION = "V46-A"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1256,23 +1256,30 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "gate_ramp_end": 1500,
                     "pose_ramp_start": 1000,
                     "pose_ramp_end": 2500,
-                    "pose_weight_initial": -0.5,
-                    "pose_weight_final": -0.5,
+                    "pose_weight_initial": -0.3,
+                    "pose_weight_final": -2.0,
                     "walk_ramp_config": {
                         "forward_velocity":    {"target": 8.0,  "start": 300,  "end": 800},
                         "stance_propulsion":   {"target": 8.0,  "start": 300,  "end": 800},
                         "diagonal_coupling":   {"target": 10.0, "start": 800,  "end": 2000},
                         "gait_phase":          {"target": 15.0, "start": 800,  "end": 2000},
                         "stride_length":       {"target": 5.0,  "start": 800,  "end": 2000},
+                        "leg_lift":            {"target": 15.0, "start": 800,  "end": 2000},
+                        "rear_alternation":    {"target": 15.0, "start": 800,  "end": 2000},
+                        "rear_joint_velocity": {"target": 12.0, "start": 800,  "end": 2000},
+                        "rear_swing":          {"target": 8.0,  "start": 800,  "end": 2000},
+                        "swing_stride":        {"target": 4.0,  "start": 800,  "end": 2000},
+                        "foot_clearance":      {"target": 8.0,  "start": 800,  "end": 2000},
+                        "trot_gait":           {"target": 40.0, "start": 800,  "end": 2000},
                         "feet_air_time":       {"target": 20.0, "start": 1000, "end": 2500},
                     },
                     "boot_ramp_config": {
                         "boot_standing": {"initial": 15.0, "ramp_down_start": 200, "ramp_down_end": 500},
                         "boot_contact":  {"initial": 5.0,  "ramp_down_start": 300, "ramp_down_end": 600},
                     },
-                    "pose_safety_threshold_dev": 0.45,
-                    "pose_safety_threshold_ep": 200.0,
-                    "pose_safety_fallback": -1.0,
+                    "pose_safety_threshold_dev": 999.0,
+                    "pose_safety_threshold_ep": 0.0,
+                    "pose_safety_fallback": -2.0,
                     "pose_safety_ema_alpha": 0.03,
                     "log_interval": 100,
                 },
@@ -1337,21 +1344,112 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # joint_vel_l2 제거 (dof_acc와 중복)
                 self.rewards.joint_vel_l2 = None
 
-                # V44: joint_default_pose -0.5 (큰 보폭 허용)
-                # adaptive safety: shoulder_dev > 0.45 OR ep_len < 200이면 -1.0으로 복귀
+                # V46-A: joint_default_pose V43-E 방식 복원 (-0.3, curriculum이 -2.0까지 ramp)
                 self.rewards.joint_default_pose = RewTerm(
                     func=velocity_mdp.joint_deviation_l1,
-                    weight=-0.5,
+                    weight=-0.3,
                     params={"asset_cfg": SceneEntityCfg("robot")},
                 )
 
-                # V43-D/V44: Walking reward 초기 weight=0 (curriculum이 순차 활성화)
-                self.rewards.forward_velocity.weight = 0.0    # curriculum: iter 300~800 → 8.0
-                self.rewards.stance_propulsion.weight = 0.0    # curriculum: iter 300~800 → 8.0
-                self.rewards.diagonal_coupling.weight = 0.0    # curriculum: iter 800~2000 → 10.0
-                self.rewards.gait_phase.weight = 0.0           # curriculum: iter 800~2000 → 15.0
-                self.rewards.stride_length.weight = 0.0        # curriculum: iter 800~2000 → 5.0
-                self.rewards.feet_air_time.weight = 0.0        # curriculum: iter 1000~2500 → 20.0
+                # V46-A: V38.3 gait reward 8개 추가 (보행 품질 복원)
+                toe_contact_cfg_gait = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+                toe_body_cfg_gait = SceneEntityCfg("robot", body_names=".*toe_link")
+
+                self.rewards.leg_lift = RewTerm(
+                    func=custom_mdp.leg_lift_reward,
+                    weight=15.0,
+                    params={
+                        "sensor_cfg": toe_contact_cfg_gait,
+                        "leg_joint_cfg": SceneEntityCfg("robot", joint_names=[
+                            "front_left_leg", "front_right_leg", "rear_left_leg", "rear_right_leg"]),
+                        "target_angle": 0.6,
+                    },
+                )
+                self.rewards.rear_alternation = RewTerm(
+                    func=custom_mdp.rear_alternation_reward,
+                    weight=15.0,
+                    params={
+                        "sensor_cfg": toe_contact_cfg_gait,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "contact_threshold": 1.0,
+                        "min_vel": 0.05,
+                    },
+                )
+                self.rewards.rear_joint_velocity = RewTerm(
+                    func=custom_mdp.rear_joint_velocity_reward,
+                    weight=12.0,
+                    params={
+                        "rear_joint_cfg": SceneEntityCfg("robot", joint_names=[
+                            "rear_left_shoulder", "rear_right_shoulder",
+                            "rear_left_leg", "rear_right_leg",
+                            "rear_left_foot", "rear_right_foot"]),
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "vel_threshold": 0.5,
+                        "min_vel": 0.05,
+                    },
+                )
+                self.rewards.rear_swing = RewTerm(
+                    func=custom_mdp.rear_swing_bonus,
+                    weight=8.0,
+                    params={
+                        "sensor_cfg": toe_contact_cfg_gait,
+                        "foot_cfg": toe_body_cfg_gait,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "contact_threshold": 1.0,
+                        "target_clearance": 0.08,
+                        "min_vel": 0.05,
+                    },
+                )
+                self.rewards.swing_stride = RewTerm(
+                    func=custom_mdp.swing_stride_reward,
+                    weight=4.0,
+                    params={
+                        "sensor_cfg": toe_contact_cfg_gait,
+                        "foot_cfg": toe_body_cfg_gait,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "contact_threshold": 1.0,
+                        "min_vel": 0.001,
+                    },
+                )
+                self.rewards.foot_clearance = RewTerm(
+                    func=custom_mdp.foot_clearance_reward,
+                    weight=8.0,
+                    params={
+                        "sensor_cfg": toe_contact_cfg_gait,
+                        "foot_cfg": toe_body_cfg_gait,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "contact_threshold": 1.0,
+                        "target_clearance": 0.06,
+                        "min_vel": 0.001,
+                    },
+                )
+                self.rewards.trot_gait = RewTerm(
+                    func=custom_mdp.trot_gait_reward,
+                    weight=40.0,
+                    params={
+                        "sensor_cfg": toe_contact_cfg_gait,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "contact_threshold": 1.0,
+                        "min_vel": 0.001,
+                    },
+                )
+
+                # Walking reward 초기 weight=0 (curriculum이 순차 활성화)
+                # [기존 V43-E]
+                self.rewards.forward_velocity.weight = 0.0    # iter 300~800 → 8.0
+                self.rewards.stance_propulsion.weight = 0.0    # iter 300~800 → 8.0
+                self.rewards.diagonal_coupling.weight = 0.0    # iter 800~2000 → 10.0
+                self.rewards.gait_phase.weight = 0.0           # iter 800~2000 → 15.0
+                self.rewards.stride_length.weight = 0.0        # iter 800~2000 → 5.0
+                self.rewards.feet_air_time.weight = 0.0        # iter 1000~2500 → 20.0
+                # [V46-A 추가 gait reward]
+                self.rewards.leg_lift.weight = 0.0             # iter 800~2000 → 15.0
+                self.rewards.rear_alternation.weight = 0.0     # iter 800~2000 → 15.0
+                self.rewards.rear_joint_velocity.weight = 0.0  # iter 800~2000 → 12.0
+                self.rewards.rear_swing.weight = 0.0           # iter 800~2000 → 8.0
+                self.rewards.swing_stride.weight = 0.0         # iter 800~2000 → 4.0
+                self.rewards.foot_clearance.weight = 0.0       # iter 800~2000 → 8.0
+                self.rewards.trot_gait.weight = 0.0            # iter 800~2000 → 40.0
 
                 # V43-E: Boot standing rewards (curriculum이 ramp down)
                 toe_cfg_boot = SceneEntityCfg("contact_forces", body_names=".*toe_link")
