@@ -1,7 +1,7 @@
 # V44 Plan: Trot Quality — Coupling 복원 + Pose 완화
 
 > 작성: 2026-03-26
-> 상태: **훈련 완료 — stride 개선(0.39→2.0) but splay 악화(0.40→0.53), coupling 0.0**
+> 상태: **수렴 확정 — stride 진동(1.3~2.4), splay 0.52 고착, coupling 0.0**
 
 ---
 
@@ -232,7 +232,22 @@ pose penalty가 -11.7→-2.9로 감소하면 **net reward가 크게 증가**하�
 | V43-C | pose -2.0→-0.3 | boot 실패 | - | boot (pose ≠ 원인) |
 | V43-D | Walking reward gating | ep_len 10 (+20%) | walking 충돌 제거 | positive 부족 |
 | V43-E | boot_standing + boot_contact | **ep_len 248, shoulder 0.40** | **boot, splay** | **stride, coupling** |
-| **V44** | **coupling + pose 완화** | 설계 대기 | | stride, trot |
+| **V44** | **coupling + pose 완화** | **stride 1.3~2.4 진동, splay 0.52, coupling 0.0** | pose↓→stride↑ 확인 | **shoulder-leg 분리 필요** |
+
+### V44 최종 결과 (iter 4467)
+
+| 지표 | V43-E | V44 | 변화 |
+|------|:-----:|:---:|:----:|
+| ep_len | 248 | **250** | 유지 |
+| forward_vel | 5.88 | **6.91** | +18% |
+| stride | 0.39 | **1.3~2.4** | 개선 but 진동 |
+| coupling | 0.0 | **0.0** | 변화 없음 |
+| shoulder_dev | **0.40** | **0.52** | 악화 |
+| bad_orient | 0.8% | **0.3%** | 개선 |
+
+**결론**: pose 완화가 stride를 풀어준 것은 확인 (가설 맞음). 하지만 pose↔splay trade-off와 coupling 실패는 해결 못함.
+
+→ **V45**: shoulder와 leg를 분리하여 trade-off 해소 + pair coupling + leg_lift 복원
 
 ### 핵심 교훈 누적
 
@@ -242,6 +257,8 @@ pose penalty가 -11.7→-2.9로 감소하면 **net reward가 크게 증가**하�
 4. positive/negative ratio가 boot 예측 변수 (V38.3: 0.82)
 5. **reward 수를 줄이는 것 ≠ 정답. 핵심은 "어떤 reward"** (V43-E 종종걸음)
 6. **종종걸음은 reward 불균형의 수학적 최적해** (forward >> stride, pose penalty 51%)
+7. **joint_default_pose는 shoulder와 leg를 분리해야 함** (V44 trade-off 확인)
+8. **output=0 reward는 weight를 올려도 0** (V44 coupling 1500+ iter 무효)
 
 ---
 
