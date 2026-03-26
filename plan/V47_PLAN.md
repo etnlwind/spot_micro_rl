@@ -26,7 +26,7 @@ four_limb_cooperation:           +2.50
 contact_residency:               +2.42
 ```
 
-이것들을 "복잡한 상호작용으로 splay 유발"이라고 제거했지만, **동시에 stride 6.79의 핵심 동력**이었다. V46-B에서 같은 gait reward(leg_lift, rear_alternation 등)를 추가해도 stride 1.29에 머문 것이 증거.
+이것들을 "복잡한 상호작용으로 splay 유발"이라고 제거했지만, **동시에 stride 6.79의 핵심 동력일 가능성이 매우 높다**. V46-B에서 같은 gait reward(leg_lift, rear_alternation 등)를 추가해도 stride 1.29에 머문 것이 증거.
 
 ### V47 전략
 
@@ -114,6 +114,10 @@ _CLEAN_REWARDS = False    # V38.3 원래 reward 구조 사용
 _CONNECTED_TROT = False   # V43+ 구조 사용 안 함
 ```
 
+### 구현 후 즉시 검증
+
+- boot_contact의 `body_names=".*toe_link"`가 현재 로봇 URDF의 contact sensor와 일치하는지 확인 (이 프로젝트에서 toe/foot contact 해석 차이로 진단이 뒤틀린 이력 있음)
+
 ### 코드 변경
 
 ```python
@@ -146,9 +150,10 @@ if TRAIN_VERSION.startswith("V47"):
 # iter 800에서 둘 다 0
 ```
 
-또는 V38.3의 gait_gate와 연동:
+**확정: V38.3의 gait_gate와 연동** (iteration 기반이 아닌 ep_len 기반):
 - gait_gate가 풀릴 때 (ep_len > 200) boot reward도 감소 시작
 - walking reward가 살아나면서 boot reward가 자연스럽게 교체
+- V38.3의 기존 curriculum 구조를 최대한 보존하는 방식
 
 ---
 
@@ -165,6 +170,7 @@ if TRAIN_VERSION.startswith("V47"):
 | 지표 | 성공 | 실패 |
 |------|------|------|
 | ep_len | > 230 | < 200 |
+| shoulder | < 0.50 | > 0.50 (CaT 무력화 경고) |
 
 ### iter 3000: 보행 품질
 
@@ -215,9 +221,11 @@ if TRAIN_VERSION.startswith("V47"):
 V47 (현재):  V38.3 + boot 가속
   → stride ~6.0, coupling ~0.4, shoulder ~0.45, boot 가속
 
-V47.1 (다음): shoulder 개선 전용 실험
-  → shoulder_neutral -6→-3, 또는 stance_width 조정
-  → V47의 stride/coupling 유지 + shoulder 0.44 이하
+V47.1 (다음): shoulder 개선 전용 실험 — 동급 후보 3개:
+  → shoulder_neutral weight 조정 (-6→-3 등)
+  → stance_width_penalty 조정/제거
+  → joint_default_pose 부분 분리 (shoulder만 유지)
+  → V47 결과에서 가장 유력한 축을 선택
 
 V47.2 (필요 시): coupling 추가 개선
   → coupling이 V38.3 수준(0.49) 이하면 shaping 추가
