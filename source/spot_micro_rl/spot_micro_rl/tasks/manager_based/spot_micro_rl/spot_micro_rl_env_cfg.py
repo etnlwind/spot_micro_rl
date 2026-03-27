@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V47-B"
+TRAIN_VERSION = "V48"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1156,7 +1156,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.curriculum.reward_weights.params["boot_contact_initial"] = 5.0
             self.curriculum.reward_weights.params["boot_ramp_down_iters"] = 300
 
-            # V47-B: standing pose 보정만 (leg=-0.97). reward 변경 없음.
+            # V48: V47 + standing pose 보정 (leg=-0.97). reward 변경 없음.
 
         # ══════════════════════════════════════════════════════════
         # V42: Clean Reward Restart — 16개 reward만 사용
