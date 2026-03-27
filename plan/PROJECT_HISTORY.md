@@ -1,8 +1,8 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-03-26
-**Project Status**: V46 설계 완료 — V38.3 기반 + boot gating + shoulder-leg 분리 (~30 curated reward)
-**Current Active Run**: V44 훈련 중 (`2026-03-26_01-55-13`)
+**Last Updated**: 2026-03-27
+**Project Status**: V47 훈련 중 — V38.3 순정 + boot 가속. stride 6.29, coupling 0.46, shoulder 0.43
+**Current Active Run**: V47 (`2026-03-26_17-54-03`)
 
 > 최신 핸드오프: `plan/HANDOFF.md` 참조
 
@@ -28,7 +28,9 @@
 | **V43-E** | **boot 성공** | boot_standing → ep_len 248, shoulder 0.40 (역대 최고) |
 | V44 | 부분 성공 | stride 1.3~2.4↑, but splay 0.53↑, coupling 0.0 |
 | V45 | 미구현 | shoulder-leg 분리 설계 (V46에 통합) |
-| **V46** | **설계 완료** | V38.3 + boot gating + shoulder 분리 = best of both worlds |
+| V46-A | stride 1.45 | gait reward 추가만으론 부족 (pose 장벽) |
+| V46-B | stride 1.29, shoulder 0.44 | shoulder 분리 OK, stride 부족 (제거 reward가 동력) |
+| **V47** | **stride 6.29, shoulder 0.43** | **V38.3 순정 + boot 가속 = 성공** |
 
 ### 학습 버전 요약 (V23~V31.1)
 

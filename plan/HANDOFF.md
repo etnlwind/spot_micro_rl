@@ -7,7 +7,7 @@
 
 ## 1. 현재 목표
 
-**자연스러운 Trot 보행 — V47: V38.3 순정 + Boot 가속 (설계 완료, 구현 대기)**
+**자연스러운 Trot 보행 — V47: V38.3 순정 + Boot 가속 (훈련 중, stride 6.29 / shoulder 0.43)**
 
 ### 프로젝트 한 줄 요약
 
@@ -28,13 +28,24 @@ SpotMicro 4족 로봇이 PPO(Isaac Lab)로 자연스러운 trot 보행을 학습
 | **Pose↔stride trade-off 확인** | V44 | pose↓→stride↑+splay↑ (수학적 증명) |
 | **Coupling reward 무효** | V44 | weight 10, 1500+ iter → coupling 0.0 |
 
-### 미해결 문제
+### V46 실험 (3-Run)
 
-| 문제 | 현재 값 | 목표 | 원인 |
-|------|---------|------|------|
-| **Stride 부족** | 0.39~1.69 | > 4.0 | gait-specific reward 부재 |
-| **Coupling 0** | 0.0 | > 0.3 | coupling reward sparse gradient |
-| **Splay 재발** | V44에서 0.53 | < 0.45 | shoulder-leg 미분리 |
+| Run | 결과 | 교훈 |
+|-----|------|------|
+| V46-A | stride 1.45, shoulder 0.46 | gait reward 추가만으론 stride 2.0 미달 (pose 장벽) |
+| V46-B | stride 1.29, shoulder 0.44 | shoulder 분리 OK, stride 여전히 부족 (제거한 reward가 동력) |
+
+→ **전략 전환**: reward 선별이 아닌 V38.3 순정 + boot만 추가 (V47)
+
+### V47 현재 상태 (iter 5860)
+
+| 지표 | V47 | V38.3 | 비교 |
+|------|:---:|:-----:|:----:|
+| stride | **6.29** | 6.79 | 93% ✓ |
+| coupling | **0.46** | 0.49 | 94% ✓ |
+| shoulder | **0.43** | 0.45 | **V47 승** |
+| ep_len | **195** | 207 | 94% ✓ |
+| boot 속도 | **iter 300** | iter 500 | **2배** |
 
 ---
 
@@ -46,13 +57,16 @@ V46 3-Run 실험(A/B/C)에서 확인: gait reward 추가(stride 1.45)와 shoulde
 
 **결론: 작동하는 시스템(V38.3)을 고치지 말고, 부족한 것(boot)만 더하자.**
 
-### V47: V38.3 순정 + boot_standing + boot_contact
+### V47: V38.3 순정 + boot_standing + boot_contact — **성공**
 
 ```
 유지: V38.3 reward 77개 전부, 기존 curriculum, CaT, shoulder -6.0
-추가: boot_standing(+15), boot_contact(+5) — ramp down
-검증: "V38.3의 stride 6.79가 boot 가속과 함께 재현되는가?"
-판정: iter 3000 — stride > 5.0, coupling > 0.3
+추가: boot_standing(+15), boot_contact(+5) — gait_gate 연동 ramp down
+결과 (iter 5860):
+  stride:    6.29  (V38.3: 6.79 — 93% 재현)
+  coupling:  0.46  (V38.3: 0.49 — 94% 재현)
+  shoulder:  0.43  (V38.3: 0.45 — V47이 더 좋음!)
+  boot:      iter 300에서 ep_len 193 (V38.3: 86 — 2배 빠름)
 ```
 
 ### 이후 경로

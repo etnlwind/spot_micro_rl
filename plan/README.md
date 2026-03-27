@@ -217,7 +217,9 @@ Rough 지형으로 넘어가자,
 ## 버전별 한 줄 요약
 
 - **V45** — shoulder-leg 분리 + pair coupling + leg_lift. 설계만 완료 (미구현). V46으로 전략 전환.
-- **V46** — V38.3 기반(~30개 curated reward) + boot gating(V43-E) + shoulder_neutral 분리(V44). 설계 완료, 구현 대기.
+- **V46-A** — V43-E + V38.3 gait reward 8개 추가. stride 1.45 (pose penalty 한계).
+- **V46-B** — V46-A + shoulder-leg 분리. stride 1.29, shoulder 0.44 (제거한 reward가 stride 동력이었음 발견).
+- **V47** — **V38.3 순정 + boot_standing + boot_contact.** stride 6.29, coupling 0.46, shoulder 0.43. **V38.3 재현 + shoulder 개선 + boot 2배 가속. 성공.**
 
 ---
 
@@ -229,7 +231,8 @@ Rough 지형으로 넘어가자,
 - **V24~V35**: 4발 참여를 속이는 꼼수와 loophole 막기
 - **V36~V39**: splay를 직접 누르다가, 결국 정상 gait 구조를 가르치는 단계로 전환
 - **V42~V44**: reward를 줄였더니 splay는 해결, 보행은 부족 → boot gating, shoulder 분리 발견
-- **V46**: V38.3의 보행 품질 + V42~V44의 교훈을 통합하는 ~30개 curated reward
+- **V46**: 선별 복원 시도, stride 여전히 부족 → 제거한 reward가 stride 동력이었음 발견
+- **V47**: V38.3 순정 + boot만 추가 → stride 6.29, shoulder 0.43 **성공**
 
 ---
 
@@ -237,5 +240,5 @@ Rough 지형으로 넘어가자,
 
 이 프로젝트의 흐름은,
 
-> **”걷게 만들기”에서 시작해, “꼼수를 막고”, “reward를 줄여보고”, 결국 “좋은 reward를 선별하는 것이 핵심”이라는 결론에 도달한 실험의 연속**이라고 볼 수 있음.
+> **”걷게 만들기”에서 시작해, “꼼수를 막고”, “reward를 줄여보고”, 결국 “작동하는 시스템을 고치지 말고, 부족한 것만 더하라”는 결론에 도달한 실험의 연속**이라고 볼 수 있음.
 

@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니다. V41 이하는 20,480개, V42 이후는 8,192개 환경을 사용합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V46 설계 완료 (V38.3 기반 + boot gating + shoulder-leg 분리). V42~V44에서 clean reward 실험 완료 — boot 성공(V43-E, ep_len 248), stride/coupling은 풍부한 reward 필요 확인. V46은 V38.3의 검증된 보행 품질(stride 6.94) + 한 달간의 교훈(boot gating, shoulder 분리)을 통합하는 ~30개 curated reward 구조.
+**현재 상태**: V47 훈련 중 (iter 5860). V38.3 순정(77 reward) + boot_standing/boot_contact만 추가. stride 6.29, coupling 0.46, shoulder 0.43 — V38.3 수준 재현 + shoulder 개선 + boot 2배 가속 달성. 한 달간 V42~V46에서 "reward 수를 줄이면 정답"이 아니라 "어떤 reward가 있는가가 핵심"이라는 결론에 도달.
 
 ### 기술 스택
 
@@ -209,11 +209,13 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V44` 훈련 중, `V46` 설계 완료 (다음)
+- 학습 버전: `V47` 훈련 중 (V38.3 순정 + boot 가속)
 - active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
-- 기능 플래그: `_CLEAN_REWARDS`, `_CONNECTED_TROT` (env_cfg.py 상단)
-- 참고 문서: `plan/V46_PLAN.md` (다음), `plan/V43-E_PLAN.md` (boot 성공), `plan/HANDOFF.md`
+- 기능 플래그: `_CLEAN_REWARDS=False`, `_CONNECTED_TROT=False` (V47은 V38.3 구조 사용)
+- 병렬 환경: 20,480 (V38.3 원래 값 복원)
+- 참고 문서: `plan/V47_PLAN.md` (현재), `plan/HANDOFF.md`
+- **주의**: listen.cmd는 Windows 터미널에서만 직접 실행 (WSL 금지)
 
 ---
 
@@ -241,9 +243,9 @@ prob(dev) = base_prob × clamp((max_dev - threshold) / margin, 0, 1)
 
 **Soft CaT 결과** (V38.3): shoulder dev 0.54→0.45 (-16%), 0.45에서 local optimum 정체.
 
-### V46 방향 (다음)
+### V47 (현재)
 
-V38.3 기반 ~30개 curated reward + boot gating(V43-E 검증) + shoulder_neutral 분리(V44 교훈). 상세: `plan/V46_PLAN.md`
+V38.3 순정(77 reward) + boot_standing(+15) + boot_contact(+5)만 추가. "작동하는 시스템을 고치지 말고, 부족한 것만 더하자." V46에서 reward를 선별 복원하는 접근이 실패한 후, V38.3 전체를 살리고 boot만 가속하는 최소 변경 전략. 상세: `plan/V47_PLAN.md`
 
 **부팅 안정화** (V35.5 검증 완료):
 - `alive_bonus=10.0`: 매 step 생존 보상
@@ -360,7 +362,9 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V43-E** | **03-25** | **boot_standing + boot_foot_contact (V41 bootstrap 적용)** | ✅ **boot 성공 (ep_len 248, shoulder 0.40 역대 최고)**, stride 0.39 |
 | **V44** | **03-26** | **diagonal_coupling 복원 + pose -0.5 + adaptive safety** | 🟡 stride 1.3~2.4↑, shoulder 0.53↑ (trade-off), coupling 0.0 |
 | **V45** | **03-26** | **shoulder-leg 분리 + pair coupling + leg_lift** | 미구현 (V46으로 전략 전환) |
-| **V46** | **03-26** | **V38.3 기반(~30 curated reward) + boot gating + shoulder 분리** | 설계 완료, 구현 대기 |
+| **V46-A** | **03-26** | **V43-E + V38.3 gait reward 8개 추가** | 🟡 stride 1.45 (pose penalty 한계) |
+| **V46-B** | **03-26** | **Run A + shoulder-leg 분리 (shoulder_neutral)** | 🟡 shoulder 0.44, stride 1.29 (여전히 부족) |
+| **V47** | **03-26~** | **V38.3 순정(77 reward) + boot_standing + boot_contact** | ✅ **stride 6.29, coupling 0.46, shoulder 0.43 — V38.3 재현 + 개선** |
 
 ### 핵심 교훈
 
@@ -397,6 +401,9 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 - **output=0 reward는 weight를 올려도 0**: coupling reward 1500+ iter 무효 (V44, 교훈#1 재확인)
 - **구체적 보행 신호 없이 RL은 가장 쉬운 방법(종종걸음)을 찾음**: leg_lift, rear_alternation 등 필요 (V43-E vs V38.3)
 - **reward 설계 시 phase별 상호작용/충돌 분석 필수**: 개별 reward는 합리적이어도 동시 작동 시 충돌 가능 (V43 boot 실패)
+- **제거한 reward가 핵심 동력일 수 있음**: band/residency +37.56이 stride 6.79의 유력 동력. "복잡한 상호작용"으로 제거했지만 동시에 gait를 만드는 reward (V46-A/B)
+- **작동하는 시스템을 고치지 말 것**: V38.3은 stride 6.79가 검증됨. 부족한 것(boot)만 더하는 V47이 정답 (V47)
+- **listen.cmd는 Windows에서만 직접 실행**: WSL에서 실행 시 파일 핸들 잠금 발생, 리스너 재시작 불가
 
 ---
 
