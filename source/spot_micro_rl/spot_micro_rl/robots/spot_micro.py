@@ -43,7 +43,7 @@ SPOT_MICRO_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.192),  # V30: 발끝 대칭 자세 높이 (지면 +2mm)
+        pos=(0.0, 0.0, 0.30),  # 충분히 높게 → 부드럽게 착지
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
             # V47-B: 발끝이 hip 수직선에 오도록 보정 (leg -0.71→-0.68)
@@ -51,16 +51,16 @@ SPOT_MICRO_CFG = ArticulationCfg(
             # 보정(leg=-0.68): toe가 hip 수직선에 정확히 위치 → 자연스러운 neutral stand
             # foot=1.31 유지 (toe z=-192.5mm, 거의 동일)
             "front_left_shoulder": -0.04,
-            "front_left_leg": -0.68,   # toe가 hip 수직선에 위치 (FK 계산)
+            "front_left_leg": -0.97,   # 실측 보정 2차: -0.89에서 toe +10mm → -0.97
             "front_left_foot": 1.31,
             "front_right_shoulder": -0.04,
-            "front_right_leg": -0.68,
+            "front_right_leg": -0.97,
             "front_right_foot": 1.31,
             "rear_left_shoulder": -0.04,
-            "rear_left_leg": -0.68,    # 앞뒤 동일 = 완벽 대칭 + 수평
+            "rear_left_leg": -0.97,
             "rear_left_foot": 1.31,
             "rear_right_shoulder": -0.04,
-            "rear_right_leg": -0.68,
+            "rear_right_leg": -0.97,
             "rear_right_foot": 1.31,
         },
         joint_vel={".*": 0.0},

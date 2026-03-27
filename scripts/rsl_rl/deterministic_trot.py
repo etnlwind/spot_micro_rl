@@ -76,19 +76,13 @@ def main(env_cfg, agent_cfg):
     except Exception:
         pass
 
-    # 액추에이터를 ImplicitActuator로 교체 (PhysX 내장 PD — open-loop에 적합)
-    from isaaclab.actuators import ImplicitActuatorCfg
-    env_cfg.scene.robot.actuators = {
-        "legs": ImplicitActuatorCfg(
-            joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
-            stiffness=50.0,
-            damping=5.0,
-        ),
-    }
+    # 액추에이터 변경 없음 — RL 훈련과 동일 (DCMotor stiffness=15, effort=15)
 
-    # 카메라 side view
-    env_cfg.viewer.eye = (2.0, -0.3, 0.5)
+    # 카메라: 로봇 정 오른쪽 (Y축 음수 방향)
+    env_cfg.viewer.eye = (0.0, -1.0, 0.25)
     env_cfg.viewer.lookat = (0.0, 0.0, 0.15)
+
+    env_cfg.scene.robot.spawn.fix_base = False  # 바닥 서기 테스트
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
@@ -145,14 +139,36 @@ def main(env_cfg, agent_cfg):
         obs, reward, terminated, truncated, info = env.step(action)
         step += 1
 
-        if step % 100 == 0:
-            # Print robot state
+        if step % 200 == 0:
             robot = env.unwrapped.scene["robot"]
             pos = robot.data.root_pos_w[0]
-            vel = robot.data.root_lin_vel_w[0]
             height = pos[2].item()
-            fwd_vel = vel[0].item()
-            print(f"  step {step:4d} | t={t:5.2f}s | height={height:.3f}m | fwd_vel={fwd_vel:.3f}m/s")
+            joint_pos = robot.data.joint_pos[0]
+            joint_names = robot.joint_names
+
+            log_line = f"step {step} | root height={height:.4f}\n"
+            log_line += f"  joint positions:\n"
+            for j, jn in enumerate(joint_names):
+                log_line += f"    {jn:<30} = {joint_pos[j].item():+.4f}\n"
+
+            # body positions (all bodies)
+            try:
+                body_pos = robot.data.body_pos_w[0]
+                body_names = robot.body_names
+                log_line += f"  body world positions:\n"
+                for i, name in enumerate(body_names):
+                    x = body_pos[i][0].item()
+                    y = body_pos[i][1].item()
+                    z = body_pos[i][2].item()
+                    log_line += f"    {name:<30} x={x:+.4f}  y={y:+.4f}  z={z:+.4f}\n"
+            except Exception as e:
+                log_line += f"  body_pos error: {e}\n"
+
+            print(log_line)
+            import os
+            coord_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_trot_coords.txt")
+            with open(coord_path, "a") as f:
+                f.write(log_line + "\n")
 
     env.close()
     print("\n[Done] Deterministic trot completed.")

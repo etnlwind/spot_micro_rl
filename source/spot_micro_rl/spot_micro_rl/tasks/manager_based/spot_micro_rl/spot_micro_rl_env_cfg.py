@@ -1156,18 +1156,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.curriculum.reward_weights.params["boot_contact_initial"] = 5.0
             self.curriculum.reward_weights.params["boot_ramp_down_iters"] = 300
 
-            # ── V47-B: 자세 교정 번들 (posture correction) ──
-            if TRAIN_VERSION.startswith("V47-B"):
-                # 1. 몸 높이 유지 강화
-                self.rewards.base_height_l2.weight = -30.0    # V47: -15 → V47-B: -30
-                self.rewards.standing_height.weight = 20.0     # V47: +10 → V47-B: +20
-
-                # 2. 다리 들기 각도 제한 (0.6 rad → 0.4 rad)
-                # leg_lift: 4발 공통, 실제 영향은 rear 중심 (FL=0.01, RL=0.68)
-                self.rewards.leg_lift.params["target_angle"] = 0.4  # 34도→23도 (자연 보행 범위)
-
-                # 3. 관절 한계 벌칙 강화
-                self.rewards.dof_pos_limits.weight = -15.0     # V38.3: -7 → V47-B: -15
+            # V47-B: standing pose 보정만 (leg=-0.97). reward 변경 없음.
 
         # ══════════════════════════════════════════════════════════
         # V42: Clean Reward Restart — 16개 reward만 사용
