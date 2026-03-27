@@ -46,20 +46,21 @@ SPOT_MICRO_CFG = ArticulationCfg(
         pos=(0.0, 0.0, 0.192),  # V30: 발끝 대칭 자세 높이 (지면 +2mm)
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
-            # V30: 앞/뒤 발끝 대칭 자세 — F-R 하중 50:50
-            # leg=-0.71, foot=1.31 → 앞발/뒷발 CoM 기준 각 93mm 대칭
-            # 이전(leg=-0.5, foot=1.2): 앞 121mm / 뒤 65mm → 앞다리 과접지 원인
+            # V47-B: 발끝이 hip 수직선에 오도록 보정 (leg -0.71→-0.68)
+            # 이전(leg=-0.71): toe가 hip보다 5.7mm 앞으로 말려있음 → 뒤로 기울어짐 유발
+            # 보정(leg=-0.68): toe가 hip 수직선에 정확히 위치 → 자연스러운 neutral stand
+            # foot=1.31 유지 (toe z=-192.5mm, 거의 동일)
             "front_left_shoulder": -0.04,
-            "front_left_leg": -0.71,
+            "front_left_leg": -0.68,   # toe가 hip 수직선에 위치 (FK 계산)
             "front_left_foot": 1.31,
             "front_right_shoulder": -0.04,
-            "front_right_leg": -0.71,
+            "front_right_leg": -0.68,
             "front_right_foot": 1.31,
             "rear_left_shoulder": -0.04,
-            "rear_left_leg": -0.71,
+            "rear_left_leg": -0.68,    # 앞뒤 동일 = 완벽 대칭 + 수평
             "rear_left_foot": 1.31,
             "rear_right_shoulder": -0.04,
-            "rear_right_leg": -0.71,
+            "rear_right_leg": -0.68,
             "rear_right_foot": 1.31,
         },
         joint_vel={".*": 0.0},
