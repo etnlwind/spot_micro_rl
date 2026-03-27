@@ -59,7 +59,7 @@ rear_joint_velocity(+9.43) + leg_lift(+0.68) = +10.11 vs dof_limits(-3.76)
 
 ## 2. V47-B 목표
 
-> **V47의 stride/coupling을 유지하면서, 몸 높이와 다리 각도를 자연스럽게 교정**
+> **V47의 보행이 붕괴하지 않는 범위에서, posture를 우선 교정** (stride 하락 허용)
 
 목표 자세 (SpotMicro 정상 서기):
 - 몸통이 target_height(0.23m)에서 유지
@@ -87,6 +87,7 @@ leg_lift target_angle: 0.6 rad (34도) → 0.4 rad (23도)
 → 자연 보행 범위(15~25도) 내로 제한
 → 23도 이상 들어올려도 보상 cap (1.0)
 → 과도한 꺽임 인센티브 감소
+→ 4발 공통 적용 (FL/FR/RL/RR). 실제 영향은 rear 중심 (현재 RL=0.68, RR=0.49 vs FL=0.01)
 ```
 
 ### 변경 3: 관절 한계 벌칙 강화
@@ -184,7 +185,7 @@ V47-B:  stride 5.0~6.0, 자연스러운 자세
 | standing_height | 0.13 | **> 0.18** | TensorBoard |
 | dof_pos_limits | -3.76 | **< -2.0** (한계 위반 감소) | TensorBoard |
 | leg_lift_rl | 0.68 | **< 0.50** (과도 들기 감소) | TensorBoard |
-| shoulder_dev | 0.43 | **< 0.46** (악화 없음) | TensorBoard |
+| shoulder_dev | 0.43 | **≤ 0.43** (이상적 개선) / **< 0.46** (최소 허용) | TensorBoard |
 
 ### 자세 품질 판정 — 영상 체크리스트
 
