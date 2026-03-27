@@ -27,8 +27,8 @@
       <origin rpy="0 0 0" xyz="0 0 0" />
     </collision>
     <inertial>
-      <mass value="2.80" />
-      <inertia ixx="0.003" ixy="0.0" ixz="0.0" iyy="0.011" iyz="0.0" izz="0.012" />
+      <mass value="4.04" /><!-- V48-C: 2.80 + 1.24 (서보/SBC/배터리/배선) -->
+      <inertia ixx="0.00433" ixy="0.0" ixz="0.0" iyy="0.01587" iyz="0.0" izz="0.01732" /><!-- 질량 비례 증가 -->
     </inertial>
   </link>
   
