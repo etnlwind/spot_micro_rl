@@ -71,8 +71,8 @@ SPOT_MICRO_CFG = ArticulationCfg(
             # 12 leg joints (shoulder, leg, foot × 4)
             joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
             # V17.1: 과도한 토크/강성 완화 → 솟구침/곤두박질 방지
-            saturation_effort=15.0,  # V17.1: 20→15 (원래 값 복원)
-            effort_limit=15.0,       # V17 유지
+            saturation_effort=1.5,  # V48-D: MG996R stall=1.08Nm, +40% 마진
+            effort_limit=1.5,       # V48-D: 실제 서보 토크 근사
             velocity_limit=10.0,     # V17.1: 8→10 (원래 값 복원, 느린 동작은 보상으로)
             stiffness={".*": 15.0},  # V17.1: 25→15 (10과 25의 중간)
             damping={".*": 1.5},     # V17.1: 2→1.5 (약간의 감쇠 유지)

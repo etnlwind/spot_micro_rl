@@ -27,8 +27,8 @@
       <origin rpy="0 0 0" xyz="0 0 0" />
     </collision>
     <inertial>
-      <mass value="4.04" /><!-- V48-C: 2.80 + 1.24 (서보/SBC/배터리/배선) -->
-      <inertia ixx="0.00433" ixy="0.0" ixz="0.0" iyy="0.01587" iyz="0.0" izz="0.01732" /><!-- 질량 비례 증가 -->
+      <mass value="3.60" />
+      <inertia ixx="0.00386" ixy="0.0" ixz="0.0" iyy="0.01414" iyz="0.0" izz="0.01543" />
     </inertial>
   </link>
   
@@ -147,8 +147,8 @@
       </geometry>
     </collision>
     <inertial>
-      <mass value="0.15" />
-      <inertia ixx="0.0002" ixy="0.0" ixz="0.0" iyy="0.0008" iyz="0.0" izz="0.0008" />
+      <mass value="0.205" />
+      <inertia ixx="0.000273" ixy="0.0" ixz="0.0" iyy="0.001093" iyz="0.0" izz="0.001093" />
     </inertial>
   </link>
   <link name="front_left_foot_link">
@@ -166,8 +166,8 @@
       <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 -0.050" />
     </collision>
     <inertial>
-      <mass value="0.1" />
-      <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0005" iyz="0.0" izz="0.0005" />
+      <mass value="0.155" />
+      <inertia ixx="0.000155" ixy="0.0" ixz="0.0" iyy="0.000775" iyz="0.0" izz="0.000775" />
     </inertial>
   </link>
   <link name="front_left_toe_link">
@@ -268,8 +268,8 @@
       </geometry>
     </collision>
     <inertial>
-      <mass value="0.15" />
-      <inertia ixx="0.0002" ixy="0.0" ixz="0.0" iyy="0.0008" iyz="0.0" izz="0.0008" />
+      <mass value="0.205" />
+      <inertia ixx="0.000273" ixy="0.0" ixz="0.0" iyy="0.001093" iyz="0.0" izz="0.001093" />
     </inertial>
   </link>
   <link name="front_right_foot_link">
@@ -287,8 +287,8 @@
       <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 -0.050" />
     </collision>
     <inertial>
-      <mass value="0.1" />
-      <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0005" iyz="0.0" izz="0.0005" />
+      <mass value="0.155" />
+      <inertia ixx="0.000155" ixy="0.0" ixz="0.0" iyy="0.000775" iyz="0.0" izz="0.000775" />
     </inertial>
   </link>
   <link name="front_right_toe_link">
@@ -389,8 +389,8 @@
       </geometry>
     </collision>
     <inertial>
-      <mass value="0.15" />
-      <inertia ixx="0.0002" ixy="0.0" ixz="0.0" iyy="0.0008" iyz="0.0" izz="0.0008" />
+      <mass value="0.205" />
+      <inertia ixx="0.000273" ixy="0.0" ixz="0.0" iyy="0.001093" iyz="0.0" izz="0.001093" />
     </inertial>
   </link>
   <link name="rear_left_foot_link">
@@ -408,8 +408,8 @@
       <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 -0.050" />
     </collision>
     <inertial>
-      <mass value="0.1" />
-      <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0005" iyz="0.0" izz="0.0005" />
+      <mass value="0.155" />
+      <inertia ixx="0.000155" ixy="0.0" ixz="0.0" iyy="0.000775" iyz="0.0" izz="0.000775" />
     </inertial>
   </link>
   <link name="rear_left_toe_link">
@@ -510,8 +510,8 @@
       </geometry>
     </collision>
     <inertial>
-      <mass value="0.15" />
-      <inertia ixx="0.0002" ixy="0.0" ixz="0.0" iyy="0.0008" iyz="0.0" izz="0.0008" />
+      <mass value="0.205" />
+      <inertia ixx="0.000273" ixy="0.0" ixz="0.0" iyy="0.001093" iyz="0.0" izz="0.001093" />
     </inertial>
   </link>
   <link name="rear_right_foot_link">
@@ -529,8 +529,8 @@
       <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 -0.050" />
     </collision>
     <inertial>
-      <mass value="0.1" />
-      <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0005" iyz="0.0" izz="0.0005" />
+      <mass value="0.155" />
+      <inertia ixx="0.000155" ixy="0.0" ixz="0.0" iyy="0.000775" iyz="0.0" izz="0.000775" />
     </inertial>
   </link>
   <link name="rear_right_toe_link">
