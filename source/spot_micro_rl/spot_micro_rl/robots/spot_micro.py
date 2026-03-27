@@ -43,7 +43,7 @@ SPOT_MICRO_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.30),  # 충분히 높게 → 부드럽게 착지
+        pos=(0.0, 0.0, 0.22),  # V48: leg=-0.97에 맞춘 높이 (V47 0.192보다 약간 높게)
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
             # V47-B: 발끝이 hip 수직선에 오도록 보정 (leg -0.71→-0.68)
