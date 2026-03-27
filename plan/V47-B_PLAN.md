@@ -181,11 +181,13 @@ V47-B:  stride 5.0~6.0, 자연스러운 자세
 
 | 지표 | V47 현재 | V47-B 성공 | 측정 |
 |------|:-------:|:---------:|------|
-| base_height_l2 | -0.20 | **< -0.10** (높이 개선) | TensorBoard |
-| standing_height | 0.13 | **> 0.18** | TensorBoard |
-| dof_pos_limits | -3.76 | **< -2.0** (한계 위반 감소) | TensorBoard |
-| leg_lift_rl | 0.68 | **< 0.50** (과도 들기 감소) | TensorBoard |
-| shoulder_dev | 0.43 | **≤ 0.43** (이상적 개선) / **< 0.46** (최소 허용) | TensorBoard |
+| base_height_l2 | -0.20 | **< -0.10** (높이 개선) | TensorBoard (reward) |
+| standing_height | 0.13 | **> 0.18** | TensorBoard (reward) |
+| dof_pos_limits | -3.76 | **< -2.0** (한계 위반 감소) | TensorBoard (reward) |
+| leg_lift_rl | 0.68 | **< 0.50** (과도 들기 감소) | TensorBoard (reward) |
+| shoulder_dev | 0.43 | **≤ 0.43** (이상적) / **< 0.46** (최소) | TensorBoard (reward) |
+| **stance_width_mean_raw** | 0.21 | **< 0.22** (벌어짐 악화 없음) | TensorBoard (**실측 raw**) |
+| **shoulder_mean_abs_dev_raw** | 0.43 | **≤ 0.43** (이상적) / **< 0.46** (최소) | TensorBoard (**실측 raw**) |
 
 ### 자세 품질 판정 — 영상 체크리스트
 
