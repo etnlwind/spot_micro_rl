@@ -1508,7 +1508,7 @@ def _rotate_training_log() -> None:
         pass
 
 
-def _launch_training_command(command: str, launcher_name: str) -> str:
+def _launch_training_command(command: str, launcher_name: str, visible: bool = False) -> str:
     logs_dir = os.path.join(PROJECT_ROOT, "logs")
     os.makedirs(logs_dir, exist_ok=True)
     _rotate_training_log()
@@ -1520,8 +1520,19 @@ def _launch_training_command(command: str, launcher_name: str) -> str:
     with open(launcher_path, "w", encoding="utf-8", newline="\r\n") as file:
         file.write("@echo off\n")
         file.write(f"{command}\n")
-    with open(TRAINING_LOG, "ab") as log_file:
-        _popen_hidden_cmd(launcher_path, stdout=log_file, stderr=subprocess.STDOUT)
+    if visible:
+        # GUI mode: launch with visible console window so Isaac Sim can render
+        # Use CREATE_NEW_CONSOLE to ensure window appears on desktop
+        kwargs = {"cwd": PROJECT_ROOT}
+        kwargs["env"] = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+            subprocess.Popen(["cmd", "/d", "/c", launcher_path], **kwargs)
+        else:
+            subprocess.Popen(launcher_path, shell=True, **kwargs)
+    else:
+        with open(TRAINING_LOG, "ab") as log_file:
+            _popen_hidden_cmd(launcher_path, stdout=log_file, stderr=subprocess.STDOUT)
     return launcher_path
 
 
@@ -1719,7 +1730,7 @@ def ensure_heartbeat_running(log_path: str, iter_step: int | None = None, poll: 
     return launch_heartbeat(log_path, iter_step=iter_step, poll=poll, video_iter_step=video_iter_step)
 
 
-def build_train_command(resume_run_dir: str | None = None, checkpoint_path: str | None = None) -> str:
+def build_train_command(resume_run_dir: str | None = None, checkpoint_path: str | None = None, headless: bool = True) -> str:
     train_script = os.path.join(PROJECT_ROOT, "scripts", "rsl_rl", "train.py")
     parts = [
         f'cd /d "{PROJECT_ROOT}"',
@@ -1727,9 +1738,10 @@ def build_train_command(resume_run_dir: str | None = None, checkpoint_path: str 
         f'"{ISAAC_LAB}" -p "{train_script}"',
         f"--task={TASK}",
         f"--num_envs={TRAIN_ENVS}",
-        "--headless",
         f"--max_iterations={MAX_ITERATIONS}",
     ]
+    if headless:
+        parts.append("--headless")
     if resume_run_dir and checkpoint_path:
         parts.extend([
             "--resume",
@@ -1739,20 +1751,22 @@ def build_train_command(resume_run_dir: str | None = None, checkpoint_path: str 
     return _wrap_conda_command(" && ".join(parts[:2]) + " && " + " ".join(parts[2:]), force_activate=True)
 
 
-def launch_training(log_path: str, fresh: bool = False) -> dict:
+def launch_training(log_path: str, fresh: bool = False, headless: bool = True) -> dict:
     """훈련 시작.
 
     fresh=True: state의 checkpoint를 무시하고 iter 0부터 새 run으로 시작.
     fresh=False: 기존 active_checkpoint에서 재개 (이전 동작 유지).
+    headless=True: GUI 없이 실행 (기본값). False면 GUI 모드.
     """
     if is_training_running():
         log_event("TRAIN", "ALREADY_RUNNING", version=TRAIN_VERSION)
         return {"mode": "already-running", "run_dir": resolve_active_run_dir(), "checkpoint": resolve_active_checkpoint()}
-    log_event("TRAIN", "LAUNCHING", f"fresh={fresh}", version=TRAIN_VERSION, envs=str(TRAIN_ENVS))
+    mode_str = "headless" if headless else "GUI"
+    log_event("TRAIN", "LAUNCHING", f"fresh={fresh} {mode_str}", version=TRAIN_VERSION, envs=str(TRAIN_ENVS))
     if fresh:
         update_state(active_run="", active_checkpoint="", last_command="start-fresh")
         baseline_run = get_latest_run_dir()
-        command = build_train_command()
+        command = build_train_command(headless=headless)
     else:
         baseline_run = get_latest_run_dir()
         resume_run = resolve_active_run_dir()
@@ -1765,12 +1779,12 @@ def launch_training(log_path: str, fresh: bool = False) -> dict:
             )
             update_state(active_run="", active_checkpoint="", last_command="start-fresh")
             fresh = True
-            command = build_train_command()
+            command = build_train_command(headless=headless)
         else:
             checkpoint = resolve_active_checkpoint(resume_run)
-            command = build_train_command(resume_run, checkpoint) if checkpoint else build_train_command()
+            command = build_train_command(resume_run, checkpoint, headless=headless) if checkpoint else build_train_command(headless=headless)
     write_log(f"Launching training (fresh={fresh}): {command}", log_path)
-    launcher_path = _launch_training_command(command, "_launch_training.cmd")
+    launcher_path = _launch_training_command(command, "_launch_training.cmd", visible=not headless)
     write_log(f"Training launcher: {launcher_path}", log_path)
     # Wait up to 90s for a new run directory to appear (Isaac Lab can take 30-50s to create it)
     deadline = time.time() + 90

@@ -103,6 +103,11 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 logger = logging.getLogger(__name__)
 
 import spot_micro_rl.tasks  # noqa: F401
+from spot_micro_rl.tasks.manager_based.spot_micro_rl.mdp.rewards import (
+    get_curriculum_snapshot,
+    restore_curriculum_snapshot,
+    log_reward_weight_trace,
+)
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -216,7 +221,48 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         offset_steps = resumed_iter * runner.num_steps_per_env
         env.unwrapped.common_step_counter = offset_steps
         print(f"[INFO] Synced env.common_step_counter = {offset_steps} "
-              f"(iter {resumed_iter} × {runner.num_steps_per_env} steps/iter)")
+              f"(iter {resumed_iter} x {runner.num_steps_per_env} steps/iter)")
+
+        # ── Curriculum state restore ──
+        # Priority: snapshot file > deterministic recompute (from iteration)
+        crr_path = resume_path.replace("model_", "curriculum_")
+        if os.path.exists(crr_path):
+            crr_state = torch.load(crr_path, weights_only=False, map_location="cpu")
+            restored = restore_curriculum_snapshot(env.unwrapped, crr_state)
+            if restored:
+                saved_iter = crr_state.get("_iteration", "?")
+                print(f"[Curriculum] Restored snapshot from {os.path.basename(crr_path)} "
+                      f"(saved at iter {saved_iter})")
+            else:
+                print(f"[Curriculum] Snapshot file found but invalid, "
+                      f"falling back to deterministic recompute from iter {resumed_iter}")
+        else:
+            print(f"[Curriculum] No snapshot file found ({os.path.basename(crr_path)}), "
+                  f"will use deterministic recompute from iter {resumed_iter}")
+            print(f"[Curriculum] NOTE: weights below are env_cfg defaults; "
+                  f"curriculum will recompute on first rollout step")
+
+        # Log reward weight trace for verification
+        log_reward_weight_trace(env.unwrapped, label=f"RESUME iter={resumed_iter}")
+
+    # ── Monkey-patch runner.save to also save curriculum snapshot ──
+    _orig_save = runner.save
+
+    def _save_with_curriculum(*args, **kwargs):
+        _orig_save(*args, **kwargs)
+        # Extract path: runner.save(path) or runner.save(path, infos)
+        path = args[0] if args else kwargs.get("path", "")
+        if not path:
+            return
+        try:
+            crr_state = get_curriculum_snapshot(env.unwrapped)
+            crr_state["_iteration"] = runner.current_learning_iteration
+            crr_path = path.replace("model_", "curriculum_")
+            torch.save(crr_state, crr_path)
+        except Exception as e:
+            print(f"[Curriculum] WARNING: Failed to save snapshot: {e}")
+
+    runner.save = _save_with_curriculum
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

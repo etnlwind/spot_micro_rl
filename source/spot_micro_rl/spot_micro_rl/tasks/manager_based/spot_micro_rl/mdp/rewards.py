@@ -4230,3 +4230,174 @@ def _curriculum_phase_str(alpha12: float, alpha23: float) -> str:
     if alpha23 < 1.0 - 1e-6:
         return f"Ramp 2→3 ({alpha23:.0%})"
     return "Phase 3 (TROT)"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Curriculum State Save / Restore
+# ═══════════════════════════════════════════════════════════════════
+# "state가 있으면 state 복원, 없으면 deterministic recompute"
+#
+# 저장: 체크포인트마다 curriculum alpha + reward weight snapshot
+# 복원: snapshot 우선, 없으면 iteration 기반 재계산 (기존 로직)
+# 검증: 첫 rollout 전 weight trace 로그 출력
+# ═══════════════════════════════════════════════════════════════════
+
+# reward_weight_curriculum의 env 속성 목록
+_CRR_ALPHA_KEYS = [
+    "_crr_alpha12", "_crr_alpha23", "_crr_validity_alpha",
+    "_crr_floor_alpha", "_crr_load_alpha", "_crr_validity_gate_alpha",
+    "_crr_propulsion_floor_alpha", "_crr_band_alpha", "_crr_coop_alpha",
+    "_crr_residency_early_alpha", "_crr_residency_late_alpha",
+    "_crr_rear_symmetry_alpha", "_crr_exit_penalty_alpha",
+    "_crr_coop_min_leg_alpha", "_crr_rear_contact_diff_alpha",
+    "_crr_stride_length_alpha", "_crr_swing_gate_alpha",
+    "_crr_front_swing_alpha",
+]
+
+_CRR_META_KEYS = [
+    "_crr_last_update", "_crr_gate_paused",
+]
+
+# v42_boot_curriculum의 env 속성 (V44 adaptive safety)
+_V44_STATE_KEYS = [
+    "_v44_shoulder_ema", "_v44_ep_len_ema", "_v44_pose_in_fallback",
+]
+
+# V47 boot ramp-down
+_V47_STATE_KEYS = [
+    "_v47_boot_gate_released_iter",
+]
+
+_ALL_CURRICULUM_KEYS = _CRR_ALPHA_KEYS + _CRR_META_KEYS + _V44_STATE_KEYS + _V47_STATE_KEYS
+
+
+def get_curriculum_snapshot(env) -> dict:
+    """Collect all curriculum state from env for checkpoint saving.
+
+    Returns dict with:
+      - alphas: all _crr_* alpha values
+      - meta: _crr_last_update, _crr_gate_paused
+      - v44/v47: boot curriculum state (if exists)
+      - reward_weights: {term_name: weight} for all active reward terms
+      - iteration: current learning iteration (from common_step_counter)
+    """
+    state = {"_version": 1}
+
+    # Curriculum alphas and meta
+    for key in _ALL_CURRICULUM_KEYS:
+        if hasattr(env, key):
+            state[key] = getattr(env, key)
+
+    # Current reward weights (the ground truth of what's applied)
+    weights = {}
+    try:
+        for name in env.reward_manager._term_names:
+            cfg = env.reward_manager.get_term_cfg(name)
+            weights[name] = cfg.weight
+    except Exception:
+        pass
+    state["_reward_weights"] = weights
+
+    # Termination params (CaT etc.) — only scalar types to avoid stale SceneEntityCfg
+    term_params = {}
+    _SAFE_TYPES = (int, float, bool, str)
+    try:
+        for name in env.termination_manager._term_names:
+            cfg = env.termination_manager.get_term_cfg(name)
+            if cfg.params:
+                scalars = {k: v for k, v in cfg.params.items() if isinstance(v, _SAFE_TYPES)}
+                if scalars:
+                    term_params[name] = scalars
+    except Exception:
+        pass
+    state["_termination_params"] = term_params
+
+    return state
+
+
+def restore_curriculum_snapshot(env, state: dict) -> bool:
+    """Restore curriculum state to env from saved snapshot.
+
+    Returns True if snapshot was applied, False if empty/invalid.
+    """
+    if not state or "_version" not in state:
+        return False
+
+    restored_keys = []
+
+    # Restore curriculum alphas and meta
+    for key in _ALL_CURRICULUM_KEYS:
+        if key in state:
+            setattr(env, key, state[key])
+            restored_keys.append(key)
+
+    # Restore reward weights
+    weights = state.get("_reward_weights", {})
+    weight_count = 0
+    for name, w in weights.items():
+        try:
+            cfg = env.reward_manager.get_term_cfg(name)
+            cfg.weight = w
+            env.reward_manager.set_term_cfg(name, cfg)
+            weight_count += 1
+        except Exception:
+            pass
+
+    # Restore termination params (CaT)
+    term_params = state.get("_termination_params", {})
+    term_count = 0
+    for name, params in term_params.items():
+        try:
+            cfg = env.termination_manager.get_term_cfg(name)
+            for k, v in params.items():
+                cfg.params[k] = v
+            env.termination_manager.set_term_cfg(name, cfg)
+            term_count += 1
+        except Exception:
+            pass
+
+    alpha_count = sum(1 for k in _CRR_ALPHA_KEYS if k in state)
+    print(f"[Curriculum] Snapshot restored: {alpha_count} alphas, "
+          f"{weight_count} reward weights, {term_count} termination terms")
+
+    return True
+
+
+def log_reward_weight_trace(env, label: str = "RESUME") -> dict:
+    """Log current reward weights for verification.
+
+    Returns the weight dict for comparison.
+    """
+    weights = {}
+    try:
+        for name in env.reward_manager._term_names:
+            cfg = env.reward_manager.get_term_cfg(name)
+            weights[name] = cfg.weight
+    except Exception:
+        pass
+
+    # Alpha summary
+    alpha_summary = {}
+    for key in _CRR_ALPHA_KEYS:
+        if hasattr(env, key):
+            alpha_summary[key.replace("_crr_", "")] = getattr(env, key)
+
+    print(f"\n{'='*60}")
+    print(f"[Curriculum] Weight Trace @ {label}")
+    print(f"{'='*60}")
+
+    if alpha_summary:
+        print(f"  Alphas:")
+        for k, v in sorted(alpha_summary.items()):
+            print(f"    {k}: {v:.4f}")
+
+    if hasattr(env, "_crr_gate_paused"):
+        print(f"  gate_paused: {env._crr_gate_paused}")
+
+    nonzero = {k: v for k, v in sorted(weights.items()) if abs(v) > 1e-6}
+    print(f"  Active reward weights ({len(nonzero)}/{len(weights)} nonzero):")
+    for name, w in nonzero.items():
+        print(f"    {name}: {w:.4f}")
+    print(f"{'='*60}\n")
+
+    return weights

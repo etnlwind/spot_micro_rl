@@ -79,16 +79,17 @@ def _exec_resume() -> None:
     print(f"[OK] resume: {run_name} / {checkpoint_name}")
 
 
-def _exec_start() -> None:
+def _exec_start(headless: bool = True) -> None:
     common.reload_train_version()
-    result = common.launch_training(LOG, fresh=True)
+    mode_str = "headless" if headless else "GUI"
+    result = common.launch_training(LOG, fresh=True, headless=headless)
     run_name = os.path.basename(result["run_dir"]) if result.get("run_dir") else "N/A"
     common.send_text(
-        f"🚀 <b>IsaacOps — TRAINING START</b>  <code>[{common.TRAIN_VERSION}]</code>\n"
+        f"<b>TRAINING START [{mode_str}]</b>  <code>[{common.TRAIN_VERSION}]</code>\n"
         f"<i>run: {run_name}</i>",
         LOG, parse_mode="HTML",
     )
-    print(f"[OK] started: {run_name}")
+    print(f"[OK] started: {run_name} [{mode_str}]")
 
 
 def main() -> int:
@@ -100,7 +101,8 @@ def main() -> int:
         print("  cli hb        — heartbeat report")
         print("  cli stop      — stop training")
         print("  cli resume    — resume training")
-        print("  cli start     — fresh start")
+        print("  cli start     — fresh start (headless)")
+        print("  cli start gui — fresh start (GUI mode)")
         print("  cli selfcheck — context resolution")
         print("  cli help      — command menu")
         print()
@@ -111,43 +113,21 @@ def main() -> int:
     text = " ".join(sys.argv[1:])
     cmd = _normalize(text)
 
-    # Training commands that require Windows (Isaac Lab GPU access)
-    _TRAINING_CMDS = {"start", "stop", "resume"}
+    # CLI-only commands (no Telegram equivalent)
+    _CLI_ONLY = {"selfcheck", "hb"}
 
     try:
-        # WSL에서 training 명령은 cmd.exe로 Windows CLI 직접 실행 (로그는 Windows 쪽에서 기록)
-        if cmd in _TRAINING_CMDS and common._IS_WSL:
-            win_root = common._to_win_path(common.PROJECT_ROOT)
-            win_cmd = f'cmd.exe /c "cd /d \"{win_root}\" && isaac_ops\\cli.cmd {cmd}"'
-            print(f"[INFO] WSL detected — executing via cmd.exe: {cmd}")
-            os.system(win_cmd)
-        elif cmd == "status":
+        if cmd in _CLI_ONLY:
             common.log_event("CMD", "CLI_EXEC", cmd)
-            _exec_status()
-        elif cmd == "hb":
-            common.log_event("CMD", "CLI_EXEC", cmd)
-            _exec_hb(text)
-        elif cmd == "selfcheck":
-            common.log_event("CMD", "CLI_EXEC", cmd)
-            _exec_selfcheck()
-        elif cmd == "help":
-            common.log_event("CMD", "CLI_EXEC", cmd)
-            _exec_help()
-        elif cmd == "stop":
-            common.log_event("CMD", "CLI_EXEC", cmd)
-            _exec_stop()
-        elif cmd == "resume":
-            common.log_event("CMD", "CLI_EXEC", cmd)
-            _exec_resume()
-        elif cmd == "start":
-            common.log_event("CMD", "CLI_EXEC", cmd)
-            _exec_start()
+            if cmd == "selfcheck":
+                _exec_selfcheck()
+            elif cmd == "hb":
+                _exec_hb(text)
         elif cmd in _COMMANDS:
-            # report, front, rear, top, side, shutdown — 이것들은 listener에서만 실행
-            common.log_event("CMD", "CLI_EXEC", cmd)
-            print(f"[INFO] '{cmd}' requires listener. Sending to Telegram chat.")
+            # Telegram 명령어는 전부 리스너가 처리 (단일 실행 루트)
+            common.log_event("CMD", "CLI_SEND", text[:50])
             common.send_text(text, LOG, parse_mode=None)
-            print(f"[OK] sent: {text}")
+            print(f"[OK] sent to listener: {text}")
         else:
             # Plain message
             common.log_event("CMD", "CLI_SEND", text[:50])

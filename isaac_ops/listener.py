@@ -175,38 +175,40 @@ def _handle_status() -> None:
     common.send_text(common.format_status_html(), LOG, parse_mode="HTML")
 
 
-def _handle_start(pending_confirm_ref: list) -> None:
+def _handle_start(pending_confirm_ref: list, headless: bool = True) -> None:
     """Start command — may set pending_confirm for user confirmation."""
     common.reload_train_version()
     active_run_dir = common.resolve_active_run_dir()
     existing_checkpoint = common.resolve_active_checkpoint(active_run_dir) if active_run_dir else None
     run_version = (common._read_run_train_version(active_run_dir) if active_run_dir else "") or ""
     version_changed = run_version and run_version != common.TRAIN_VERSION
+    mode_str = "headless" if headless else "GUI"
 
     if existing_checkpoint and not version_changed:
         with _confirm_lock:
             pending_confirm_ref.clear()
             pending_confirm_ref.append({
                 "action": "fresh_start",
+                "headless": headless,
                 "expires_at": time.time() + _CONFIRM_TIMEOUT_SEC,
             })
         common.send_text(
-            f"⚠️ <b>확인 필요 — {common.TRAIN_VERSION} 새 훈련</b>\n"
-            f"새로 구성된 reward/env 설정으로 <b>iter 0부터 새 훈련을 시작</b>합니다.\n"
-            f"<i>계속하려면 Y를 입력하세요. (60초 내, 다른 입력은 취소)</i>",
+            f"<b>{common.TRAIN_VERSION} [{mode_str}]</b>\n"
+            f"iter 0 from-scratch.\n"
+            f"<i>Y to confirm (60s)</i>",
             LOG, parse_mode="HTML",
         )
     else:
         if version_changed:
             common.send_text(
-                f"🆕 <b>VERSION UPGRADE — {run_version} → {common.TRAIN_VERSION}</b>\n"
-                f"<i>새 버전이므로 확인 없이 iter 0부터 시작합니다.</i>",
+                f"<b>VERSION {run_version} -> {common.TRAIN_VERSION} [{mode_str}]</b>\n"
+                f"<i>New version, starting iter 0.</i>",
                 LOG, parse_mode="HTML",
             )
-        result = common.launch_training(LOG, fresh=True)
+        result = common.launch_training(LOG, fresh=True, headless=headless)
         run_name = _safe_basename(result["run_dir"])
         common.send_text(
-            f"🚀 <b>TRAINING START</b>\n<i>run: {run_name}</i>\n<i>version: {common.TRAIN_VERSION}</i>",
+            f"<b>TRAINING START [{mode_str}]</b>\n<i>run: {run_name}</i>\n<i>version: {common.TRAIN_VERSION}</i>",
             LOG, parse_mode="HTML",
         )
 
@@ -313,7 +315,8 @@ def _dispatch_command(command: str, arg_text: str, pending_confirm: list) -> Non
         common.send_text(f"<pre>{common.build_context_resolution_text()}</pre>", LOG, parse_mode="HTML")
         return
     if command == "start":
-        _handle_start(pending_confirm)
+        gui_mode = "gui" in arg_text.lower()
+        _handle_start(pending_confirm, headless=not gui_mode)
         return
     if command == "stop":
         _handle_stop()
@@ -861,6 +864,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="IsaacOps — unified training listener")
     parser.add_argument("--iter-step", type=int, default=common.HEARTBEAT_ITER_STEP, help="text heartbeat interval")
     parser.add_argument("--video-iter-step", type=int, default=common.VIDEO_REPORT_ITER_STEP, help="video report interval")
+    parser.add_argument("--resume", action="store_true", default=False, help="process queued messages from before restart")
     args = parser.parse_args()
 
     # PID lock — 기존 listener가 있으면 graceful shutdown 요청 → 대기 → 타임아웃 시 kill
@@ -904,6 +908,15 @@ def main() -> int:
         LOG,
     )
     common.log_event("LISTEN", "STARTED", f"pid={os.getpid()} iter_step={args.iter_step} video_step={args.video_iter_step}")
+
+    # Flush stale messages unless --resume
+    if not args.resume:
+        flushed = common.fetch_updates(timeout_sec=0, log_path=LOG)
+        if flushed:
+            common.write_log(f"Flushed {len(flushed)} stale message(s) from before restart", LOG)
+            print(f"[listener] Flushed {len(flushed)} stale message(s)")
+        else:
+            print("[listener] No stale messages to flush")
 
     # Start receiver thread
     receiver = threading.Thread(target=_telegram_receiver, daemon=True, name="tg-receiver")
@@ -958,14 +971,16 @@ def main() -> int:
                                     pending_confirm.clear()
                                     _send_notice("START CANCELLED", "확인 시간 초과 (60초).", icon="⛔")
                                 elif text.strip().lower().startswith("y"):
+                                    confirmed_headless = pending_confirm[0].get("headless", True)
                                     pending_confirm.clear()
                                     if action == "fresh_start":
-                                        _send_notice(f"{common.TRAIN_VERSION} 새 훈련 확인", "iter 0부터 시작합니다.", icon="✅")
+                                        mode_label = "headless" if confirmed_headless else "GUI"
+                                        _send_notice(f"{common.TRAIN_VERSION} [{mode_label}]", "iter 0 confirmed.", icon="OK")
                                         monitor.reset_safety_flags()
-                                        result = common.launch_training(LOG, fresh=True)
+                                        result = common.launch_training(LOG, fresh=True, headless=confirmed_headless)
                                         run_name = _safe_basename(result["run_dir"])
                                         common.send_text(
-                                            f"🚀 <b>TRAINING START</b>\n<i>run: {run_name}</i>",
+                                            f"<b>TRAINING START [{mode_label}]</b>\n<i>run: {run_name}</i>",
                                             LOG, parse_mode="HTML",
                                         )
                                     continue

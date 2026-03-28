@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V49"
+TRAIN_VERSION = "V50"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -20,6 +20,11 @@ TRAIN_VERSION = "V49"
 #
 _CLEAN_REWARDS = False   # V47: V38.3 순정 reward 구조 사용
 _CONNECTED_TROT = False  # V47: V43+ 구조 사용 안 함
+
+# _USE_BOOT_STANDING = 부팅 시 높이+자세 gradient reward (V47에서 검증)
+#   True:  boot_standing + boot_contact 추가, curriculum에서 ramp-down
+#   False: alive_bonus만으로 부팅 (낮게 기는 전략에 수렴 위험)
+_USE_BOOT_STANDING = True
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -417,17 +422,17 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # 수평 유지
         self.rewards.flat_orientation_l2.weight = -7.0
 
-        # 높이 페널티
+        # 높이 페널티 — V50: -15→-20 (walking phase에서도 높이 유지 강화)
         self.rewards.base_height_l2 = RewTerm(
             func=isaaclab_mdp.base_height_l2,
-            weight=-15.0,
-            params={"target_height": 0.23, "asset_cfg": SceneEntityCfg("robot")}  # V36: 0.24→0.23 (anti-splay)
+            weight=-20.0,
+            params={"target_height": 0.23, "asset_cfg": SceneEntityCfg("robot")}
         )
 
-        # 높이 + 수평 결합 보상
+        # 높이 + 수평 결합 보상 — V50: 10→15 (walking phase 높이 positive gradient 강화)
         self.rewards.standing_height = RewTerm(
             func=custom_mdp.standing_height_exp,
-            weight=10.0,  # V16: 12→10 (총 스케일 조정)
+            weight=15.0,
             params={"target_height": 0.23, "sigma": 0.03,  # V36: 0.24→0.23 (anti-splay)
                     "asset_cfg": SceneEntityCfg("robot")}
         )
@@ -1126,9 +1131,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.commands.base_velocity.ranges.ang_vel_z = (-0.5, 0.5)
 
         # ══════════════════════════════════════════════════════════
-        # V47: V38.3 순정 + Boot 가속 (boot_standing + boot_contact만 추가)
+        # Boot Standing: 높이+자세 gradient reward (V47에서 검증)
+        # 플래그 _USE_BOOT_STANDING으로 제어 (버전 문자열 하드코딩 제거)
         # ══════════════════════════════════════════════════════════
-        if TRAIN_VERSION.startswith("V47"):
+        if _USE_BOOT_STANDING:
             toe_cfg_boot = SceneEntityCfg("contact_forces", body_names=".*toe_link")
 
             # boot_standing_reward: 높이 + 자세 gradient (V43-E에서 검증)
@@ -1152,11 +1158,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             )
 
             # 기존 reward_weight_curriculum에 boot ramp-down 파라미터 추가
-            self.curriculum.reward_weights.params["boot_standing_initial"] = 15.0
+            # V50: boot ramp-down 연장 — "서기" 습관이 충분히 굳은 후 감소
+            self.curriculum.reward_weights.params["boot_standing_initial"] = 20.0
             self.curriculum.reward_weights.params["boot_contact_initial"] = 5.0
-            self.curriculum.reward_weights.params["boot_ramp_down_iters"] = 300
-
-            # V48: V47 + standing pose 보정 (leg=-0.97). reward 변경 없음.
+            self.curriculum.reward_weights.params["boot_ramp_down_iters"] = 1500
 
         # ══════════════════════════════════════════════════════════
         # V42: Clean Reward Restart — 16개 reward만 사용
