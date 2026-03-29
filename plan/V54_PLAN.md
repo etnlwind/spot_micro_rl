@@ -564,3 +564,49 @@ phase_contact: 0.00 (gait_gate 미해제 — threshold 120으로 수정 후 재�
 | 35 | boot phase에도 "다리를 움직여라" positive signal 필요 | V54.1 boot bridge |
 | 36 | curriculum return None이 하위 로직(gait_gate, boot ramp)을 스킵 | V54.2 curriculum fix |
 | 37 | episode_length_buf.mean은 mid-episode 평균, 완료 에피소드 평균이 아님 | V54.2 gait_gate 120 |
+
+### V54.2 추가 결과: gait_gate 해제 후 붕괴
+
+gait_gate 120: phase가 boot 중 조기 활성화 → ep_len 5.5 즉사.
+gait_gate 200 + iter 500 fallback: boot 성공(ep_len 216) → iter 500 fallback → phase 활성화 → **ep_len 216→13 붕괴.**
+
+```
+iter 458: ep_len=216, phase=0.00 (boot OK)
+iter 500: gait_gate released (iter_fallback)
+iter 805: ep_len=13.3, phase=0.43 (붕괴)
+```
+
+**원인**: phase_contact(w=20)가 즉시 활성화 → boot에서 학습한 보행 타이밍과 충돌 (hard switch).
+분석팀 지적: "phase 활성화 이후 붕괴는 사실. hard switch가 유력 원인. ramp-in 필요."
+
+### V54.3: Soft Handoff (Phase Ramp-In + Bridge Ramp-Out)
+
+**변경**: phase를 즉시 20이 아닌 **0→20으로 500 iter에 걸쳐 점진 증가.**
+동시에 bridge(leg_lift, rear_vel)를 **15→0으로 점진 감소.** 교차 전환.
+
+```
+gait_gate 해제 시점 (iter ~500):
+  phase_contact: 0    →  bridge leg_lift: 15
+  phase_clearance: 0  →  bridge rear_vel: 12
+
++250 iter:
+  phase_contact: 10   →  bridge leg_lift: 7.5
+  phase_clearance: 2.5 →  bridge rear_vel: 6.0
+
++500 iter:
+  phase_contact: 20   →  bridge leg_lift: 0
+  phase_clearance: 5.0 →  bridge rear_vel: 0
+```
+
+구현: phase boot-gate 제거, env_cfg에서 초기 weight=0, curriculum에서 ramp-in.
+
+**판정 기준**:
+- phase 활성화 구간(iter 500~1000)에서 ep_len > 100 유지 (V54.2: 13)
+- stride > 2.0 유지
+- phase_contact가 점진 상승
+
+| # | 교훈 | 출처 |
+|---|------|------|
+| 38 | phase hard switch는 boot 보행과 충돌 → ep_len 붕괴 | V54.2 iter 500→800 |
+| 39 | gait_gate threshold를 낮추면 boot 중 phase 조기 활성화 → 즉사 | V54.2 gait_gate 120 |
+| 40 | phase ramp-in + bridge ramp-out의 soft handoff가 구조 전환의 안전한 방법 | V54.3 |
