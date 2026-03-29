@@ -4,9 +4,9 @@
 
 ## Overview
 
-NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니다. V41 이하는 20,480개, V42 이후는 8,192개 환경을 사용합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
+NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니다. V49+는 4,096개, V42~V48은 8,192개, V41 이하는 20,480개 환경을 사용합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V47 훈련 중 (iter 5860). V38.3 순정(77 reward) + boot_standing/boot_contact만 추가. stride 6.29, coupling 0.46, shoulder 0.43 — V38.3 수준 재현 + shoulder 개선 + boot 2배 가속 달성. 한 달간 V42~V46에서 "reward 수를 줄이면 정답"이 아니라 "어떤 reward가 있는가가 핵심"이라는 결론에 도달.
+**현재 상태**: V53 훈련 중. V38.3 base(77 reward) + boot_standing + soft height gate + min_height termination + front_leg_lift_reward. 자연스러운 4발 trot 보행을 목표로 앞다리 들기(front_leg_lift) 문제 해결 중. V47~V52에서 귀뚜라미 보행(앞다리 미사용) 원인 분석 → 4발 평균 leg_lift가 앞다리 사용을 penalty화하는 구조 발견 → V53에서 FL/FR 전용 reward 추가.
 
 ### 기술 스택
 
@@ -17,7 +17,7 @@ NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니�
 | Python | 3.10 (conda env `env_isaaclab`) |
 | 알고리즘 | PPO ([RSL-RL](https://github.com/leggedrobotics/rsl_rl)) |
 | GPU | NVIDIA RTX 5080 Laptop 16GB |
-| 병렬 환경 수 | 8,192 (V42+), 20,480 (V41 이하) |
+| 병렬 환경 수 | 4,096 (V49+), 8,192 (V42~V48), 20,480 (V41 이하) |
 | 최대 iteration | 15,000 |
 
 ### 등록된 환경
@@ -127,21 +127,21 @@ spot_micro_rl/
 conda activate env_isaaclab
 cd D:\project\spot_micro_rl
 
-# 훈련 시작 (headless, 24,576 envs)
+# 훈련 시작 (headless, 4,096 envs)
 C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/train.py \
   --task=Isaac-Velocity-Flat-SpotMicro-v0 \
-  --num_envs=24576 --headless --max_iterations=15000
+  --num_envs=4096 --headless --max_iterations=15000
 
 # 체크포인트에서 재개
 C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/train.py \
   --task=Isaac-Velocity-Flat-SpotMicro-v0 \
-  --num_envs=24576 --headless --max_iterations=15000 \
+  --num_envs=4096 --headless --max_iterations=15000 \
   --resume --load_run=<TIMESTAMP>
 
 # 예시: model_9600.pt 기준 재개
 C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/train.py \
   --task=Isaac-Velocity-Flat-SpotMicro-v0 \
-  --num_envs=24576 --headless --max_iterations=15000 \
+  --num_envs=4096 --headless --max_iterations=15000 \
   --resume --load_run=2026-03-10_07-43-51 --checkpoint=model_9600.pt
 ```
 
@@ -180,12 +180,14 @@ C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
 # IsaacOps listener 시작 (Telegram 명령 + 100 iter heartbeat + 자동 영상 리포트)
 isaac_ops\listen.cmd
 
-# CLI에서 직접 명령 실행
-isaac_ops\cli.cmd status       # 훈련 상태 조회 → Telegram 전송
-isaac_ops\cli.cmd hb           # heartbeat 리포트 → Telegram 전송
-isaac_ops\cli.cmd stop         # 훈련 중지
-isaac_ops\cli.cmd start        # 새 훈련 시작
-isaac_ops\cli.cmd resume       # 이어서 훈련
+# CLI 명령 (로컬 실행: status/hb/selfcheck, Telegram→Listener 경유: start/stop/resume)
+isaac_ops\cli.cmd status       # 훈련 상태 조회 (로컬) → Telegram 전송
+isaac_ops\cli.cmd hb           # heartbeat 리포트 (로컬) → Telegram 전송
+isaac_ops\cli.cmd selfcheck    # listener self-check (로컬)
+isaac_ops\cli.cmd stop         # 훈련 중지 (Telegram→Listener 경유)
+isaac_ops\cli.cmd start        # 새 훈련 시작 (Telegram→Listener 경유)
+isaac_ops\cli.cmd start gui    # GUI 모드로 훈련 시작 (Telegram→Listener 경유)
+isaac_ops\cli.cmd resume       # 이어서 훈련 (Telegram→Listener 경유)
 isaac_ops\cli.cmd "메시지"     # 일반 텍스트 → Telegram 전송
 
 # TensorBoard
@@ -194,7 +196,7 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 **IsaacOps 특징**:
 - **통합 listener**: supervisor(Telegram 명령) + heartbeat(KPI 모니터링) + 자동 영상 리포트를 단일 프로세스로 처리
-- **CLI 도구**: `cli.cmd`로 터미널에서 직접 명령 실행 (Telegram을 거치지 않음)
+- **CLI 도구**: `cli.cmd`로 터미널에서 명령 실행 (status/hb/selfcheck는 로컬, start/stop/resume은 Telegram→Listener 경유)
 - **self-contained**: `isaac_ops/` 폴더만으로 독립 동작 가능, 다른 프로젝트에 재사용 가능
 - **heartbeat 리포트**: raw metric 중심으로 간소화, 자동 판정은 iter 500 이후부터만 활성화
 - **영상 리포트 사용자 확인**: 영상 리포트 생성 전 Telegram으로 확인 요청 (훈련 중지 방지)
@@ -209,12 +211,16 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V47` 훈련 중 (V38.3 순정 + boot 가속)
+- 학습 버전: `V53` 훈련 중 (V38.3 base + boot_standing + height gate + front_leg_lift)
 - active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
-- 기능 플래그: `_CLEAN_REWARDS=False`, `_CONNECTED_TROT=False` (V47은 V38.3 구조 사용)
-- 병렬 환경: 20,480 (V38.3 원래 값 복원)
-- 참고 문서: `plan/V47_PLAN.md` (현재), `plan/HANDOFF.md`
+- 기능 플래그: `_CLEAN_REWARDS=False`, `_CONNECTED_TROT=False`, `_USE_BOOT_STANDING=True`
+- 병렬 환경: 4,096
+- save_interval: 100
+- 신규 기능: `height_walking_gate` (boot-gated), `min_height_termination` (boot-gated), `front_leg_lift_reward` (FL/FR only), `front_rear_symmetry`
+- 참고 문서: `plan/V53_PLAN.md` (현재), `plan/V43-V53_HISTORY.md`
+- CLI 명령: start/stop/resume은 Telegram→Listener 경유 (직접 실행 아님), status/hb/selfcheck만 로컬
+- `/start gui` 옵션으로 GUI 모드 훈련 시작 가능
 - **주의**: listen.cmd는 Windows 터미널에서만 직접 실행 (WSL 금지)
 
 ---
@@ -243,9 +249,19 @@ prob(dev) = base_prob × clamp((max_dev - threshold) / margin, 0, 1)
 
 **Soft CaT 결과** (V38.3): shoulder dev 0.54→0.45 (-16%), 0.45에서 local optimum 정체.
 
-### V47 (현재)
+### V47~V53 (현재)
 
-V38.3 순정(77 reward) + boot_standing(+15) + boot_contact(+5)만 추가. "작동하는 시스템을 고치지 말고, 부족한 것만 더하자." V46에서 reward를 선별 복원하는 접근이 실패한 후, V38.3 전체를 살리고 boot만 가속하는 최소 변경 전략. 상세: `plan/V47_PLAN.md`
+**V47**: V38.3 순정(77 reward) + boot_standing(+15) + boot_contact(+5)만 추가. "작동하는 시스템을 고치지 말고, 부족한 것만 더하자." 상세: `plan/V47_PLAN.md`
+
+**V48~V53 진화**: V47 성공 후, 귀뚜라미 보행(앞다리 미사용) 해결을 위한 연속 실험:
+- **V48**: standing pose 보정 (leg=-0.97), realism 실험(질량/토크) 실패 → two-track 결정
+- **V49**: baseline 복원, 귀뚜라미 보행 발견, 인프라 정비 (curriculum save/restore, feature flags, CLI routing)
+- **V50**: boot ramp 연장(300→1500) + height 강화 → walking 활성화 시 높이 유지 실패 (15:1 비율 한계)
+- **V51**: soft height gate hybrid (analysis team 공동 설계) → anti-crouch 성공, anti-cricket 실패
+- **V52**: min_height termination + data-driven weight 재설계 → leg_lift 4발 평균이 앞다리를 penalty화하는 구조 발견
+- **V53**: front_leg_lift_reward (FL/FR only, w=15) additive 추가 → from-scratch 훈련 중
+
+상세: `plan/V53_PLAN.md`, `plan/V43-V53_HISTORY.md`
 
 **부팅 안정화** (V35.5 검증 완료):
 - `alive_bonus=10.0`: 매 step 생존 보상
@@ -364,7 +380,13 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V45** | **03-26** | **shoulder-leg 분리 + pair coupling + leg_lift** | 미구현 (V46으로 전략 전환) |
 | **V46-A** | **03-26** | **V43-E + V38.3 gait reward 8개 추가** | 🟡 stride 1.45 (pose penalty 한계) |
 | **V46-B** | **03-26** | **Run A + shoulder-leg 분리 (shoulder_neutral)** | 🟡 shoulder 0.44, stride 1.29 (여전히 부족) |
-| **V47** | **03-26~** | **V38.3 순정(77 reward) + boot_standing + boot_contact** | ✅ **stride 6.29, coupling 0.46, shoulder 0.43 — V38.3 재현 + 개선** |
+| **V47** | **03-26~03-27** | **V38.3 순정(77 reward) + boot_standing + boot_contact** | ✅ **stride 6.29, coupling 0.46, shoulder 0.43 — V38.3 재현 + 개선** |
+| **V48** | **03-27~03-28** | **Standing pose 보정 (leg=-0.97), V48-C/D realism 실험** | 🟡 pose 보정 성공, realism(질량/토크) 실패 → two-track 결정 |
+| **V49** | **03-28** | **Baseline 복원 + 인프라 (curriculum save/restore, feature flags, CLI routing)** | 🟡 stride 6.9 달성, 귀뚜라미 보행(front_lift 0.08) 발견 |
+| **V50** | **03-28** | **Boot ramp 연장(300→1500) + height 강화(standing 15, base_height -20)** | ❌ walking 활성화 시 높이 하락 (reward 비율 15:1 한계) |
+| **V51** | **03-28** | **Soft height gate hybrid (walking reward에 height 조건부 penalty)** | 🟡 anti-crouch 성공(front_lift 0.257), anti-cricket 실패(iter 3300 재하락) |
+| **V52** | **03-29** | **Min height termination(0.15m, boot-gated) + data-driven weight 재설계** | 🟡 height 0.19 안정, leg_lift 4발 평균이 앞다리 penalty화하는 구조 발견 |
+| **V53** | **03-29~** | **front_leg_lift_reward (FL/FR only, w=15) additive 추가** | from-scratch 훈련 중 |
 
 ### 핵심 교훈
 
@@ -404,6 +426,20 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 - **제거한 reward가 핵심 동력일 수 있음**: band/residency +37.56이 stride 6.79의 유력 동력. "복잡한 상호작용"으로 제거했지만 동시에 gait를 만드는 reward (V46-A/B)
 - **작동하는 시스템을 고치지 말 것**: V38.3은 stride 6.79가 검증됨. 부족한 것(boot)만 더하는 V47이 정답 (V47)
 - **listen.cmd는 Windows에서만 직접 실행**: WSL에서 실행 시 파일 핸들 잠금 발생, 리스너 재시작 불가
+- **boot_standing ramp-down이 너무 빠르면 "낮게 기기" 습관 고착**: V49에서 300 iter ramp-down → 귀뚜라미 보행 원인
+- **앞/뒷다리 비대칭은 boot phase 높이 습관 미각인**: boot에서 높이 유지 안 되면 walking에서도 낮은 자세 유지
+- **Version 하드코딩 대신 feature flag 사용**: `_USE_BOOT_STANDING` 등으로 버전 분기 없이 기능 제어
+- **CLI 명령은 리스너 경유 통일**: start/stop/resume은 Telegram→Listener 경유, 직접 실행 금지
+- **WSL GUI 실행 불가**: 세션 0 제한으로 Isaac Sim GUI 불가
+- **penalty > alive_bonus이면 죽는 게 이득**: height gate w=40에서 즉사 발생 (V51)
+- **height gate는 boot OFF, walking만 적용**: boot에서 height penalty 주면 서기 학습 자체 불가 (V51)
+- **reward 변경 시 per-step net reward 부호 검증 필수**: net negative면 ep_len 감소가 최적해 (V51)
+- **"잘 가라" > "앞으로 가라" — 품질 우선**: stride보다 front_lift 같은 보행 품질 지표가 중요
+- **파라미터 설계: 추정 금지, 실측 먼저**: reward delta 분석으로 실제 per-step 영향 계산 (V52.1)
+- **reward 평균 함수는 다수파가 소수파를 penalty화**: 4발 평균 leg_lift에서 뒷다리(다수)가 앞다리(소수)의 기여를 상쇄 (V52.1)
+- **.cmd 파일은 CRLF 필수**: LF로 저장 시 Windows에서 실행 불가
+- **launch_training 중복 실행 방지 lock 필수**: launch.lock으로 동시 start 방지 (V52.1)
+- **stall detection은 /stop 후 비활성화**: 의도적 정지를 stall로 오판 방지 (V52.1)
 
 ---
 
@@ -422,6 +458,7 @@ python scripts/analyze_v20.py
 - `plan/QUADRUPED_RL_RESEARCH.md` — 4족 보행 RL 연구 조사 (legged_gym, Walk These Ways, AllGaits 비교)
 - `plan/V*_ANALYSIS.md` / `plan/V*_PLAN.md` — 버전별 분석/계획
 - `plan/V01-V08_HISTORY.md` ~ `plan/V18_HISTORY.md` — 버전별 히스토리
+- `plan/V43-V53_HISTORY.md` — V43~V53 Boot Stability → Height Gate → Front Leg Lift 흐름
 
 ---
 
