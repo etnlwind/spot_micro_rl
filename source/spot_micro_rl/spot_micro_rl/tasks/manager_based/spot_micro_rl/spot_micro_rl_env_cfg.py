@@ -1229,6 +1229,13 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.rewards.shoulder_neutral.weight = -4.0
             self.rewards.stance_width_penalty.weight = -1.5
 
+            # ── Minimal Bridge: outcome-based, phase와 비충돌 ──
+            # V52 실측: phase-only 16/step vs 검증된 78/step → bridge 필수
+            # stride_length: "보폭 크게" (timing 아닌 결과 보상)
+            # forward_velocity_bootstrap: "앞으로 가라" (timing 아닌 결과 보상)
+            self.rewards.stride_length.weight = 5.0
+            self.rewards.forward_velocity_bootstrap.weight = 5.0
+
             # ── 충돌 gait reward 비활성화 ──
             _phase_remove = [
                 "per_leg_contact_target_band", "per_leg_propulsion_target_band",
@@ -1242,8 +1249,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "diagonal_coupling", "trot_gait", "gait_cycle_period",
                 "leg_lift", "front_leg_lift", "rear_alternation", "rear_swing",
                 "rear_forward_stride", "rear_joint_velocity",
-                "stride_length", "swing_stride", "swing_gate_velocity",
-                "forward_velocity", "forward_velocity_bootstrap",
+                "swing_stride", "swing_gate_velocity",
+                "forward_velocity",
                 "four_limb_cooperation", "front_rear_symmetry",
                 "front_rear_support_balance_penalty",
                 "front_left_right_propulsion_diff_penalty",
