@@ -133,6 +133,22 @@ swing:  phi_norm in [3.46, 6.28)
 phi_norm = phi_i(t) mod 2π
 ```
 
+### phase_contact_reward 합산 방식
+
+```
+교훈 #30: mean-only 금지 (다수파가 소수파 사용을 penalty화)
+
+phase_contact는 4발 개별 점수를 SUM:
+  reward = sum(match_i for i in [FL,FR,RL,RR]) / 4
+  → 단, 각 leg의 match는 binary(0 or 1)이므로
+    mean과 sum은 비례관계. 문제는 "variable-magnitude mean"임.
+
+V54 원칙: raw score가 다리별로 크게 다른 reward에서는
+  mean 금지, sum 또는 min 사용.
+  phase_contact는 binary match이므로 mean OK,
+  하지만 clearance 등 magnitude가 다른 reward는 sum.
+```
+
 ### Standing Command 처리
 
 ```
@@ -285,10 +301,14 @@ Walking phase (iter 500+):
 ### Standing/Walking 경계 처리
 
 ```
+입력: raw command (env.command_manager.get_command("base_velocity")[:, 0])
+  → filtered가 아닌 raw. Isaac Lab command는 에피소드별 샘플링이므로
+    step 내 oscillation은 없지만, 에피소드 경계에서 모드 전환 발생.
+
 standing enter: |vel_cmd| < 0.08 → all-stance
 walking enter:  |vel_cmd| > 0.12 → phase clock 활성
 hysteresis 구간: 0.08~0.12 → 이전 모드 유지
-→ noisy command에서 출렁임 방지
+→ 에피소드 경계에서 standing/walking 출렁임 방지
 ```
 
 ---
@@ -408,6 +428,27 @@ reward 구조 변경으로 boot phase 불안정.
 - **Fallback A**: frequency 2.0→1.5 Hz (더 느린 보행)
 - **Fallback B**: duty_factor 0.55→0.65 (stance 시간 증가, 부하 분산)
 - **Fallback C**: phase_foot_clearance target height 낮춤
+
+### 모니터링 필수 항목 (iter 300~800)
+
+```
+phase_contact_reward   — phase 추종 여부 (핵심)
+track_lin_vel_xy_exp   — velocity tracking raw (phase 5:1 비율 유지 확인)
+track_ang_vel_z_exp    — angular tracking raw
+4발 개별 contact_ratio — FL/FR/RL/RR 대칭 여부
+standing_height        — 높이 유지
+front/rear leg_lift    — 비대칭 재발 감시
+```
+
+### Fallback 우선순위 (실패 패턴별)
+
+| 실패 패턴 | 증상 | 1순위 | 2순위 | 3순위 |
+|----------|------|-------|-------|-------|
+| 부팅 실패 | ep_len < 50 | boot_standing 30 | undesired -0.5 | phase boot OFF |
+| stride 사망 | stride < 1.0 | track_lin 6 | forward_vel 복원 | band 일부 복원 |
+| phase 무시 | phase_contact < 3 | phase weight 25 | standing 축소 | — |
+| 토크 한계 | phase < 0.3 + 포화 | freq 1.5Hz | duty 0.65 | clearance 낮춤 |
+| 비대칭 재발 | FR/RL ratio > 5 | phase weight 확인 | duty_factor 조정 | — |
 
 ---
 
