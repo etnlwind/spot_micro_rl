@@ -4141,8 +4141,8 @@ def reward_weight_curriculum(
     target_swing_gate = _curriculum_target_alpha(iteration, swing_gate_ramp_start, swing_gate_ramp_end)
     target_front_swing = _curriculum_target_alpha(iteration, front_swing_ramp_start, front_swing_ramp_end)
 
-    # 이미 target에 도달 → 스킵
-    if (
+    # 이미 target에 도달 → alpha ramp 스킵 (boot/bridge ramp-down은 계속 실행)
+    _all_alphas_done = (
         abs(env._crr_alpha12 - target_12) < 1e-6
         and abs(env._crr_alpha23 - target_23) < 1e-6
         and abs(env._crr_validity_alpha - target_validity) < 1e-6
@@ -4161,8 +4161,8 @@ def reward_weight_curriculum(
         and abs(env._crr_stride_length_alpha - target_stride_length) < 1e-6
         and abs(env._crr_swing_gate_alpha - target_swing_gate) < 1e-6
         and abs(env._crr_front_swing_alpha - target_front_swing) < 1e-6
-    ):
-        return None
+    )
+    # Note: return None 제거 — gait_gate/boot ramp-down은 alpha 완료 후에도 실행 필요
 
     # ── Metric gating: 보행 구조 보호 ──
     gait_paused = False
@@ -4246,6 +4246,9 @@ def reward_weight_curriculum(
             print(f"  [V47-Boot] boot_standing={boot_st_w:.1f} boot_contact={boot_ct_w:.1f}{bridge_info}")
 
     # ── Alpha 진행 (한 주기당 최대 증가량 제한) ──
+    if _all_alphas_done:
+        return None  # alpha ramp 완료 — boot/bridge ramp-down은 위에서 처리됨
+
     max_step_12 = update_interval / max(1, ramp1_end - ramp1_start)
     max_step_23 = update_interval / max(1, ramp2_end - ramp2_start)
     max_step_validity = update_interval / max(1, validity_ramp_end - validity_ramp_start)

@@ -1226,6 +1226,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             # ── Penalty 축소 (V52 실측: movement penalty 14.36/step 과도) ──
             self.rewards.action_rate_l2.weight = -0.5
             self.rewards.dof_acc_l2.weight = -0.001
+            self.rewards.joint_vel_l2.weight = -0.3  # V54.2: -0.5→-0.3 (boot net -6.5→-2.3)
             self.rewards.shoulder_neutral.weight = -4.0
             self.rewards.stance_width_penalty.weight = -1.5
 
