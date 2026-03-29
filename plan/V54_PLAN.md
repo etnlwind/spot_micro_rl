@@ -1,7 +1,7 @@
 # V54 Plan: Phase Clock 기반 구조 전환
 
 > 작성: 2026-03-29
-> 상태: **설계 중**
+> 상태: **V54.2 훈련 중 — boot-gated phase + bridge + gait_gate 120**
 
 ---
 
@@ -505,3 +505,62 @@ front/rear leg_lift    — 비대칭 재발 감시
 | #25 penalty > alive_bonus 금지 | net reward 부호 검증 |
 | #28 "잘 가라" > "앞으로 가라" | phase 추종이 velocity tracking보다 높은 weight |
 | V39 | phase clock을 주연으로, 충돌 reward 제거 |
+
+---
+
+## 12. 구현 이력 (V54 → V54.2)
+
+### V54 (초기): phase-only, boot 미고려
+
+```
+phase_contact(20) + phase_clearance(5) 항상 활성
+→ boot phase에서 phase가 boot_standing과 충돌 → ep_len=14 즉사
+```
+
+### V54 boot-gated: phase를 boot phase에서 OFF
+
+```
+boot: boot_standing만 → phase OFF
+walking: phase ON
+→ 여전히 ep_len=13 고착 — boot positive 부족 (제거된 +6.50/step)
+```
+
+### V54.1: bridge rewards 추가
+
+```
+stride_length(5) + forward_velocity_bootstrap(5) 추가
+→ outcome-based, phase와 비충돌
+→ 하지만 boot phase에서는 효과 부족 (이것들도 boot에서 미미)
+→ ep_len=20, 느린 부팅
+```
+
+### V54.2: boot-only bridge + penalty 축소 + curriculum fix
+
+3개 수정:
+
+| 수정 | 원인 | 효과 |
+|------|------|------|
+| leg_lift(15) + rear_joint_vel(12) boot bridge | boot positive +6.50 부족 | boot net -10.76→-2.3 |
+| joint_vel_l2 -0.5→-0.3 | boot 최대 단일 penalty(-10.45) | penalty 4.2 절감 |
+| curriculum return None 제거 | all_alphas_done에서 gait_gate 체크 스킵 | gait_gate 해제 가능 |
+| gait_gate_min_ep_len 200→120 | episode_length_buf.mean은 mid-episode 평균 | phase 활성화 threshold 현실화 |
+
+Boot bridge ramp-down: gait_gate 해제 후 500 iter에 걸쳐 0으로 감소 (phase가 대체).
+
+### V54.2 결과 (iter 465)
+
+```
+ep_len: 214 (부팅 성공)
+stride: 2.87 (성장 중)
+front/rear lift: 0.817/0.602 = 1.36 (대칭)
+phase_contact: 0.00 (gait_gate 미해제 — threshold 120으로 수정 후 재시작)
+```
+
+### 핵심 교훈 (V54 추가)
+
+| # | 교훈 | 출처 |
+|---|------|------|
+| 34 | phase reward를 boot phase에서 활성화하면 boot 실패 | V54 boot-gate 전 |
+| 35 | boot phase에도 "다리를 움직여라" positive signal 필요 | V54.1 boot bridge |
+| 36 | curriculum return None이 하위 로직(gait_gate, boot ramp)을 스킵 | V54.2 curriculum fix |
+| 37 | episode_length_buf.mean은 mid-episode 평균, 완료 에피소드 평균이 아님 | V54.2 gait_gate 120 |
