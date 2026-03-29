@@ -100,146 +100,249 @@ SpotMicro는 ANYmal/Go1 대비:
 
 ---
 
-## 4. 예상 Reward 구조 (~15개)
+## 4. Phase Clock 수학 명세
 
-### Phase Clock 중심 (주연)
+### Phase Variable
 
-| # | reward | weight (TBD) | 역할 |
-|---|--------|-------------|------|
-| 1 | **phase_contact_reward** | 높음 | stance에서 접지, swing에서 이탈 |
-| 2 | **phase_foot_clearance** | 중간 | swing phase에서 발 높이 |
+```
+phi_i(t) = 2π × f × t + offset_i
 
-### Velocity Tracking
+f = 2.0 Hz (1 cycle = 0.5s, V39 기본값)
+```
 
-| # | reward | weight (TBD) | 역할 |
-|---|--------|-------------|------|
-| 3 | track_lin_vel_xy_exp | 중간 | 속도 추종 |
-| 4 | track_ang_vel_z_exp | 중간 | 회전 추종 |
+### 다리별 Phase Offset (Trot)
 
-### 자세/안정성
+```
+FL (Front Left):  offset = 0
+FR (Front Right): offset = π
+RL (Rear Left):   offset = π
+RR (Rear Right):  offset = 0
 
-| # | reward | weight (TBD) | 역할 |
-|---|--------|-------------|------|
-| 5 | alive_bonus | 10.0 | 생존 보상 |
-| 6 | boot_standing | 20.0 | 부팅 높이+자세 |
-| 7 | standing_height | TBD | 높이 유지 |
-| 8 | flat_orientation_l2 | TBD | 수평 유지 |
-| 9 | base_height_l2 | TBD | 높이 penalty |
+→ FL+RR 동위상, FR+RL 동위상 (대각선 쌍)
+```
 
-### Penalty (품질)
+### Stance/Swing 판정
 
-| # | reward | weight (TBD) | 역할 |
-|---|--------|-------------|------|
-| 10 | action_rate_l2 | TBD | 행동 변화율 |
-| 11 | dof_acc_l2 | TBD | 관절 가속도 |
-| 12 | joint_vel_l2 | TBD | 관절 속도 |
-| 13 | undesired_contacts | TBD | 비정상 접촉 |
-| 14 | shoulder_neutral | TBD | shoulder splay |
+```
+duty_factor = 0.55 (stance 55%, swing 45%)
+  → SpotMicro의 낮은 토크 마진 고려, 접지 시간을 약간 길게
 
-### Termination
+stance: phi_norm in [0, 2π × 0.55) = [0, 3.46)
+swing:  phi_norm in [3.46, 6.28)
 
-| # | termination | 역할 |
-|---|------------|------|
-| 15 | bad_orientation | 뒤집힘 |
-| 16 | min_height | 크롤링 차단 |
-| 17 | shoulder_splay (Soft CaT) | splay 차단 |
+phi_norm = phi_i(t) mod 2π
+```
 
-### Observation 추가
+### Standing Command 처리
 
-| observation | 차원 | 설명 |
-|------------|------|------|
-| phase_clock_obs | 8 | sin/cos × 4발 (V39 코드 재활용) |
+```
+|vel_cmd| < 0.1 m/s → all-stance (4발 접지)
+  → phase_contact_reward에서 expected_contact = 1 for all legs
+  → 서있을 때 발을 들면 penalty
+```
+
+### Velocity-Frequency 관계 (Phase 3 고도화용, 초기에는 고정)
+
+```
+초기: f = 2.0 Hz 고정
+고도화: f = f_base + k × |vel_cmd| (속도 비례 주파수)
+```
 
 ---
 
-## 5. 구현 계획: 점진적 전환
+## 5. Reward 구조 (~15개) — 초기 Weight 포함
 
-### Phase 1: Phase clock 추가 + 충돌 reward 제거
+### Weight 설계 원칙
 
-1. phase_clock_obs를 observation에 추가 (8차원)
-2. phase_contact_reward를 핵심 reward로 등록 (높은 weight)
-3. 충돌하는 gait reward 제거:
-   - band rewards (per_leg_contact_target_band 등)
-   - residency rewards (contact_residency 등)
-   - gait_phase, trot_gait, diagonal_coupling
-   - leg_lift, front_leg_lift, rear_alternation, rear_swing
-4. velocity tracking + penalty + 자세 reward 유지
-5. boot_standing / alive_bonus / termination 유지
+```
+1. Phase cluster(보행 구조) > Tracking cluster(속도 추종)
+   → phase 총합 ≥ tracking 총합 × 3
+
+2. alive_bonus(10)를 anchor로 상대 스케일링
+
+3. legged_gym 비율 참조 (검증된 15-reward 구조):
+   - feet_air_time(1.0) = tracking_lin(1.0) → 1:1
+   - 우리는 phase > tracking으로 조정 → ~4:1
+```
+
+### Phase Clock 중심 (주연) — 총합 ~20
+
+| # | reward | weight | 역할 | 근거 |
+|---|--------|--------|------|------|
+| 1 | **phase_contact_reward** | **15.0** | stance→접지, swing→이탈 | 최대 positive, gait 구조 핵심 |
+| 2 | **phase_foot_clearance** | **5.0** | swing에서 발 높이 유도 | 보조 gait signal |
+
+### Velocity Tracking — 총합 ~5
+
+| # | reward | weight | 역할 | 근거 |
+|---|--------|--------|------|------|
+| 3 | track_lin_vel_xy_exp | **3.0** | 속도 추종 | phase의 1/5 |
+| 4 | track_ang_vel_z_exp | **2.0** | 회전 추종 | 방향 전환 유도 |
+
+**Phase(20) : Tracking(5) = 4:1** → phase 우선 확보.
+
+### 자세/부팅 — 총합 ~25 (boot phase) / ~15 (walking phase)
+
+| # | reward | weight | 역할 | 비고 |
+|---|--------|--------|------|------|
+| 5 | alive_bonus | **10.0** | 생존 보상 | anchor, V35.5 검증 |
+| 6 | boot_standing | **20.0** | 높이+자세 gradient | floor=10, ramp-down 1500 iter |
+| 7 | standing_height | **10.0** | 높이 positive | sigma=0.03, target=0.23 |
+| 8 | flat_orientation_l2 | **-5.0** | 수평 유지 | V38.3: -7 → 약간 완화 |
+| 9 | base_height_l2 | **-15.0** | 높이 penalty | target=0.23 |
+
+### Penalty (움직임 품질) — 총합 ~-8
+
+| # | reward | weight | 역할 | 근거 |
+|---|--------|--------|------|------|
+| 10 | action_rate_l2 | **-1.0** | 행동 변화율 | legged_gym -0.01 스케일업 |
+| 11 | dof_acc_l2 | **-0.5** | 관절 가속도 | 부드러운 움직임 |
+| 12 | undesired_contacts | **-5.0** | 비정상 접촉 | boot ramp: -1→-5 |
+| 13 | shoulder_neutral | **-4.0** | splay 억제 | V38.3: -6 → 약간 완화 |
+
+### Termination
+
+| # | termination | 파라미터 |
+|---|------------|---------|
+| 14 | bad_orientation | limit_angle=1.5 |
+| 15 | min_height | 0.15m, boot-gated |
+| 16 | shoulder_splay (Soft CaT) | threshold=0.3, margin=0.3, prob=0.0015 |
+
+### Observation
+
+| observation | 차원 | 설명 |
+|------------|------|------|
+| 기존 (joint_pos, vel, gravity 등) | 48 | 변경 없음 |
+| **phase_clock_obs** | **8** | sin/cos × 4발 (V39 유틸 재활용, reward 공식은 재검증) |
+| **총 observation** | **56** | |
+
+### Per-step 예상 reward budget
+
+```
+Boot phase (iter 0~300):
+  alive(10) + boot_standing(~15) + standing_height(~5) = ~30
+  penalties: ~-8
+  net: ~+22/step → 부팅 안정
+
+Walking phase (iter 500+):
+  alive(10) + phase_contact(~10) + phase_clearance(~3) + tracking(~3)
+  + standing_height(~3) + boot_standing(floor ~5)
+  = ~34
+  penalties: ~-12
+  net: ~+22/step → 안정
+
+최악(phase 무시):
+  alive(10) + standing(~3) - penalties(~-8) = ~+5
+  phase_contact = 0 → 큰 기회비용(~10 상실)
+  → phase 따르는 게 확실히 이득
+```
+
+---
+
+## 6. 구현 계획: 점진적 전환 (Exit Criteria 포함)
+
+### Phase 1: Phase clock 중심 구조 (V54)
+
+**구현:**
+1. phase_clock_obs를 observation에 추가 (8차원 → 총 56차원)
+2. phase_contact_reward(w=15) + phase_foot_clearance(w=5)를 핵심 reward로
+3. 충돌하는 gait reward 제거 (비활성화):
+   - band rewards (per_leg_contact_target_band, per_leg_propulsion_target_band, limb_usage_target_band)
+   - residency rewards (contact_residency, usage_residency, prop_residency, residency_ema_*)
+   - gait pattern (gait_phase, trot_gait, diagonal_coupling, diagonal_coupling_raw)
+   - leg lift (leg_lift, front_leg_lift, rear_alternation, rear_swing, rear_forward_stride)
+   - band exit (late_phase_band_exit)
+   - four_limb_cooperation
+4. velocity tracking(w=3,2) + penalty + 자세/boot reward 유지
+5. from-scratch 훈련
+
+**Exit Criteria (→ Phase 2):**
+- ep_len > 180
+- standing_height > 0.20
+- phase_contact_reward > 5.0 (per-step weighted)
+- 4발 contact_ratio 분산 < 0.1 (대칭 확인)
+
+**실패 시:** Phase 1 fallback 참조
 
 ### Phase 2: 튜닝 + 검증
 
-1. Phase 1 결과 분석
-2. weight 조정 (실측 데이터 기반)
-3. phase_foot_clearance 추가 (필요 시)
-4. boot phase curriculum 조정
+**구현:**
+1. Phase 1 데이터 기반 weight 조정
+2. phase_foot_clearance 튜닝 (target height, weight)
+3. boot phase curriculum 조정 (필요 시)
 
-### Phase 3: 고도화 (필요 시)
+**Exit Criteria (→ Phase 3):**
+- stride > 4.0
+- front/rear lift 비율 0.5~2.0 (대칭 범위)
+- front_clearance > 0.01
+- ep_len > 220
 
+### Phase 3: 고도화
+
+**구현:**
 1. duty_factor를 command로 파라미터화
 2. frequency를 command로 파라미터화
 3. Raibert heuristic 발 배치 (Walk These Ways 참고)
 
+**Exit Criteria:**
+- shoulder_dev < 0.45
+- stride > 5.0 안정
+- 4발 대칭 보행 영상 확인
+
 ---
 
-## 6. 리스크
+## 7. V39 코드 재활용 범위
 
-### 1. stride 사망 (V42~V46 재발)
+### 재사용 가능 (utility)
+
+- `phase_clock_obs`: sin/cos observation 생성 → 그대로 사용
+- phase 계산 유틸 (frequency, offset) → 그대로 사용
+
+### 재검증 필수 (reward 로직)
+
+- `phase_contact_reward`: contact matching 공식 → **reward scale 재검증**
+  - V39에서 match/mismatch를 +1/-1로 했는데, 이 스케일이 다른 reward와 균형 맞는지
+  - duty_factor 0.55 적용 시 동작 확인
+- clipping / normalization → 실측 후 조정
+- standing command 처리 → 별도 구현 필요
+
+---
+
+## 8. 리스크 + Fallback
+
+### 리스크 1: stride 사망 (V42~V46 재발)
 
 band/residency 제거 시 stride engine 상실 가능.
 
 - 감지: iter 500에서 stride < 1.0
-- 대응: phase_contact_reward weight 증가, velocity tracking 강화
-- 최악: band reward 일부 복원
+- **Fallback A**: track_lin_vel weight 3→6 (velocity 추종 강화)
+- **Fallback B**: forward_velocity reward 복원 (w=5, phase와 비충돌)
 
-### 2. Phase clock 무시
+### 리스크 2: Phase clock 무시
 
-policy가 phase clock을 무시하고 자유보행 (V39 패턴).
+policy가 phase clock을 무시하고 자유보행.
 
-- 감지: phase_contact_reward 점수 < 0.3
-- 대응: weight 대폭 증가, 다른 positive reward 축소
-- 핵심: phase clock이 "주연"이 되도록 weight 비중 확보
+- 감지: phase_contact_reward per-step < 3.0
+- **Fallback A**: phase_contact weight 15→25
+- **Fallback B**: 다른 positive reward 축소 (standing_height 10→5)
 
-### 3. 부팅 실패
+### 리스크 3: 부팅 실패
 
 reward 구조 변경으로 boot phase 불안정.
 
 - 감지: iter 300에서 ep_len < 50
-- 대응: boot_standing weight 증가, 기존 boot curriculum 유지
+- **Fallback A**: boot_standing weight 20→30
+- **Fallback B**: undesired_contacts 초기값 -1→-0.5 (더 완화)
+- **Fallback C**: phase_contact를 boot phase에서 비활성 (boot_standing에 집중)
 
-### 4. SpotMicro 특성 문제
+### 리스크 4: SpotMicro 토크 한계
 
 토크 마진 부족으로 phase clock 추종 자체가 물리적으로 불가능.
 
-- 감지: 관절이 phase target을 따라가지 못함 (tracking error 큼)
-- 대응: frequency/duty_factor 조정, target clearance 낮춤
-
----
-
-## 7. 체크포인트 기준
-
-| iter | 확인 | 성공 | 실패 |
-|------|------|------|------|
-| 300 | ep_len > 100, phase_contact > 0.3 | 부팅 + phase 학습 시작 | boot 점검 |
-| 800 | stride > 2.0, 4발 대칭 | 보행 시작 | weight 조정 |
-| 1500 | stride > 4.0, front/rear 비율 > 0.5 | 대칭 보행 | 구조 재검토 |
-| 3000 | stride > 5.0, front_lift > 0.10 | **V54 성공** | |
-
-### 핵심 판정
-
-**iter 1500에서 4발 대칭 보행이 나오는가?**
-V49~V53에서 한 번도 달성하지 못한 목표.
-
----
-
-## 8. 기존 코드 재활용
-
-| 코드 | 위치 | 상태 |
-|------|------|------|
-| phase_clock_obs | rewards.py line 32 | V39에서 구현, 사용 가능 |
-| phase_contact_reward | rewards.py line 60 | V39에서 구현, 사용 가능 |
-| gait_phase_reward (V39) | rewards.py | 참고용 |
-| boot_standing_reward | rewards.py | 유지 |
-| boot_foot_contact | rewards.py | 유지 |
+- 감지: phase_contact score < 0.3이면서 관절 토크 포화 빈번
+- **Fallback A**: frequency 2.0→1.5 Hz (더 느린 보행)
+- **Fallback B**: duty_factor 0.55→0.65 (stance 시간 증가, 부하 분산)
+- **Fallback C**: phase_foot_clearance target height 낮춤
 
 ---
 
