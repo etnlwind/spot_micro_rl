@@ -186,7 +186,7 @@ V54 원칙: raw score가 다리별로 크게 다른 reward에서는
 | # | reward | weight | 역할 |
 |---|--------|--------|------|
 | 1 | **phase_contact_reward** | **20.0** | stance→접지, swing→이탈. 최대 positive |
-| 2 | **phase_foot_clearance** | **5.0** | swing에서 발 높이 유도 |
+| 2 | **phase_foot_clearance** | **5.0** | swing에서 발 높이 유도 (k=1000, 삼각파 target) |
 
 ### Velocity Tracking — 총합 5
 
@@ -442,8 +442,14 @@ abort 판정은 단일 iter가 아닌 연속 구간으로:
 
 ```
 □ standing/walking mode 전환 빈도 로그 확인 (0.08~0.12 경계 출렁임)
+  → "보류 가능"이지만 초반 관찰 항목으로 우선순위 높음
+  → 초반 run에서 mode flicker 여부 반드시 확인
 □ phase_contact_reward 합산 방식이 mean-only가 아닌지 코드 리뷰
-□ phase_foot_clearance에서 다리별 magnitude 차이 → sum/min 사용 확인
+  → binary match의 mean은 OK (교훈#30 해당 없음)
+  → 하지만 구현 후 실제 코드에서 aggregation 방식 재확인 필수
+□ phase_foot_clearance에서 다리별 magnitude 차이 → sum/4 사용 확인
+□ 훈련 시작 직후 active/disabled reward list 로그 출력
+  → 하나라도 잘못 살아있으면 V39식 충돌 재발
 ```
 
 ### 모니터링 필수 항목 (iter 300~800)
@@ -469,18 +475,28 @@ front/rear leg_lift    — 비대칭 재발 감시
 
 ---
 
-## 9. 파일 변경 예상
+## 9. 구현 검증에서 발견된 버그 (사전 수정)
+
+| # | 버그 | 수정 |
+|---|------|------|
+| 1 | phase_foot_clearance k=100 → gradient 너무 약 (0mm에서 0.85 점수) | k=1000 (0mm→0.20, 40mm→1.0) |
+| 2 | stance_propulsion이 제거 목록에서 누락 → phase stance와 충돌 | 제거 목록에 추가 |
+| 3 | curriculum=None → boot_standing ramp-down 소실 | curriculum 유지 (boot ramp만 동작, 나머지는 try/except 안전) |
+
+---
+
+## 10. 파일 변경 (실제 구현)
 
 | 파일 | 변경 |
 |------|------|
-| `env_cfg.py` | reward 77→~15개 재구성, observation에 phase_clock 추가 |
-| `rewards.py` | phase_foot_clearance 신규, 불필요 함수는 유지(삭제 안 함) |
-| `rsl_rl_ppo_cfg.py` | observation 차원 변경 (48+8=56) |
+| `env_cfg.py` | `_PHASE_CLOCK=True` 플래그, phase_contact(w=20)+phase_clearance(w=5) 추가, 50+ gait reward None 비활성화, phase_clock observation 추가, tracking/penalty weight 재설정, curriculum은 유지(boot ramp) |
+| `rewards.py` | phase_contact_reward 수정(duty=0.55, standing처리, 범위[0,1]), phase_foot_clearance 신규(k=1000, 삼각파, sum/4), 기존 함수 삭제 안 함 |
+| `rsl_rl_ppo_cfg.py` | 변경 없음 (Isaac Lab이 observation 차원 자동 감지) |
 | `train.py` | 변경 없음 |
 
 ---
 
-## 10. V49~V53 교훈 반영
+## 11. V49~V53 교훈 반영
 
 | 교훈 | V54 적용 |
 |------|---------|

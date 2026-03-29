@@ -61,48 +61,100 @@ def phase_contact_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
     frequency: float = 2.0,
-    duty_factor: float = 0.5,
+    duty_factor: float = 0.55,
     contact_threshold: float = 1.0,
+    standing_vel_threshold: float = 0.08,
 ) -> torch.Tensor:
-    """Phase-conditioned contact reward: stance phase에서 접지, swing phase에서 이탈 시 보상.
+    """V54: Phase-conditioned contact reward — phase clock의 주연 reward.
 
-    V39: CPG phase에 맞춰 발을 올바르게 사용하면 reward.
-    - stance phase (0 ~ duty_factor × 2π): 발이 닿아있으면 +1
-    - swing phase (duty_factor × 2π ~ 2π): 발이 떨어져있으면 +1
-
-    Args:
-        frequency: trot 주파수 (Hz).
-        duty_factor: stance phase 비율.
-        contact_threshold: 접촉 판정 force threshold (N).
-    Returns:
-        (num_envs,) per-env reward (0~1 범위, 4다리 평균).
+    stance phase에서 접지, swing phase에서 이탈하면 보상.
+    standing command (|vel| < threshold)일 때는 all-stance (4발 접지).
+    4발 match의 mean (binary score이므로 교훈#30 해당 없음).
+    범위 [0, 1] — match=1, mismatch=0.
     """
     contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
-    # 4다리 toe contact: (num_envs, 4)
     forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
-    is_contact = (forces > contact_threshold).float()
+    is_contact = (forces > contact_threshold).float()  # (num_envs, 4)
 
     t = env.episode_length_buf.float() * env.step_dt
     base_phase = 2.0 * math.pi * frequency * t
 
-    # Trot phases
+    # Trot phases: FL/RR=0, FR/RL=π
     fl_phase = base_phase
     fr_phase = base_phase + math.pi
     rl_phase = base_phase + math.pi
     rr_phase = base_phase
-    phases = torch.stack([fl_phase, fr_phase, rl_phase, rr_phase], dim=1)  # (num_envs, 4)
+    phases = torch.stack([fl_phase, fr_phase, rl_phase, rr_phase], dim=1)
 
-    # Normalize to [0, 2π)
     phase_norm = phases % (2.0 * math.pi)
-    stance_threshold = duty_factor * 2.0 * math.pi
+    stance_threshold_val = duty_factor * 2.0 * math.pi
+    expected_contact = (phase_norm < stance_threshold_val).float()
 
-    # Expected contact state: stance → 1 (should touch), swing → 0 (should lift)
-    expected_contact = (phase_norm < stance_threshold).float()
+    # Standing command: |vel_cmd| < threshold → all-stance
+    vel_cmd = env.command_manager.get_command("base_velocity")[:, :2]
+    vel_magnitude = vel_cmd.norm(dim=1)
+    is_standing = (vel_magnitude < standing_vel_threshold).unsqueeze(1)  # (num_envs, 1)
+    expected_contact = torch.where(is_standing.expand_as(expected_contact),
+                                   torch.ones_like(expected_contact),
+                                   expected_contact)
 
-    # Reward: +1 if match, -1 if mismatch → baseline=0 (no free lunch)
     match = (is_contact == expected_contact).float()
-    score = 2.0 * match - 1.0  # match=1→+1, mismatch=0→-1
-    return score.mean(dim=1)  # 4다리 평균, 범위 [-1, +1]
+    return match.mean(dim=1)  # 범위 [0, 1]
+
+
+def phase_foot_clearance(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*toe_link"),
+    frequency: float = 2.0,
+    duty_factor: float = 0.55,
+    target_clearance: float = 0.04,
+    standing_vel_threshold: float = 0.08,
+) -> torch.Tensor:
+    """V54: Phase-conditioned foot clearance — swing phase에서 발 높이 보상.
+
+    Walk These Ways 참조: swing phase 진행도에 비례한 target height.
+    swing 중반에 가장 높고, 시작/끝에 낮은 삼각파 형태.
+    4발 개별 clearance를 SUM (교훈#30: magnitude가 다를 수 있으므로 mean 지양).
+    standing 시에는 0 (발을 들면 안 됨).
+    """
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = 2.0 * math.pi * frequency * t
+
+    fl_phase = base_phase
+    fr_phase = base_phase + math.pi
+    rl_phase = base_phase + math.pi
+    rr_phase = base_phase
+    phases = torch.stack([fl_phase, fr_phase, rl_phase, rr_phase], dim=1)
+
+    phase_norm = phases % (2.0 * math.pi)
+    stance_threshold_val = duty_factor * 2.0 * math.pi
+
+    # Swing progress: 0 at swing start, 1 at swing end
+    in_swing = (phase_norm >= stance_threshold_val).float()
+    swing_range = 2.0 * math.pi - stance_threshold_val
+    swing_progress = torch.clamp((phase_norm - stance_threshold_val) / swing_range, 0.0, 1.0)
+    # Triangle: 0→1→0 over swing phase
+    swing_height_factor = 1.0 - torch.abs(2.0 * swing_progress - 1.0)  # peak at mid-swing
+    target_height = target_clearance * swing_height_factor * in_swing  # (num_envs, 4)
+
+    # Actual foot height (relative to env origin)
+    foot_asset = env.scene[foot_cfg.name]
+    foot_z = foot_asset.data.body_pos_w[:, foot_cfg.body_ids, 2]
+    env_z = env.scene.env_origins[:, 2].unsqueeze(1)
+    actual_height = foot_z - env_z  # (num_envs, 4)
+
+    # Reward: exp(-k * (actual - target)^2) for swing legs, 0 for stance
+    height_error = torch.square(actual_height - target_height)
+    clearance_score = torch.exp(-1000.0 * height_error) * in_swing  # k=1000: 0mm→0.20, 20mm→0.67, 40mm→1.0
+
+    # Standing command: 0 reward (don't lift feet)
+    vel_cmd = env.command_manager.get_command("base_velocity")[:, :2]
+    vel_magnitude = vel_cmd.norm(dim=1)
+    moving = (vel_magnitude > standing_vel_threshold).float()
+
+    # SUM, not mean (교훈#30: clearance magnitude varies per leg)
+    return clearance_score.sum(dim=1) / 4.0 * moving  # normalize by 4 for weight scaling
 
 
 # ═══════════════════════════════════════════
