@@ -3852,6 +3852,10 @@ def reward_weight_curriculum(
     boot_standing_floor: float = 0.0,     # V50.2: ramp-down 최소값 (0이면 완전 소멸)
     boot_contact_initial: float = 0.0,    # 0이면 비활성
     boot_ramp_down_iters: int = 300,      # gait_gate 해제 후 몇 iter에 걸쳐 floor까지 감소
+    # V54.2: boot-only bridge (gait_gate 해제 후 0으로 감소)
+    boot_leg_lift_initial: float = 0.0,     # 0이면 비활성
+    boot_rear_vel_initial: float = 0.0,     # 0이면 비활성
+    boot_bridge_ramp_down_iters: int = 500, # gait_gate 해제 후 몇 iter에 걸쳐 0으로
     # 로깅
     log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
@@ -4210,8 +4214,36 @@ def reward_weight_curriculum(
         except Exception:
             pass
 
+        # V54.2: boot-only bridge ramp-down (leg_lift, rear_joint_velocity)
+        if boot_leg_lift_initial > 0 or boot_rear_vel_initial > 0:
+            if env._v47_boot_gate_released_iter > 0:
+                bridge_elapsed = iteration - env._v47_boot_gate_released_iter
+                bridge_alpha = min(1.0, bridge_elapsed / max(boot_bridge_ramp_down_iters, 1))
+                bridge_ll_w = boot_leg_lift_initial * (1.0 - bridge_alpha)
+                bridge_rv_w = boot_rear_vel_initial * (1.0 - bridge_alpha)
+            else:
+                bridge_ll_w = boot_leg_lift_initial
+                bridge_rv_w = boot_rear_vel_initial
+            try:
+                if boot_leg_lift_initial > 0:
+                    ll_cfg = env.reward_manager.get_term_cfg("leg_lift")
+                    ll_cfg.weight = bridge_ll_w
+                    env.reward_manager.set_term_cfg("leg_lift", ll_cfg)
+            except Exception:
+                pass
+            try:
+                if boot_rear_vel_initial > 0:
+                    rv_cfg = env.reward_manager.get_term_cfg("rear_joint_velocity")
+                    rv_cfg.weight = bridge_rv_w
+                    env.reward_manager.set_term_cfg("rear_joint_velocity", rv_cfg)
+            except Exception:
+                pass
+
         if iteration % log_interval == 0:
-            print(f"  [V47-Boot] boot_standing={boot_st_w:.1f} boot_contact={boot_ct_w:.1f}")
+            bridge_info = ""
+            if boot_leg_lift_initial > 0:
+                bridge_info = f" leg_lift={bridge_ll_w:.1f} rear_vel={bridge_rv_w:.1f}"
+            print(f"  [V47-Boot] boot_standing={boot_st_w:.1f} boot_contact={boot_ct_w:.1f}{bridge_info}")
 
     # ── Alpha 진행 (한 주기당 최대 증가량 제한) ──
     max_step_12 = update_interval / max(1, ramp1_end - ramp1_start)

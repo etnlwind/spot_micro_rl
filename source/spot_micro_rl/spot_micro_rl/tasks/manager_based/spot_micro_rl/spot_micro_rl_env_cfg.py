@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V54.1"
+TRAIN_VERSION = "V54.2"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1231,10 +1231,17 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
             # ── Minimal Bridge: outcome-based, phase와 비충돌 ──
             # V52 실측: phase-only 16/step vs 검증된 78/step → bridge 필수
-            # stride_length: "보폭 크게" (timing 아닌 결과 보상)
-            # forward_velocity_bootstrap: "앞으로 가라" (timing 아닌 결과 보상)
             self.rewards.stride_length.weight = 5.0
             self.rewards.forward_velocity_bootstrap.weight = 5.0
+
+            # ── Boot-only Bridge: boot phase에서 "다리를 움직여라" signal ──
+            # V54.1 실패 분석: 제거된 boot positive 6.50/step 중 핵심 2개 복원
+            # gait_gate 해제 후 boot ramp-down으로 0까지 감소 (phase가 대체)
+            # leg_lift: +2.52/step @boot (V52 실측)
+            # rear_joint_velocity: +1.76/step @boot (V52 실측)
+            self.curriculum.reward_weights.params["boot_leg_lift_initial"] = 15.0
+            self.curriculum.reward_weights.params["boot_rear_vel_initial"] = 12.0
+            self.curriculum.reward_weights.params["boot_bridge_ramp_down_iters"] = 500
 
             # ── 충돌 gait reward 비활성화 ──
             _phase_remove = [
@@ -1247,8 +1254,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "residency_ema_contact_rl", "residency_ema_contact_rr",
                 "residency_ema_prop_rl", "residency_ema_prop_rr",
                 "diagonal_coupling", "trot_gait", "gait_cycle_period",
-                "leg_lift", "front_leg_lift", "rear_alternation", "rear_swing",
-                "rear_forward_stride", "rear_joint_velocity",
+                "front_leg_lift", "rear_alternation", "rear_swing",
+                "rear_forward_stride",
                 "swing_stride", "swing_gate_velocity",
                 "forward_velocity",
                 "four_limb_cooperation", "front_rear_symmetry",
