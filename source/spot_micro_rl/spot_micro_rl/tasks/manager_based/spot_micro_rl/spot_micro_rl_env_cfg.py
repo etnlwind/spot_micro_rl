@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V54.2"
+TRAIN_VERSION = "V54.3"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1186,7 +1186,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             # ── Phase Clock 주연 ──
             self.rewards.phase_contact = RewTerm(
                 func=custom_mdp.phase_contact_reward,
-                weight=20.0,
+                weight=0.0,  # V54.3: curriculum이 0→20으로 ramp (soft handoff)
                 params={
                     "sensor_cfg": toe_cfg_phase,
                     "frequency": 2.0,
@@ -1197,7 +1197,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             )
             self.rewards.phase_clearance = RewTerm(
                 func=custom_mdp.phase_foot_clearance,
-                weight=5.0,
+                weight=0.0,  # V54.3: curriculum이 0→5로 ramp
                 params={
                     "asset_cfg": SceneEntityCfg("robot"),
                     "foot_cfg": foot_body_cfg_phase,
@@ -1243,6 +1243,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.curriculum.reward_weights.params["boot_leg_lift_initial"] = 15.0
             self.curriculum.reward_weights.params["boot_rear_vel_initial"] = 12.0
             self.curriculum.reward_weights.params["boot_bridge_ramp_down_iters"] = 500
+            # V54.3: phase ramp-in (soft handoff — bridge와 동일 구간, 반대 방향)
+            self.curriculum.reward_weights.params["phase_contact_target"] = 20.0
+            self.curriculum.reward_weights.params["phase_clearance_target"] = 5.0
+            self.curriculum.reward_weights.params["phase_ramp_in_iters"] = 500
 
             # ── 충돌 gait reward 비활성화 ──
             _phase_remove = [

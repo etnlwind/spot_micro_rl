@@ -71,12 +71,8 @@ def phase_contact_reward(
     standing command (|vel| < threshold)일 때는 all-stance (4발 접지).
     4발 match의 mean (binary score이므로 교훈#30 해당 없음).
     범위 [0, 1] — match=1, mismatch=0.
-    Boot-gated: gait_gate 해제 전에는 비활성 (부팅 우선).
+    V54.3: boot-gate 제거 — curriculum이 weight를 0→20으로 ramp (soft handoff).
     """
-    # boot phase에서는 비활성 — boot_standing이 서기 담당
-    if not hasattr(env, '_v47_boot_gate_released_iter') or env._v47_boot_gate_released_iter < 0:
-        return torch.zeros(env.num_envs, device=env.device)
-
     contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
     forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
     is_contact = (forces > contact_threshold).float()  # (num_envs, 4)
@@ -122,12 +118,8 @@ def phase_foot_clearance(
     swing 중반에 가장 높고, 시작/끝에 낮은 삼각파 형태.
     4발 개별 clearance를 SUM (교훈#30: magnitude가 다를 수 있으므로 mean 지양).
     standing 시에는 0 (발을 들면 안 됨).
-    Boot-gated: gait_gate 해제 전에는 비활성.
+    V54.3: boot-gate 제거 — curriculum이 weight를 0→5로 ramp.
     """
-    # boot phase에서는 비활성
-    if not hasattr(env, '_v47_boot_gate_released_iter') or env._v47_boot_gate_released_iter < 0:
-        return torch.zeros(env.num_envs, device=env.device)
-
     t = env.episode_length_buf.float() * env.step_dt
     base_phase = 2.0 * math.pi * frequency * t
 
@@ -3856,6 +3848,10 @@ def reward_weight_curriculum(
     boot_leg_lift_initial: float = 0.0,     # 0이면 비활성
     boot_rear_vel_initial: float = 0.0,     # 0이면 비활성
     boot_bridge_ramp_down_iters: int = 500, # gait_gate 해제 후 몇 iter에 걸쳐 0으로
+    # V54.3: phase ramp-in (gait_gate 해제 후 0→target으로 점진 증가)
+    phase_contact_target: float = 0.0,      # 0이면 비활성
+    phase_clearance_target: float = 0.0,    # 0이면 비활성
+    phase_ramp_in_iters: int = 500,         # gait_gate 해제 후 몇 iter에 걸쳐 target까지
     # 로깅
     log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
@@ -4243,11 +4239,37 @@ def reward_weight_curriculum(
             except Exception:
                 pass
 
+        # V54.3: phase ramp-in (bridge와 동일 구간, 반대 방향)
+        if phase_contact_target > 0 or phase_clearance_target > 0:
+            if env._v47_boot_gate_released_iter > 0:
+                phase_elapsed = iteration - env._v47_boot_gate_released_iter
+                phase_alpha = min(1.0, phase_elapsed / max(phase_ramp_in_iters, 1))
+                phase_c_w = phase_contact_target * phase_alpha
+                phase_cl_w = phase_clearance_target * phase_alpha
+            else:
+                phase_c_w = 0.0
+                phase_cl_w = 0.0
+            try:
+                pc_cfg = env.reward_manager.get_term_cfg("phase_contact")
+                pc_cfg.weight = phase_c_w
+                env.reward_manager.set_term_cfg("phase_contact", pc_cfg)
+            except Exception:
+                pass
+            try:
+                pcl_cfg = env.reward_manager.get_term_cfg("phase_clearance")
+                pcl_cfg.weight = phase_cl_w
+                env.reward_manager.set_term_cfg("phase_clearance", pcl_cfg)
+            except Exception:
+                pass
+
         if iteration % log_interval == 0:
             bridge_info = ""
             if boot_leg_lift_initial > 0:
                 bridge_info = f" leg_lift={bridge_ll_w:.1f} rear_vel={bridge_rv_w:.1f}"
-            print(f"  [V47-Boot] boot_standing={boot_st_w:.1f} boot_contact={boot_ct_w:.1f}{bridge_info}")
+            phase_info = ""
+            if phase_contact_target > 0:
+                phase_info = f" phase_c={phase_c_w:.1f} phase_cl={phase_cl_w:.1f}"
+            print(f"  [V47-Boot] boot_standing={boot_st_w:.1f} boot_contact={boot_ct_w:.1f}{bridge_info}{phase_info}")
 
     # ── Alpha 진행 (한 주기당 최대 증가량 제한) ──
     if _all_alphas_done:
