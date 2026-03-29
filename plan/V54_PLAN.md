@@ -429,6 +429,23 @@ reward 구조 변경으로 boot phase 불안정.
 - **Fallback B**: duty_factor 0.55→0.65 (stance 시간 증가, 부하 분산)
 - **Fallback C**: phase_foot_clearance target height 낮춤
 
+### Abort Window 기준
+
+```
+abort 판정은 단일 iter가 아닌 연속 구간으로:
+  - "ep_len < 50이 100 iter 연속" → abort
+  - "phase_contact < 1.0이 200 iter 연속" → abort
+  - 단발성 하락은 무시 (학습 중 noise)
+```
+
+### 구현 후 검증 체크리스트
+
+```
+□ standing/walking mode 전환 빈도 로그 확인 (0.08~0.12 경계 출렁임)
+□ phase_contact_reward 합산 방식이 mean-only가 아닌지 코드 리뷰
+□ phase_foot_clearance에서 다리별 magnitude 차이 → sum/min 사용 확인
+```
+
 ### 모니터링 필수 항목 (iter 300~800)
 
 ```
