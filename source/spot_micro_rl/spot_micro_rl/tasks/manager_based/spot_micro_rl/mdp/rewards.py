@@ -106,6 +106,86 @@ def phase_contact_reward(
 
 
 # ═══════════════════════════════════════════
+# V51: Gait Quality Rewards
+# Standing-First + Soft Height Gate hybrid
+# ═══════════════════════════════════════════
+
+
+def front_rear_symmetry(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    k: float = 5.0,
+) -> torch.Tensor:
+    """V51: 앞뒤 다리 대칭 보상.
+
+    앞다리 쌍과 뒷다리 쌍의 스윙 비율 차이가 작을수록 높은 보상.
+    front_swing_ratio ~ rear_swing_ratio일 때 1.0, 차이 클수록 0에 수렴.
+    귀뚜라미 보행(rear만 스윙) 직접 교정.
+    """
+    contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
+    contact_ratio = _contact_ratio(contact_sensor, sensor_cfg.body_ids, contact_threshold)
+    swing_ratio = 1.0 - contact_ratio  # (num_envs, 4)
+
+    front_swing = swing_ratio[:, :2].mean(dim=1)  # FL, FR
+    rear_swing = swing_ratio[:, 2:].mean(dim=1)   # RL, RR
+    diff = torch.abs(front_swing - rear_swing)
+
+    return torch.exp(-k * diff)
+
+
+def height_walking_gate(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    gate_low: float = 0.17,
+    gate_high: float = 0.21,
+    gate_min: float = 0.2,
+) -> torch.Tensor:
+    """V51: soft height gate — 낮은 자세에서 walking 이득을 상쇄하는 penalty.
+
+    boot phase(_v47_boot_gate_released_iter < 0)에서는 비활성(0 반환).
+    gait_gate 해제 후 walking phase부터 적용.
+
+    높이가 gate_high 이상이면 0 (영향 없음).
+    높이가 gate_low 이하이면 -(1 - gate_min) (최대 penalty).
+    """
+    # boot phase에서는 gate 비활성 — 자유롭게 서기/걷기 학습
+    if not hasattr(env, '_v47_boot_gate_released_iter') or env._v47_boot_gate_released_iter < 0:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    asset = env.scene[asset_cfg.name]
+    height = asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    gate = torch.clamp((height - gate_low) / (gate_high - gate_low), gate_min, 1.0)
+    return gate - 1.0  # 0 when tall, -(1-gate_min) when low
+
+
+# ═══════════════════════════════════════════
+# V52: Min Height Termination
+# ═══════════════════════════════════════════
+
+
+def min_height_termination(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    min_height: float = 0.15,
+) -> torch.Tensor:
+    """V52: 최소 높이 termination. height < min_height면 에피소드 종료.
+
+    boot phase(_v47_boot_gate_released_iter < 0)에서는 비활성.
+    gait_gate 해제 후 walking phase부터 적용.
+    boot_standing이 soft gradient, 이것이 hard floor.
+    """
+    # boot phase에서는 비활성 — 자유롭게 서기 학습
+    if not hasattr(env, '_v47_boot_gate_released_iter') or env._v47_boot_gate_released_iter < 0:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    asset = env.scene[asset_cfg.name]
+    height = asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    return height < min_height
+
+
+# ═══════════════════════════════════════════
 # V43-E: Boot Standing rewards
 # ═══════════════════════════════════════════
 
@@ -2111,6 +2191,39 @@ def leg_lift_reward(
     return swing_reward.sum(dim=1) / num_swing
 
 
+def front_leg_lift_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    leg_joint_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_angle: float = 0.6,
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """V52.2: 앞다리 전용 leg lift 보상.
+
+    leg_lift_reward와 동일 로직이지만 앞다리 2개(FL, FR)만 대상.
+    기존 leg_lift(4발 평균)은 뒷다리가 점수를 지배하므로,
+    앞다리 전용 보상으로 front lift를 직접 유도.
+
+    sensor_cfg.body_ids[:2] = FL, FR toe
+    leg_joint_cfg.joint_ids[:2] = FL, FR leg joint
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    # sensor_cfg가 앞다리 2개만 지정 (body_ids = FL, FR toe)
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)
+    swing_mask = ~contacts
+
+    asset: Articulation = env.scene[leg_joint_cfg.name]
+    # leg_joint_cfg가 앞다리 2개만 지정 (joint_ids = FL, FR leg)
+    leg_angles = asset.data.joint_pos[:, leg_joint_cfg.joint_ids]
+
+    displacement = torch.abs(leg_angles)
+    normalized = torch.clamp(displacement / target_angle, 0.0, 1.0)
+
+    swing_reward = normalized * swing_mask.float()
+    num_swing = swing_mask.float().sum(dim=1).clamp(min=1.0)
+    return swing_reward.sum(dim=1) / num_swing
+
+
 def terrain_progress_reward(
     env: ManagerBasedRLEnv,
 ) -> torch.Tensor:
@@ -3674,8 +3787,9 @@ def reward_weight_curriculum(
     gait_gate_min_ep_len: float = 200.0,  # ep_len < 이 값이면 ramp 일시정지
     # V47: boot reward ramp-down (gait_gate 연동)
     boot_standing_initial: float = 0.0,   # 0이면 비활성
+    boot_standing_floor: float = 0.0,     # V50.2: ramp-down 최소값 (0이면 완전 소멸)
     boot_contact_initial: float = 0.0,    # 0이면 비활성
-    boot_ramp_down_iters: int = 300,      # gait_gate 해제 후 몇 iter에 걸쳐 0으로 감소
+    boot_ramp_down_iters: int = 300,      # gait_gate 해제 후 몇 iter에 걸쳐 floor까지 감소
     # 로깅
     log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
@@ -4012,7 +4126,8 @@ def reward_weight_curriculum(
         if env._v47_boot_gate_released_iter > 0:
             elapsed = iteration - env._v47_boot_gate_released_iter
             down_alpha = min(1.0, elapsed / max(boot_ramp_down_iters, 1))
-            boot_st_w = boot_standing_initial * (1.0 - down_alpha)
+            # V50.2: initial → floor (floor=0이면 기존과 동일)
+            boot_st_w = boot_standing_initial + (boot_standing_floor - boot_standing_initial) * down_alpha
             boot_ct_w = boot_contact_initial * (1.0 - down_alpha)
         else:
             boot_st_w = boot_standing_initial

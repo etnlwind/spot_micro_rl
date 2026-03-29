@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V50"
+TRAIN_VERSION = "V53"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -229,7 +229,7 @@ class SpotMicroRewardCurriculumCfg:
             "coop_usage_initial": 0.0,
             "coop_usage_final": 3.0,         # usage band [0.20~0.45]
             "coop_reward_initial": 0.0,
-            "coop_reward_final": 8.0,        # band_hit_count >= 2/3 trigger
+            "coop_reward_final": 16.0,       # V52.1: 8→16 (4족 협동 보상 2배, net -1.80/step)
             # V28.1: residency relay ramp (early triangle 600→800→1000, late ramp 800→1000→유지)
             # V29.2: 타이밍 지연 — gait 안정화 후 잔류 학습 (600/800/1000 → 800/1000/1200)
             "residency_relay_up_start": 800,
@@ -512,7 +512,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V23: body-frame 기준 너무 넓은 stance 억제
         self.rewards.stance_width_penalty = RewTerm(
             func=custom_mdp.stance_width_penalty,
-            weight=-3.0,  # V36: -2.5→-3.0 (anti-splay)
+            weight=-1.5,  # V52.1: -3.0→-1.5 (앞다리 사용 시 penalty 과다 방지, shoulder_neutral이 splay 보조)
             params={
                 "foot_cfg": toe_body_cfg,
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -537,6 +537,15 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.terminations.bad_orientation = DoneTerm(
             func=isaaclab_mdp.bad_orientation,
             params={"limit_angle": 1.5}  # ~86도
+        )
+
+        # V52: 최소 높이 termination — 엎드리기/크롤링 전략 차단
+        self.terminations.min_height = DoneTerm(
+            func=custom_mdp.min_height_termination,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "min_height": 0.15,  # init(0.22)에서 70mm 여유, 정상 보행 진동 안전
+            },
         )
 
         # V38.2: Soft CaT — 종료 확률이 splay deviation에 비례
@@ -637,7 +646,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V16: leg 관절 들어올리기 (대각 커플링에 비중 분배)
         self.rewards.leg_lift = RewTerm(
             func=custom_mdp.leg_lift_reward,
-            weight=15.0,  # V16: 20→15 (diagonal coupling이 보완)
+            weight=20.0,  # V52.1: 15→20 (앞다리 lift 보상 강화, net -1.80/step)
             params={
                 "sensor_cfg": toe_contact_sensor_cfg,
                 "leg_joint_cfg": SceneEntityCfg("robot", joint_names=["front_left_leg", "front_right_leg", "rear_left_leg", "rear_right_leg"]),
@@ -1144,7 +1153,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 params={
                     "asset_cfg": SceneEntityCfg("robot"),
                     "target_height": 0.23,
-                    "height_k": 100.0,
+                    "height_k": 500.0,  # V50.1: 100→500 (높이 gradient 강화)
                 },
             )
             # boot_foot_contact: 4발 접지율 (V43-E에서 검증)
@@ -1158,10 +1167,60 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             )
 
             # 기존 reward_weight_curriculum에 boot ramp-down 파라미터 추가
-            # V50: boot ramp-down 연장 — "서기" 습관이 충분히 굳은 후 감소
+            # V50.2: boot_standing은 floor까지만 감소 (walking phase에서도 높이 압력 유지)
             self.curriculum.reward_weights.params["boot_standing_initial"] = 20.0
+            self.curriculum.reward_weights.params["boot_standing_floor"] = 10.0   # V50.2: walking 대비 ~16% 높이 압력 상시 유지
             self.curriculum.reward_weights.params["boot_contact_initial"] = 5.0
             self.curriculum.reward_weights.params["boot_ramp_down_iters"] = 1500
+
+        # ══════════════════════════════════════════════════════════
+        # V51: Standing-First + Soft Height Gate hybrid
+        # 1차: 낮은 자세 local optimum 깨기 (height gate)
+        # 2차: front/rear 비대칭 교정 (front_rear_symmetry)
+        # ══════════════════════════════════════════════════════════
+        toe_cfg_quality = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+
+        # Soft height gate: 낮으면 walking 이득 상쇄 (standing은 ungated)
+        # gate = clamp((h - 0.17) / 0.04, 0.2, 1.0)
+        # h=0.23: 0, h=0.19: -12, h=0.17: -32
+        self.rewards.height_walking_gate = RewTerm(
+            func=custom_mdp.height_walking_gate,
+            weight=40.0,  # boot phase에서는 비활성, walking phase(ep_len 200+)부터 적용
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "gate_low": 0.17,
+                "gate_high": 0.21,
+                "gate_min": 0.2,
+            },
+        )
+
+        # 앞뒤 대칭: anti-cricket (2차 목표, 모니터링 겸)
+        self.rewards.front_rear_symmetry = RewTerm(
+            func=custom_mdp.front_rear_symmetry,
+            weight=8.0,
+            params={
+                "sensor_cfg": toe_cfg_quality,
+                "asset_cfg": SceneEntityCfg("robot"),
+                "contact_threshold": 1.0,
+                "k": 5.0,
+            },
+        )
+
+        # V52.2: 앞다리 전용 leg lift (기존 leg_lift은 4발 평균 → 뒷다리가 지배)
+        # 데이터 근거: FL lift=0.088, RL lift=0.716 (8배 차이), 4발 평균은 뒷다리만으로 충족
+        # 앞다리를 뒷다리 수준(0.6)으로 올리면 +7.9/step 이득
+        toe_cfg_front = SceneEntityCfg("contact_forces", body_names=["front_left_toe_link", "front_right_toe_link"])
+        front_leg_joint_cfg = SceneEntityCfg("robot", joint_names=["front_left_leg", "front_right_leg"])
+        self.rewards.front_leg_lift = RewTerm(
+            func=custom_mdp.front_leg_lift_reward,
+            weight=15.0,
+            params={
+                "sensor_cfg": toe_cfg_front,
+                "leg_joint_cfg": front_leg_joint_cfg,
+                "target_angle": 0.6,
+                "contact_threshold": 1.0,
+            },
+        )
 
         # ══════════════════════════════════════════════════════════
         # V42: Clean Reward Restart — 16개 reward만 사용

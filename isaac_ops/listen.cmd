@@ -1,5 +1,4 @@
 @echo off
-setlocal EnableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_PATH=%SCRIPT_DIR%listener.py"
@@ -28,7 +27,28 @@ if not defined PY_EXE (
 )
 
 set "LOG_FILE=%SCRIPT_DIR%log\listener.log"
+set "PID_FILE=%SCRIPT_DIR%log\listener.pid"
 if not exist "%SCRIPT_DIR%log" mkdir "%SCRIPT_DIR%log"
+
+rem Check if previous listener is running
+if not exist "%PID_FILE%" goto :start
+set /p OLD_PID=<"%PID_FILE%"
+if "%OLD_PID%"=="" goto :start
+tasklist /FI "PID eq %OLD_PID%" /NH 2>nul | findstr /i "python" >nul
+if errorlevel 1 goto :start
+
+echo [WARN] Listener already running (PID %OLD_PID%)
+set /p CONFIRM="Kill and restart? (Y/N): "
+if /i "%CONFIRM%"=="Y" (
+    taskkill /PID %OLD_PID% /F >nul 2>&1
+    echo [OK] Killed PID %OLD_PID%
+    ping -n 3 127.0.0.1 >nul
+) else (
+    echo [ABORT] Cancelled.
+    exit /b 1
+)
+
+:start
 start /b "" "%PY_EXE%" "%SCRIPT_PATH%" %* > "%LOG_FILE%" 2>&1
 echo [OK] listener started in background (log: %LOG_FILE%)
 exit /b 0

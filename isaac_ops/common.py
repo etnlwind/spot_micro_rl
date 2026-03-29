@@ -1751,18 +1751,41 @@ def build_train_command(resume_run_dir: str | None = None, checkpoint_path: str 
     return _wrap_conda_command(" && ".join(parts[:2]) + " && " + " ".join(parts[2:]), force_activate=True)
 
 
-def launch_training(log_path: str, fresh: bool = False, headless: bool = True) -> dict:
+def launch_training(log_path: str, fresh: bool = False, headless: bool = True,
+                    target_iter: int | None = None) -> dict:
     """훈련 시작.
 
     fresh=True: state의 checkpoint를 무시하고 iter 0부터 새 run으로 시작.
     fresh=False: 기존 active_checkpoint에서 재개 (이전 동작 유지).
     headless=True: GUI 없이 실행 (기본값). False면 GUI 모드.
+    target_iter: 특정 iter의 checkpoint에서 resume (None이면 최신).
     """
+    # busy_lock: 중복 launch 방지 (첫 호출이 90초 대기 중 두 번째 호출 차단)
+    _launch_lock = os.path.join(_OPS_LOG_DIR, "launch.lock")
+    try:
+        _lock_fd = os.open(_launch_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(_lock_fd)
+    except FileExistsError:
+        log_event("TRAIN", "LAUNCH_BLOCKED", "another launch in progress")
+        return {"mode": "blocked", "run_dir": resolve_active_run_dir(), "checkpoint": resolve_active_checkpoint()}
+
+    try:
+        return _launch_training_impl(log_path, fresh, headless, target_iter)
+    finally:
+        try:
+            os.remove(_launch_lock)
+        except OSError:
+            pass
+
+
+def _launch_training_impl(log_path: str, fresh: bool, headless: bool,
+                          target_iter: int | None) -> dict:
+    """launch_training 실제 구현 (lock은 caller가 관리)."""
     if is_training_running():
         log_event("TRAIN", "ALREADY_RUNNING", version=TRAIN_VERSION)
         return {"mode": "already-running", "run_dir": resolve_active_run_dir(), "checkpoint": resolve_active_checkpoint()}
     mode_str = "headless" if headless else "GUI"
-    log_event("TRAIN", "LAUNCHING", f"fresh={fresh} {mode_str}", version=TRAIN_VERSION, envs=str(TRAIN_ENVS))
+    log_event("TRAIN", "LAUNCHING", f"fresh={fresh} {mode_str} iter={target_iter}", version=TRAIN_VERSION, envs=str(TRAIN_ENVS))
     if fresh:
         update_state(active_run="", active_checkpoint="", last_command="start-fresh")
         baseline_run = get_latest_run_dir()
@@ -1771,8 +1794,11 @@ def launch_training(log_path: str, fresh: bool = False, headless: bool = True) -
         baseline_run = get_latest_run_dir()
         resume_run = resolve_active_run_dir()
         run_ver = _read_run_train_version(resume_run) if resume_run else None
-        if run_ver and run_ver != TRAIN_VERSION:
-            # 버전 불일치 — 구버전 run을 resume하면 안 됨, fresh start로 전환
+        # 메이저 버전만 비교 (V50 vs V50.1은 호환, V50 vs V51은 불일치)
+        run_major = run_ver.split(".")[0] if run_ver else ""
+        cur_major = TRAIN_VERSION.split(".")[0] if TRAIN_VERSION else ""
+        if run_major and cur_major and run_major != cur_major:
+            # 메이저 버전 불일치 — 구버전 run을 resume하면 안 됨, fresh start로 전환
             write_log(
                 f"launch_training: version mismatch ({run_ver} → {TRAIN_VERSION}), forcing fresh start",
                 log_path,
@@ -1781,7 +1807,70 @@ def launch_training(log_path: str, fresh: bool = False, headless: bool = True) -
             fresh = True
             command = build_train_command(headless=headless)
         else:
-            checkpoint = resolve_active_checkpoint(resume_run)
+            if target_iter is not None:
+                # 특정 iter checkpoint 검색: 현재 메이저 버전 run만 역순 탐색
+                source_ckpt = None
+                source_crr = None
+                source_run = None
+                if os.path.isdir(LOG_BASE):
+                    all_runs = sorted(
+                        [os.path.join(LOG_BASE, d) for d in os.listdir(LOG_BASE)
+                         if os.path.isdir(os.path.join(LOG_BASE, d))],
+                        reverse=True,
+                    )
+                    for rd in all_runs:
+                        rv = _read_run_train_version(rd) or ""
+                        rv_major = rv.split(".")[0] if rv else ""
+                        if rv_major != cur_major:
+                            continue
+                        candidate = os.path.join(rd, f"model_{target_iter}.pt")
+                        if os.path.isfile(candidate):
+                            source_ckpt = candidate
+                            source_crr = os.path.join(rd, f"curriculum_{target_iter}.pt")
+                            source_run = rd
+                            write_log(f"launch_training: found iter {target_iter} in {os.path.basename(rd)} [{rv}]", log_path)
+                            break
+                if source_ckpt:
+                    import shutil
+                    new_run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                    new_run_dir = os.path.join(LOG_BASE, new_run_name)
+                    os.makedirs(new_run_dir, exist_ok=True)
+                    dest_ckpt = os.path.join(new_run_dir, f"model_{target_iter}.pt")
+                    shutil.copy2(source_ckpt, dest_ckpt)
+                    write_log(f"launch_training: copied model_{target_iter}.pt from {os.path.basename(source_run)} to {new_run_name}", log_path)
+
+                    # 버전 비교: 소스 run과 현재 버전이 다르면 weight 변경 → snapshot 스킵
+                    source_ver = _read_run_train_version(source_run) or ""
+                    if not source_ver:
+                        write_log(f"launch_training: WARNING — source run has no version info, skipping snapshot (safe fallback)", log_path)
+                    if not source_ver or source_ver != TRAIN_VERSION:
+                        write_log(f"launch_training: version changed ({source_ver} -> {TRAIN_VERSION}), curriculum snapshot skipped (deterministic recompute)", log_path)
+                        send_text(
+                            f"<b>RESUME iter {target_iter}</b> [{TRAIN_VERSION}]\n"
+                            f"<i>from {os.path.basename(source_run)} [{source_ver}]</i>\n"
+                            f"<i>curriculum: deterministic recompute (version changed)</i>",
+                            log_path, parse_mode="HTML",
+                        )
+                    else:
+                        # 같은 버전 → snapshot 복사 (정상 resume)
+                        if os.path.isfile(source_crr):
+                            shutil.copy2(source_crr, os.path.join(new_run_dir, f"curriculum_{target_iter}.pt"))
+                            write_log(f"launch_training: copied curriculum_{target_iter}.pt", log_path)
+                        send_text(
+                            f"<b>RESUME iter {target_iter}</b> [{TRAIN_VERSION}]\n"
+                            f"<i>from {os.path.basename(source_run)}</i>\n"
+                            f"<i>curriculum: snapshot restored</i>",
+                            log_path, parse_mode="HTML",
+                        )
+
+                    resume_run = new_run_dir
+                    checkpoint = dest_ckpt
+                    update_state(active_run=new_run_name, active_checkpoint=dest_ckpt)
+                else:
+                    write_log(f"launch_training: model_{target_iter}.pt not found in {cur_major} runs, using latest", log_path)
+                    checkpoint = resolve_active_checkpoint(resume_run)
+            else:
+                checkpoint = resolve_active_checkpoint(resume_run)
             command = build_train_command(resume_run, checkpoint, headless=headless) if checkpoint else build_train_command(headless=headless)
     write_log(f"Launching training (fresh={fresh}): {command}", log_path)
     launcher_path = _launch_training_command(command, "_launch_training.cmd", visible=not headless)

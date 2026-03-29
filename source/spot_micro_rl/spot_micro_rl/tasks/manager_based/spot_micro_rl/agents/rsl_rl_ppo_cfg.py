@@ -18,7 +18,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """
     num_steps_per_env = 48  # V17: 24→48 (1.92s, 걸음걸이 3~6 사이클 포함)
     max_iterations = 15000
-    save_interval = 200
+    save_interval = 100
     experiment_name = "spot_micro_flat"
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,

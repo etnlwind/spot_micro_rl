@@ -213,24 +213,27 @@ def _handle_start(pending_confirm_ref: list, headless: bool = True) -> None:
         )
 
 
-def _handle_stop() -> None:
+def _handle_stop(monitor=None) -> None:
     result = common.stop_training(LOG)
+    if monitor is not None:
+        monitor.disable_stall_detection()
     checkpoint_name = _safe_basename(result["checkpoint"])
     run_version = common.get_run_version(result.get("run_dir", ""))
     _send_notice("TRAINING STOPPED", f"killed: {len(result['killed'])}\ncheckpoint: {checkpoint_name}", icon="⏹️", version=run_version)
 
 
-def _handle_resume() -> None:
+def _handle_resume(headless: bool = True, target_iter: int | None = None) -> None:
     common.reload_train_version()
-    result = common.launch_training(LOG, fresh=False)
+    mode_str = "headless" if headless else "GUI"
+    iter_str = f" iter={target_iter}" if target_iter is not None else ""
+    result = common.launch_training(LOG, fresh=False, headless=headless, target_iter=target_iter)
     run_name = _safe_basename(result["run_dir"])
     checkpoint_name = os.path.basename(result["checkpoint"]) if result["checkpoint"] else "N/A (fresh)"
     run_version = common.get_run_version(result.get("run_dir", ""))
-    icon = "▶️"
     if result["mode"] == "already-running":
-        _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon=icon, version=run_version)
+        _send_notice("TRAINING ACTIVE", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon=">>", version=run_version)
     else:
-        _send_notice("TRAINING RESUME", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon=icon, version=run_version)
+        _send_notice(f"TRAINING RESUME [{mode_str}]{iter_str}", f"run: {run_name}\ncheckpoint: {checkpoint_name}", icon=">>", version=run_version)
 
 
 def _handle_report(run_dir: str, checkpoint: str, checkpoint_iter: int | None = None) -> None:
@@ -300,7 +303,7 @@ def _handle_view(view_key: str, run_dir: str, checkpoint: str, checkpoint_iter: 
     t.start()
 
 
-def _dispatch_command(command: str, arg_text: str, pending_confirm: list) -> None:
+def _dispatch_command(command: str, arg_text: str, pending_confirm: list, monitor=None) -> None:
     """Dispatch parsed command to handler."""
     target_version, checkpoint_iters = _parse_command_args(arg_text)
     first_iter = checkpoint_iters[0] if checkpoint_iters else None
@@ -319,10 +322,17 @@ def _dispatch_command(command: str, arg_text: str, pending_confirm: list) -> Non
         _handle_start(pending_confirm, headless=not gui_mode)
         return
     if command == "stop":
-        _handle_stop()
+        _handle_stop(monitor=monitor)
         return
     if command == "resume":
-        _handle_resume()
+        gui_mode = "gui" in arg_text.lower()
+        # Parse iter number from args (e.g., "/resume gui 200" or "/resume 200")
+        resume_iter = None
+        for token in arg_text.split():
+            if token.isdigit():
+                resume_iter = int(token)
+                break
+        _handle_resume(headless=not gui_mode, target_iter=resume_iter)
         return
     if command == "shutdown":
         common.request_supervisor_shutdown("telegram-command")
@@ -513,6 +523,7 @@ class Monitor:
         self._pre_confirm_milestone = 0  # milestone for which pre-confirm was sent
         self._pre_confirm_declined = False  # user said N
         # Stall detection: auto-resume if training dies
+        self._stall_disabled = False  # /stop 시 True, /start·/resume 시 False
         self._last_iter_seen = 0
         self._last_iter_change_time = time.time()
         self._stall_notified = False
@@ -609,6 +620,11 @@ class Monitor:
         """Reset video_disabled and auto_resume_count — call on explicit /start."""
         self._video_disabled = False
         self._auto_resume_count = 0
+        self._stall_disabled = False
+
+    def disable_stall_detection(self) -> None:
+        """Disable stall detection — call on explicit /stop."""
+        self._stall_disabled = True
 
     def tick(self) -> None:
         """Called frequently from main loop. Rate-limits actual work."""
@@ -633,6 +649,8 @@ class Monitor:
             run_name = os.path.basename(run_dir)
 
             # ── Stall detection: training died? ──
+            if self._stall_disabled:
+                return
             if current_iter != self._last_iter_seen:
                 self._last_iter_seen = current_iter
                 self._last_iter_change_time = time.time()
@@ -999,7 +1017,7 @@ def main() -> int:
                                     LOG, parse_mode="HTML",
                                 )
                                 try:
-                                    _dispatch_command(command, arg_text, pending_confirm)
+                                    _dispatch_command(command, arg_text, pending_confirm, monitor=monitor)
                                     common.log_event("CMD", "COMPLETED", command)
                                 except Exception as err:
                                     common.write_log(f"Command error: {err}\n{common.capture_exception()}", LOG)

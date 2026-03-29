@@ -125,9 +125,11 @@ def main() -> int:
                 _exec_hb(text)
         elif cmd in _COMMANDS:
             # Telegram 명령어는 전부 리스너가 처리 (단일 실행 루트)
-            common.log_event("CMD", "CLI_SEND", text[:50])
-            common.send_text(text, LOG, parse_mode=None)
-            print(f"[OK] sent to listener: {text}")
+            # /prefix 붙여서 리스너가 명령으로 인식하도록
+            msg = text if text.startswith("/") else f"/{text}"
+            common.log_event("CMD", "CLI_SEND", msg[:50])
+            common.send_text(msg, LOG, parse_mode=None)
+            print(f"[OK] sent to listener: {msg}")
         else:
             # Plain message
             common.log_event("CMD", "CLI_SEND", text[:50])
