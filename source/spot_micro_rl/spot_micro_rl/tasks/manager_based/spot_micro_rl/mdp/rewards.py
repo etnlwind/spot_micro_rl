@@ -4184,10 +4184,14 @@ def reward_weight_curriculum(
         if not hasattr(env, '_v47_boot_gate_released_iter'):
             env._v47_boot_gate_released_iter = -1  # gait_gate 해제 시점 기록
 
-        if gait_gate_enabled and not gait_paused and env._v47_boot_gate_released_iter < 0:
-            # gait_gate가 처음 해제된 시점 기록
+        # V54.2: ep_len 기반 해제 OR iteration 500 fallback
+        # episode_length_buf.mean은 mid-episode 평균이라 200에 못 미칠 수 있음
+        iter_fallback = (iteration >= 500)
+        if (gait_gate_enabled and not gait_paused and env._v47_boot_gate_released_iter < 0) or \
+           (iter_fallback and env._v47_boot_gate_released_iter < 0):
             env._v47_boot_gate_released_iter = iteration
-            print(f"[V47-Boot] iter {iteration}: gait_gate released, boot ramp-down starts")
+            reason = "iter_fallback" if (gait_paused and iter_fallback) else "ep_len_gate"
+            print(f"[V47-Boot] iter {iteration}: gait_gate released ({reason}), boot ramp-down starts")
 
         if env._v47_boot_gate_released_iter > 0:
             elapsed = iteration - env._v47_boot_gate_released_iter

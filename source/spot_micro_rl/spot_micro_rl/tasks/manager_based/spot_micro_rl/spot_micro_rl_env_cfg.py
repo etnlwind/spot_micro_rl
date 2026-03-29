@@ -299,7 +299,7 @@ class SpotMicroRewardCurriculumCfg:
             "cat_probability_final": 0.002,  # V40-A2: 0.003→0.002 (sweet spot 탐색)
             "update_interval": 10,
             "gait_gate_enabled": True,
-            "gait_gate_min_ep_len": 120.0,  # V54.2: 200→120 (episode_length_buf.mean is mid-episode avg, not completed avg)
+            "gait_gate_min_ep_len": 200.0,  # 원래 값 유지 (ep_len 기반)
             "log_interval": 100,
         },
     )
