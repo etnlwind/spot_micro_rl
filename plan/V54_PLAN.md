@@ -150,91 +150,145 @@ phi_norm = phi_i(t) mod 2π
 
 ---
 
-## 5. Reward 구조 (~15개) — 초기 Weight 포함
+## 5. Reward 구조 — 최종 Inventory
 
 ### Weight 설계 원칙
 
 ```
 1. Phase cluster(보행 구조) > Tracking cluster(속도 추종)
-   → phase 총합 ≥ tracking 총합 × 3
+   → phase 총합 ≥ tracking 총합 × 4
 
 2. alive_bonus(10)를 anchor로 상대 스케일링
 
-3. legged_gym 비율 참조 (검증된 15-reward 구조):
-   - feet_air_time(1.0) = tracking_lin(1.0) → 1:1
-   - 우리는 phase > tracking으로 조정 → ~4:1
+3. legged_gym 비율 참조 + V52 실측 기반 조정
+   - V52 실측: movement penalty 14.36/step이 앞다리 사용 차단
+   → penalty를 대폭 축소 (-0.5~-1.0 수준)
 ```
 
-### Phase Clock 중심 (주연) — 총합 ~20
+### Phase Clock 중심 (주연) — 총합 25
 
-| # | reward | weight | 역할 | 근거 |
-|---|--------|--------|------|------|
-| 1 | **phase_contact_reward** | **15.0** | stance→접지, swing→이탈 | 최대 positive, gait 구조 핵심 |
-| 2 | **phase_foot_clearance** | **5.0** | swing에서 발 높이 유도 | 보조 gait signal |
+| # | reward | weight | 역할 |
+|---|--------|--------|------|
+| 1 | **phase_contact_reward** | **20.0** | stance→접지, swing→이탈. 최대 positive |
+| 2 | **phase_foot_clearance** | **5.0** | swing에서 발 높이 유도 |
 
-### Velocity Tracking — 총합 ~5
+### Velocity Tracking — 총합 5
 
-| # | reward | weight | 역할 | 근거 |
-|---|--------|--------|------|------|
-| 3 | track_lin_vel_xy_exp | **3.0** | 속도 추종 | phase의 1/5 |
-| 4 | track_ang_vel_z_exp | **2.0** | 회전 추종 | 방향 전환 유도 |
+| # | reward | weight | 역할 |
+|---|--------|--------|------|
+| 3 | track_lin_vel_xy_exp | **2.0** | 속도 추종 |
+| 4 | track_ang_vel_z_exp | **3.0** | 회전 추종 (앞다리 사용 유도) |
 
-**Phase(20) : Tracking(5) = 4:1** → phase 우선 확보.
+**Phase(25) : Tracking(5) = 5:1** → phase 확실히 우선.
 
-### 자세/부팅 — 총합 ~25 (boot phase) / ~15 (walking phase)
+### 자세/부팅
 
-| # | reward | weight | 역할 | 비고 |
-|---|--------|--------|------|------|
-| 5 | alive_bonus | **10.0** | 생존 보상 | anchor, V35.5 검증 |
-| 6 | boot_standing | **20.0** | 높이+자세 gradient | floor=10, ramp-down 1500 iter |
-| 7 | standing_height | **10.0** | 높이 positive | sigma=0.03, target=0.23 |
-| 8 | flat_orientation_l2 | **-5.0** | 수평 유지 | V38.3: -7 → 약간 완화 |
-| 9 | base_height_l2 | **-15.0** | 높이 penalty | target=0.23 |
+| # | reward | weight | 비고 |
+|---|--------|--------|------|
+| 5 | alive_bonus | **10.0** | anchor |
+| 6 | boot_standing | **20.0** | floor=10, ramp-down 1500, height_k=500 |
+| 7 | standing_height | **15.0** | sigma=0.03, target=0.23 |
+| 8 | flat_orientation_l2 | **-8.0** | V52 pitch 문제 반영 |
+| 9 | base_height_l2 | **-15.0** | target=0.23 |
 
-### Penalty (움직임 품질) — 총합 ~-8
+### Penalty (움직임 품질)
 
-| # | reward | weight | 역할 | 근거 |
-|---|--------|--------|------|------|
-| 10 | action_rate_l2 | **-1.0** | 행동 변화율 | legged_gym -0.01 스케일업 |
-| 11 | dof_acc_l2 | **-0.5** | 관절 가속도 | 부드러운 움직임 |
-| 12 | undesired_contacts | **-5.0** | 비정상 접촉 | boot ramp: -1→-5 |
-| 13 | shoulder_neutral | **-4.0** | splay 억제 | V38.3: -6 → 약간 완화 |
+| # | reward | weight | 근거 |
+|---|--------|--------|------|
+| 10 | action_rate_l2 | **-0.5** | V52: -6.08 과도 → 대폭 축소 |
+| 11 | dof_acc_l2 | **-0.001** | legged_gym -2.5e-7 참조, SpotMicro 스케일 |
+| 12 | undesired_contacts | **-5.0** | boot ramp: -1→-5 |
+| 13 | shoulder_neutral | **-4.0** | V38.3: -6 → 약간 완화 |
+| 14 | stance_width_penalty | **-1.5** | V52.1 실측 기반 (원래 -3.0) |
 
 ### Termination
 
 | # | termination | 파라미터 |
 |---|------------|---------|
-| 14 | bad_orientation | limit_angle=1.5 |
-| 15 | min_height | 0.15m, boot-gated |
-| 16 | shoulder_splay (Soft CaT) | threshold=0.3, margin=0.3, prob=0.0015 |
+| 15 | bad_orientation | limit_angle=1.5 |
+| 16 | min_height | 0.15m, boot-gated |
+| 17 | shoulder_splay (Soft CaT) | threshold=0.3, margin=0.3, prob=0.0015 |
 
 ### Observation
 
-| observation | 차원 | 설명 |
-|------------|------|------|
-| 기존 (joint_pos, vel, gravity 등) | 48 | 변경 없음 |
-| **phase_clock_obs** | **8** | sin/cos × 4발 (V39 유틸 재활용, reward 공식은 재검증) |
-| **총 observation** | **56** | |
+| observation | 차원 |
+|------------|------|
+| 기존 (joint_pos, vel, gravity 등) | 48 |
+| **phase_clock_obs (sin/cos × 4)** | **8** |
+| **총** | **56** |
+
+### 제거 목록 (V38.3 → V54에서 비활성화)
+
+| 제거 reward | V52 실측 값 | 이유 |
+|------------|-----------|------|
+| per_leg_contact_target_band | +15.0 | phase_contact가 대체 |
+| per_leg_propulsion_target_band | +10.1 | phase가 stance/swing 관리 |
+| limb_usage_target_band | +9.0 | phase가 대체 |
+| rear_joint_velocity | +11.8 | phase+tracking이 대체 |
+| leg_lift / front_leg_lift | +9.9 | phase_clearance가 대체 |
+| rear_alternation | +6.3 | phase offset이 교대 강제 |
+| four_limb_cooperation | +5.5 | phase_contact가 4발 강제 |
+| feet_air_time | -6.3 | phase_clearance가 대체 |
+| stride_length | +5.1 | tracking이 대체 |
+| forward_velocity / bootstrap | +7.0 | tracking이 대체 |
+| diagonal_coupling | +1.5 | phase offset이 대체 |
+| trot_gait / gait_cycle_period | +1.1 | phase clock이 대체 |
+| band_exit / residency 계열 | - | phase와 충돌 |
+| swing_stride / swing_gate | - | phase가 대체 |
+| height_walking_gate | - | phase 구조에서 불필요 |
+| front_rear_symmetry | - | phase가 대칭 강제 |
+| 기타 diff/raw 로깅 전용 | - | reward 아님, 로깅 유지 |
+
+### 유지 목록
+
+| 유지 reward | weight | 이유 |
+|------------|--------|------|
+| **phase_contact_reward** | 20.0 | 신규 — gait 주연 |
+| **phase_foot_clearance** | 5.0 | 신규 — swing 품질 |
+| track_lin_vel_xy_exp | 2.0 | 속도 명령 추종 |
+| track_ang_vel_z_exp | 3.0 | 회전 명령 추종 |
+| alive_bonus | 10.0 | 생존 기본 |
+| boot_standing | 20.0 | 부팅 가속 |
+| boot_contact | 5.0 | 부팅 4발 접지 |
+| standing_height | 15.0 | 높이 유지 |
+| flat_orientation_l2 | -8.0 | 수평 유지 |
+| base_height_l2 | -15.0 | 높이 penalty |
+| action_rate_l2 | -0.5 | 행동 변화율 |
+| dof_acc_l2 | -0.001 | 관절 가속도 |
+| undesired_contacts | -5.0 | 비정상 접촉 |
+| shoulder_neutral | -4.0 | splay 억제 |
+| stance_width_penalty | -1.5 | 과도한 벌림 억제 |
+| dof_pos_limits | (기존값) | 관절 한계 |
+| lin_vel_z_l2 | (기존값) | 수직 속도 억제 |
 
 ### Per-step 예상 reward budget
 
 ```
 Boot phase (iter 0~300):
   alive(10) + boot_standing(~15) + standing_height(~5) = ~30
-  penalties: ~-8
-  net: ~+22/step → 부팅 안정
+  penalties: ~-5
+  net: ~+25/step → 부팅 안정
 
 Walking phase (iter 500+):
-  alive(10) + phase_contact(~10) + phase_clearance(~3) + tracking(~3)
+  alive(10) + phase_contact(~12) + phase_clearance(~3) + tracking(~3)
   + standing_height(~3) + boot_standing(floor ~5)
-  = ~34
-  penalties: ~-12
-  net: ~+22/step → 안정
+  = ~36
+  penalties: ~-8
+  net: ~+28/step → 안정
 
 최악(phase 무시):
-  alive(10) + standing(~3) - penalties(~-8) = ~+5
-  phase_contact = 0 → 큰 기회비용(~10 상실)
+  alive(10) + standing(~3) - penalties(~-5) = ~+8
+  phase_contact = 0 → 기회비용 ~12 상실
   → phase 따르는 게 확실히 이득
+```
+
+### Standing/Walking 경계 처리
+
+```
+standing enter: |vel_cmd| < 0.08 → all-stance
+walking enter:  |vel_cmd| > 0.12 → phase clock 활성
+hysteresis 구간: 0.08~0.12 → 이전 모드 유지
+→ noisy command에서 출렁임 방지
 ```
 
 ---
@@ -262,7 +316,10 @@ Walking phase (iter 500+):
 - phase_contact_reward > 5.0 (per-step weighted)
 - 4발 contact_ratio 분산 < 0.1 (대칭 확인)
 
-**실패 시:** Phase 1 fallback 참조
+**Abort Criteria (중단):**
+- iter 500에서 ep_len < 50 → boot 실패, Fallback C
+- iter 500에서 phase_contact < 1.0 → phase 무시, Fallback A/B
+- iter 300에서 standing_height < 0.15 → 크롤링 회귀
 
 ### Phase 2: 튜닝 + 검증
 
@@ -276,6 +333,11 @@ Walking phase (iter 500+):
 - front/rear lift 비율 0.5~2.0 (대칭 범위)
 - front_clearance > 0.01
 - ep_len > 220
+
+**Abort Criteria (중단):**
+- iter 1500에서 stride < 2.0 → stride 사망, Fallback A/B
+- phase_contact가 iter 500 이후 하락 추세 → phase 무시 진행
+- front/rear lift 비율 > 5.0 → 비대칭 재발 (V53 패턴)
 
 ### Phase 3: 고도화
 
@@ -293,18 +355,21 @@ Walking phase (iter 500+):
 
 ## 7. V39 코드 재활용 범위
 
-### 재사용 가능 (utility)
+### 재사용 가능 (utility만)
 
-- `phase_clock_obs`: sin/cos observation 생성 → 그대로 사용
-- phase 계산 유틸 (frequency, offset) → 그대로 사용
+- `phase_clock_obs` 함수의 sin/cos 생성 로직 → 그대로 사용
+- phase variable 계산 (`2π × f × t + offset`) → 그대로 사용
+- **"V39 코드 재사용"이 아니라 "V39에서 utility만 가져옴"**
 
-### 재검증 필수 (reward 로직)
+### 재검증 필수 (reward 로직 전체)
 
-- `phase_contact_reward`: contact matching 공식 → **reward scale 재검증**
-  - V39에서 match/mismatch를 +1/-1로 했는데, 이 스케일이 다른 reward와 균형 맞는지
-  - duty_factor 0.55 적용 시 동작 확인
-- clipping / normalization → 실측 후 조정
-- standing command 처리 → 별도 구현 필요
+- `phase_contact_reward`: V39에서 match/mismatch +1/-1로 구현
+  - **reward scale**: weight 20에서 ±1이면 ±20/step — 다른 reward와 균형 확인 필수
+  - **duty_factor**: V39는 0.5, V54는 0.55 → 동작 차이 검증
+  - **4발 합산 방식**: V39는 4발 mean → **교훈 #30(평균은 다수파 지배) 재발 위험**
+  - **standing command**: V39에 없음 → 별도 구현 (hysteresis 포함)
+- clipping / normalization → 첫 실험 후 실측 조정
+- action interaction → phase가 action space에 미치는 간접 영향 확인
 
 ---
 
