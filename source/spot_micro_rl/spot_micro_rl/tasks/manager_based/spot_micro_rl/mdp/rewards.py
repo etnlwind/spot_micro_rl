@@ -71,7 +71,12 @@ def phase_contact_reward(
     standing command (|vel| < threshold)일 때는 all-stance (4발 접지).
     4발 match의 mean (binary score이므로 교훈#30 해당 없음).
     범위 [0, 1] — match=1, mismatch=0.
+    Boot-gated: gait_gate 해제 전에는 비활성 (부팅 우선).
     """
+    # boot phase에서는 비활성 — boot_standing이 서기 담당
+    if not hasattr(env, '_v47_boot_gate_released_iter') or env._v47_boot_gate_released_iter < 0:
+        return torch.zeros(env.num_envs, device=env.device)
+
     contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
     forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
     is_contact = (forces > contact_threshold).float()  # (num_envs, 4)
@@ -117,7 +122,12 @@ def phase_foot_clearance(
     swing 중반에 가장 높고, 시작/끝에 낮은 삼각파 형태.
     4발 개별 clearance를 SUM (교훈#30: magnitude가 다를 수 있으므로 mean 지양).
     standing 시에는 0 (발을 들면 안 됨).
+    Boot-gated: gait_gate 해제 전에는 비활성.
     """
+    # boot phase에서는 비활성
+    if not hasattr(env, '_v47_boot_gate_released_iter') or env._v47_boot_gate_released_iter < 0:
+        return torch.zeros(env.num_envs, device=env.device)
+
     t = env.episode_length_buf.float() * env.step_dt
     base_phase = 2.0 * math.pi * frequency * t
 
