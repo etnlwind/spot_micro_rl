@@ -246,6 +246,18 @@ joint_vel_l2   = -0.10
 dof_acc_l2     = -2e-5
 ```
 
+해석 주의:
+
+```text
+이 값들은 "V47 값을 복원한 표"가 아니다.
+특히 dof_acc_l2는 V47 계열과 다른 임시 시작값이다.
+```
+
+따라서 구현 시:
+
+- `action_rate_l2`, `joint_vel_l2`는 현재 시작점으로 사용
+- `dof_acc_l2`는 `iter 100 audit` 후 조건부 조정 대상으로 본다
+
 중요:
 
 - 이 중 `leg_lift 15 -> 8`은 40%가 아니라 `53%`
@@ -318,6 +330,19 @@ iter 100에서 반드시 볼 것:
 - `boot_standing`, `standing_height`, `feet_air_time`, `trot_gait`, `diagonal_coupling` 우세 항목
 - 비의도 reward dominance 여부
 
+`dof_acc_l2` 판단 로직:
+
+```text
+1. raw magnitude 확인
+2. weighted contribution 확인
+3. boot positive 대비 비율 확인
+
+판정:
+- 과도하면 현재 완화값 유지
+- 안정적이면 상향 조정 검토
+- 강한 복원은 "조건부 검토"이지 기본값이 아님
+```
+
 A1 -> B1 전환 조건:
 
 ```text
@@ -389,6 +414,7 @@ iter 100
 - 감쇠 reward의 실제 contribution이 예상 범위인지 확인
 - phase cluster가 완전히 묻히지 않았는지 확인
 - rear bias 또는 front 사용 악화가 생겼는지 확인
+- feet_air_time과 phase_contact의 timing 충돌 여부 확인
 ```
 
 B1 추가 모니터링:
@@ -402,6 +428,29 @@ B1 추가 모니터링:
 ```text
 front/rear ratio가 A1 대비 나빠지면
 rear-side timing reward 감쇠가 역효과일 수 있음
+```
+
+### 운영 계획
+
+기본 원칙:
+
+```text
+A1 -> B1 -> B2는 순차 실행이 기본
+```
+
+이유:
+
+- A1이 baseline 복구 여부를 먼저 증명해야 한다
+- B1/B2는 A1 성공 이후에만 해석 가치가 있다
+- Track 간 observation / reward 구조가 달라 순차가 더 안전하다
+
+병렬 실행은 예외적으로만 허용:
+
+```text
+조건:
+- GPU 자원이 충분함
+- Track A와 Track B를 독립 run family로 관리 가능
+- 비교 기준이 혼동되지 않음
 ```
 
 ### Experiment B2: Stronger Phase Probe
