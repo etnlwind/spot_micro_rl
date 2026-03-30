@@ -5,6 +5,64 @@
 
 ---
 
+## 실험 일지
+
+### 출발점
+
+`V49~V53`의 흐름을 거치며 남은 결론은 하나였다.
+
+```text
+reward를 계속 패치하면
+한 문제를 고칠 때마다 다른 exploit가 나온다
+```
+
+즉 `V54`의 출발점은 `reward patch`가 아니라
+`보행 구조 자체를 architecture로 가져가자`였다.
+
+### 처음 가설
+
+```text
+1. gait timing을 reward가 아니라 phase clock이 주도하면
+   exploit가 줄어들 것이다
+2. 기존 reward는 phase를 보조하는 정도로만 남기면 된다
+```
+
+### 실제로 한 일
+
+`V54`는 이전 계열과 달리 구조 전환 버전이었다.
+
+```text
+- phase clock 관측 추가
+- phase contact / clearance 축 도입
+- 기존 gait reward 다수를 제거하거나 약화
+- handoff / bridge / gait_gate를 섞은 전환 구조 설계
+```
+
+### 결과와 한계
+
+실제 런에서는 phase 수식 자체보다
+`phase를 받아낼 baseline locomotion이 없는 상태에서 handoff가 강제된 것`이 더 큰 문제로 드러났다.
+
+즉 `V54`가 남긴 핵심 교훈은:
+
+```text
+phase 구조 자체가 틀렸다기보다
+baseline이 없는 상태에서 phase를 주연으로 올린 것이 너무 빨랐다
+```
+
+### 이후로 이어진 이유
+
+이 결론이 바로 `V55`의 출발점이 된다.
+
+```text
+V54
+- phase-centric handoff 실험
+
+V55
+- baseline recovery first
+- phase probe second
+```
+
 ## 1. 왜 구조 전환이 필요한가
 
 ### V49~V53: reward 패치의 한계

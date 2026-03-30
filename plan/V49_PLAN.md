@@ -5,6 +5,45 @@
 
 ---
 
+## 실험 일지
+
+### 출발점
+
+`V48-C/D`가 무너지면서, 다시 `baseline locomotion` 확보가 최우선이 됐다.
+그래서 `V49`는 `V48-B` 설정으로 돌아가고, 동시에 운영 인프라를 정리하는 버전이었다.
+
+### 실제로 한 일
+
+`V49`의 성격은 두 축이었다.
+
+```text
+1. baseline restore
+2. infrastructure 정비
+```
+
+구체적으로:
+
+```text
+- mass / effort를 원래 값으로 복원
+- curriculum save/restore 추가
+- feature flag로 boot_standing 관리
+- CLI -> Telegram -> Listener 단일 실행 루트 정리
+```
+
+### 결과
+
+```text
+- stride 6.9 복구
+- baseline locomotion은 다시 살아남
+- 하지만 귀뚜라미 보행(front leg 미사용) 발견
+```
+
+### 이후로 이어진 이유
+
+즉 `V49`는 locomotion baseline 복구에는 성공했지만,
+그 위에서 `앞다리 사용 부족`이라는 다음 핵심 문제를 드러낸 버전이다.
+이게 `V50~V53`의 긴 여정으로 이어진다.
+
 ## 1. 왜 Baseline 복원이 필요한가
 
 ### V48-C/D 실패 후

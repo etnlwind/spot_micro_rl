@@ -5,6 +5,45 @@
 
 ---
 
+## 실험 일지
+
+### 출발점
+
+`V47`은 잘 걸었지만 자세가 낮고 다리가 과하게 접혀 보였다.
+그래서 `V48`의 출발점은 `보행 성능을 크게 깨지 않고 자세 품질을 교정할 수 있는가`였다.
+
+### 처음 계획
+
+`V48`은 처음부터 하나의 변경이 아니라 3단 실험이었다.
+
+```text
+V48: standing pose 자체 보정
+V48-B: init height 복원
+V48-C/D: 더 현실적인 mass / torque 조건 시험
+```
+
+### 실제 결과
+
+```text
+V48-B
+- 채택
+- pose / init height 쪽은 유지 가치 확인
+
+V48-C/D
+- 실패
+- realism 조건을 너무 빨리 넣으면 학습 자체가 무너짐
+```
+
+### 이 버전이 남긴 교훈
+
+`V48`은 이후 운영 원칙을 정했다.
+
+```text
+1. baseline locomotion이 없으면 realism을 넣지 말 것
+2. 물리 realism 축과 locomotion 축은 분리할 것
+3. pose correction은 살리고, mass/torque realism은 보류할 것
+```
+
 ## 1. 왜 자세 보정이 필요한가
 
 ### V47 비디오 관찰

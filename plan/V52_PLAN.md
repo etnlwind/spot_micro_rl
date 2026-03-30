@@ -5,6 +5,52 @@
 
 ---
 
+## 실험 일지
+
+### 출발점
+
+`V51`은 "낮은 자세를 완전히 금지하지 못한다"는 한계를 남겼다.
+그래서 `V52`는 anti-crouch를 더 직접적으로 만드는 쪽으로 이동했다.
+
+### 처음 계획
+
+```text
+1. soft height gate는 유지
+2. 너무 낮아지면 min_height termination으로 강제 종료
+3. 필요하면 symmetry/weight도 같이 재설계
+```
+
+### 실제로 한 일
+
+`V52`는 사실 두 단계였다.
+
+```text
+V52
+- min_height termination 추가
+- soft gate 유지
+
+V52.1
+- 실측 기반으로 weight 재설계
+- front_rear_symmetry 등 보조 조정
+```
+
+### 결과
+
+```text
+- height 안정 자체는 성공
+- 하지만 front_lift 하락은 다시 재발
+- 장기적으로 귀뚜라미 보행 고착
+```
+
+### 결정적 발견
+
+이 버전에서 처음으로
+`leg_lift reward의 평균 구조가 앞다리 사용을 오히려 불리하게 만든다`는
+구조적 원인을 문서화했다.
+
+즉 `V52`는 단순 실패가 아니라,
+`앞다리를 왜 버리는가`를 수치적으로 설명해낸 버전이었다.
+
 ## 1. 왜 Min Height Termination이 필요한가
 
 ### V51의 한계

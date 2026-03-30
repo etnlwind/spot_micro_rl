@@ -5,6 +5,49 @@
 
 ---
 
+## 실험 일지
+
+### 출발점
+
+`V44`는 stride를 일부 살렸지만, coupling은 죽은 채 splay만 커졌다.
+즉 `V45`의 출발점은 `stride와 shoulder를 분리해서 제어할 수 있는가`였다.
+
+### 처음 가설
+
+```text
+1. joint_default_pose가 shoulder와 leg를 동시에 묶고 있어서 trade-off가 생긴다
+2. diagonal_coupling은 지금 reward 함수 형태로는 너무 sparse하다
+3. 보행 방법 자체를 가르치는 reward가 더 필요하다
+```
+
+### 실제로 설계한 변경
+
+그래서 `V45`는:
+
+```text
+- joint_default_pose 제거
+- shoulder_neutral로 shoulder만 따로 제어
+- pair coupling / leg lift 계열을 더 직접적으로 복원
+```
+
+### 문서 단계에서의 의미
+
+`V45`는 구현보다 설계 의미가 큰 버전이었다.
+핵심은 `pose penalty를 약하게/강하게 조절하는 방식으로는 문제가 풀리지 않는다`는 걸
+수식 수준에서 분리해냈다는 점이다.
+
+### 이후로 이어진 이유
+
+이 문서가 남긴 결정적 결론은:
+
+```text
+한 번에 다 넣지 말고,
+gait reward 부족 / shoulder-leg 분리 / coupling 진입
+세 가설을 분리해서 보자
+```
+
+즉 바로 다음 `V46`의 3-run 전략으로 이어진다.
+
 ## 1. V42~V44 전체 여정 요약
 
 | 버전 | 핵심 변경 | shoulder | stride | coupling | 교훈 |
