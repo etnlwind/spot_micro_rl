@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V55.A5"
+TRAIN_VERSION = "V55.A5.1"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -28,7 +28,7 @@ _V55_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V55 and "." in TRAIN_VERSION 
 _V55_PHASE_TRACKS = {"B1", "B2", "B3"}
 
 # V54: clean phase-centric handoff
-# V55.A1: baseline recovery (phase OFF)
+# V55.A*: baseline recovery / release-shock ablations (phase OFF)
 # V55.B*: baseline + phase auxiliary
 _PHASE_CLOCK = _IS_V54 or (_IS_V55 and _V55_TRACK in _V55_PHASE_TRACKS)
 _PHASE_AUXILIARY = _IS_V55 and _V55_TRACK in _V55_PHASE_TRACKS
@@ -1187,14 +1187,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ══════════════════════════════════════════════════════════
         if _IS_V55:
             self.curriculum.reward_weights.params["v55_track"] = _V55_TRACK
-            self.curriculum.reward_weights.params["v55_forward_velocity_weight"] = 2.0
-            self.curriculum.reward_weights.params["v55_forward_velocity_bootstrap_weight"] = 8.0
-
-            if _V55_TRACK.startswith("A"):
-                self.rewards.forward_velocity.weight = 16.0
-                self.rewards.forward_velocity_bootstrap.weight = 12.0
-                self.curriculum.reward_weights.params["v55_forward_velocity_weight"] = 16.0
-                self.curriculum.reward_weights.params["v55_forward_velocity_bootstrap_weight"] = 12.0
+            self.rewards.forward_velocity.weight = 16.0
+            self.rewards.forward_velocity_bootstrap.weight = 12.0
+            self.curriculum.reward_weights.params["v55_forward_velocity_weight"] = 16.0
+            self.curriculum.reward_weights.params["v55_forward_velocity_bootstrap_weight"] = 12.0
 
             # V55에서는 V54 handoff를 쓰지 않는다.
             self.curriculum.reward_weights.params["phase_contact_target"] = 0.0
@@ -1202,8 +1198,56 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.curriculum.reward_weights.params["phase_ramp_in_iters"] = 0
             self.curriculum.reward_weights.params["phase_table_enabled"] = True
 
-            if _V55_TRACK in {"B1", "B2", "B3"}:
-                # Track B: 직접 timing heuristic은 끄거나 감쇠하고, phase는 auxiliary로 추가한다.
+            if _V55_TRACK == "A5.1":
+                # A5.1: keep A5 baseline, but soften the iter-500 gait-gate shock
+                # only for the two directly observed posture/splay shock sources.
+                self.curriculum.reward_weights.params["v55_release_soft_ramp_iters"] = 500
+                self.curriculum.reward_weights.params["v55_release_shoulder_neutral_pre"] = -1.0
+                self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = -6.0
+                self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
+                self.curriculum.reward_weights.params["v55_release_stance_width_post"] = -3.0
+
+            elif _V55_TRACK == "A6":
+                self.rewards.base_height_l2.weight = -23.0
+                self.rewards.front_rear_support_balance_penalty.weight = -9.6
+                self.curriculum.reward_weights.params["v55_standing_height_weight"] = 48.0
+                self.curriculum.reward_weights.params["v55_height_bonus_weight"] = 30.0
+                self.curriculum.reward_weights.params["v55_release_soft_ramp_iters"] = 500
+                self.curriculum.reward_weights.params["v55_release_shoulder_neutral_pre"] = -1.0
+                self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = -6.0
+                self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
+                self.curriculum.reward_weights.params["v55_release_stance_width_post"] = -3.0
+
+            if _V55_TRACK == "B1":
+                # B1: additive probe. Baseline structure는 최대한 유지하고 phase를 약하게 추가한다.
+                self.rewards.trot_gait.weight = 5.0
+                self.rewards.diagonal_coupling.weight = 5.0
+                self.rewards.gait_cycle_period.weight = 0.0
+                self.rewards.feet_air_time.weight = 20.0
+                self.rewards.leg_lift.weight = 20.0
+                self.rewards.rear_alternation.weight = 15.0
+                self.rewards.rear_joint_velocity.weight = 12.0
+                self.rewards.stance_propulsion.weight = 8.0
+                self.rewards.foot_clearance.weight = 2.0
+                self.rewards.rear_swing.weight = 6.0
+                phase_contact_weight = 1.5
+                phase_clearance_weight = 0.5
+            elif _V55_TRACK == "B2":
+                # B2: soft replacement. 기존 구조축은 약하게 남기고 phase 비중을 올린다.
+                self.rewards.trot_gait.weight = 2.0
+                self.rewards.diagonal_coupling.weight = 2.0
+                self.rewards.gait_cycle_period.weight = 0.0
+                self.rewards.feet_air_time.weight = 15.0
+                self.rewards.leg_lift.weight = 12.0
+                self.rewards.rear_alternation.weight = 8.0
+                self.rewards.rear_joint_velocity.weight = 8.0
+                self.rewards.stance_propulsion.weight = 6.0
+                self.rewards.foot_clearance.weight = 2.0
+                self.rewards.rear_swing.weight = 4.0
+                phase_contact_weight = 3.0
+                phase_clearance_weight = 1.0
+            elif _V55_TRACK == "B3":
+                # B3: hard phase test. phase가 주도권을 가지도록 직접 heuristic을 크게 줄인다.
                 self.rewards.trot_gait.weight = 0.0
                 self.rewards.diagonal_coupling.weight = 0.0
                 self.rewards.gait_cycle_period.weight = 0.0
@@ -1212,16 +1256,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.rewards.rear_alternation.weight = 5.0
                 self.rewards.rear_joint_velocity.weight = 4.0
                 self.rewards.stance_propulsion.weight = 4.0
-                self.rewards.foot_clearance.weight = 3.0
+                self.rewards.foot_clearance.weight = 2.0
                 self.rewards.rear_swing.weight = 3.0
-
-                # A1/B1/B2 비교를 위해 Track B도 locomotion baseline은 유지한다.
-                if _V55_TRACK in {"B2", "B3"}:
-                    phase_contact_weight = 5.0
-                    phase_clearance_weight = 1.5
-                else:
-                    phase_contact_weight = 3.0
-                    phase_clearance_weight = 0.75
+                phase_contact_weight = 5.0
+                phase_clearance_weight = 1.5
             else:
                 phase_contact_weight = 0.0
                 phase_clearance_weight = 0.0

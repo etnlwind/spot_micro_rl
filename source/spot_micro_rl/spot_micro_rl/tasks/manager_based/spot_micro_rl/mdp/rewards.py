@@ -3639,7 +3639,12 @@ def _curriculum_apply_weights(
 # ── 로깅 대상 핵심 term 정의 ──
 _LOG_WEIGHT_TERMS = [
     "forward_velocity",
+    "forward_velocity_bootstrap",
     "trot_gait",
+    "standing_height",
+    "height_bonus",
+    "shoulder_neutral",
+    "stance_width_penalty",
     "joint_vel_l2",
     "dof_acc_l2",
     # V26 existence floor (없으면 skip)
@@ -3743,11 +3748,14 @@ def _log_v55_audit_snapshot(env: ManagerBasedRLEnv, iteration: int, v55_track: s
     focus_terms = [
         "boot_standing",
         "standing_height",
+        "height_bonus",
         "feet_air_time",
         "forward_velocity",
         "forward_velocity_bootstrap",
         "trot_gait",
         "diagonal_coupling",
+        "shoulder_neutral",
+        "stance_width_penalty",
         "phase_contact",
         "phase_clearance",
         "joint_vel_l2",
@@ -3766,13 +3774,15 @@ def _log_v55_audit_snapshot(env: ManagerBasedRLEnv, iteration: int, v55_track: s
     print(f"{'=' * 60}")
 
 
-def _apply_v55_penalty_overrides(
+def _apply_v55_runtime_overrides(
     env: ManagerBasedRLEnv,
     action_rate_weight: float | None,
     joint_vel_weight: float | None,
     dof_acc_weight: float | None,
     forward_velocity_weight: float | None,
     forward_velocity_bootstrap_weight: float | None,
+    standing_height_weight: float | None = None,
+    height_bonus_weight: float | None = None,
 ) -> None:
     overrides = {
         "action_rate_l2": action_rate_weight,
@@ -3780,6 +3790,45 @@ def _apply_v55_penalty_overrides(
         "dof_acc_l2": dof_acc_weight,
         "forward_velocity": forward_velocity_weight,
         "forward_velocity_bootstrap": forward_velocity_bootstrap_weight,
+        "standing_height": standing_height_weight,
+        "height_bonus": height_bonus_weight,
+    }
+    for term_name, weight in overrides.items():
+        if weight is None:
+            continue
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = float(weight)
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+
+def _apply_v55_release_soft_ramp(
+    env: ManagerBasedRLEnv,
+    iteration: int,
+    ramp_iters: int,
+    shoulder_pre: float | None,
+    shoulder_post: float | None,
+    stance_pre: float | None,
+    stance_post: float | None,
+) -> None:
+    if ramp_iters <= 0:
+        ramp_iters = 1
+    release_iter = getattr(env, "_v47_boot_gate_released_iter", -1)
+    if release_iter is None or release_iter < 0:
+        alpha = 0.0
+    else:
+        alpha = min(1.0, max(0.0, (iteration - release_iter) / float(ramp_iters)))
+
+    def _blend(pre: float | None, post: float | None) -> float | None:
+        if pre is None or post is None:
+            return None
+        return float(pre + (post - pre) * alpha)
+
+    overrides = {
+        "shoulder_neutral": _blend(shoulder_pre, shoulder_post),
+        "stance_width_penalty": _blend(stance_pre, stance_post),
     }
     for term_name, weight in overrides.items():
         if weight is None:
@@ -4002,6 +4051,13 @@ def reward_weight_curriculum(
     v55_dof_acc_weight: float | None = None,
     v55_forward_velocity_weight: float | None = None,
     v55_forward_velocity_bootstrap_weight: float | None = None,
+    v55_standing_height_weight: float | None = None,
+    v55_height_bonus_weight: float | None = None,
+    v55_release_soft_ramp_iters: int = 0,
+    v55_release_shoulder_neutral_pre: float | None = None,
+    v55_release_shoulder_neutral_post: float | None = None,
+    v55_release_stance_width_pre: float | None = None,
+    v55_release_stance_width_post: float | None = None,
     # 로깅
     log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
@@ -4171,14 +4227,26 @@ def reward_weight_curriculum(
         if weight_parts:
             print(f"  init weights: {', '.join(weight_parts)}")
         if v55_track:
-            _apply_v55_penalty_overrides(
+            _apply_v55_runtime_overrides(
                 env,
                 action_rate_weight=v55_action_rate_weight,
                 joint_vel_weight=v55_joint_vel_weight,
                 dof_acc_weight=v55_dof_acc_weight,
                 forward_velocity_weight=v55_forward_velocity_weight,
                 forward_velocity_bootstrap_weight=v55_forward_velocity_bootstrap_weight,
+                standing_height_weight=v55_standing_height_weight,
+                height_bonus_weight=v55_height_bonus_weight,
             )
+            if v55_release_soft_ramp_iters > 0:
+                _apply_v55_release_soft_ramp(
+                    env,
+                    iteration=iteration,
+                    ramp_iters=v55_release_soft_ramp_iters,
+                    shoulder_pre=v55_release_shoulder_neutral_pre,
+                    shoulder_post=v55_release_shoulder_neutral_post,
+                    stance_pre=v55_release_stance_width_pre,
+                    stance_post=v55_release_stance_width_post,
+                )
         if v55_track:
             _log_v55_audit_snapshot(env, iteration, v55_track)
         return None
@@ -4597,14 +4665,26 @@ def reward_weight_curriculum(
     )
 
     if v55_track:
-        _apply_v55_penalty_overrides(
+        _apply_v55_runtime_overrides(
             env,
             action_rate_weight=v55_action_rate_weight,
             joint_vel_weight=v55_joint_vel_weight,
             dof_acc_weight=v55_dof_acc_weight,
             forward_velocity_weight=v55_forward_velocity_weight,
             forward_velocity_bootstrap_weight=v55_forward_velocity_bootstrap_weight,
+            standing_height_weight=v55_standing_height_weight,
+            height_bonus_weight=v55_height_bonus_weight,
         )
+        if v55_release_soft_ramp_iters > 0:
+            _apply_v55_release_soft_ramp(
+                env,
+                iteration=iteration,
+                ramp_iters=v55_release_soft_ramp_iters,
+                shoulder_pre=v55_release_shoulder_neutral_pre,
+                shoulder_post=v55_release_shoulder_neutral_post,
+                stance_pre=v55_release_stance_width_pre,
+                stance_post=v55_release_stance_width_post,
+            )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──
     if iteration % log_interval == 0:
