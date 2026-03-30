@@ -260,99 +260,236 @@ dof_acc_l2     = -2e-5
 
 ---
 
-## 7. A5 / A5.1 최신 판정
+## 7. V55 실험 일지
 
-### 7.1 A5 결과
+이 섹션은 `A1 -> A5.3`까지의 흐름을 시간순으로 정리한 것이다.
+핵심은 "처음 계획이 무엇이었고, 실제로 무엇이 구현됐고, 결과가 어땠으며,
+그래서 왜 다음 실험으로 넘어갔는가"를 한 번에 읽히게 하는 것이다.
 
-`A5`는 STAND phase에서는 가장 좋은 baseline recovery를 보였다.
+### 7.1 출발점: 왜 V55를 따로 만들었는가
 
-- `ep_len`이 `248`까지 상승
-- `stride_length`가 `2.06`까지 열림
-- `diagonal_coupling_raw`가 `0.52` 수준까지 상승
+처음 계획은 단순했다.
 
-하지만 `iter 500`에서 gait gate release가 기록된 직후 붕괴했다.
+```text
+1. V54의 handoff collapse를 피한다
+2. 먼저 baseline locomotion을 복구한다
+3. 그 다음 phase를 약하게 얹어서 probe로 검증한다
+```
 
-확인된 사실:
+즉 `V55`는 처음부터 `phase-centric run`이 아니라
+`baseline recovery first, phase probe second`를 위한 새 family였다.
 
-- `_v47_boot_gate_released_iter = 500`
-- `time_out -> min_height`로 termination 패턴 급변
-- `shoulder_neutral`, `stance_width_penalty` 등 posture/splay 관련 항목이 release 이후 walking 값으로 강해짐
+### 7.2 A1: baseline recovery 첫 시도
 
-즉 현재 1차 문제는 `phase`가 아니라 `iter 500 release shock`다.
+원래 의도:
 
-### 7.2 A5.1 첫 시도에서 확인된 것
+```text
+- phase OFF
+- phase reward OFF
+- baseline locomotion만 복구
+- penalty는 임시 시작값으로 약하게 시작
+```
 
-`A5.1`의 목적은 `A5` baseline은 유지하고,
-release 이후 `shoulder_neutral`, `stance_width_penalty` 두 항목만 `500 iter`에 걸쳐 soft ramp 하는 것이었다.
+하지만 실제 구현/런타임에서는
+`env_cfg`에서 설정한 penalty 값이 `STAND phase table`에 의해 다시 덮였다.
 
-첫 시도에서 확인된 사실:
+이 실험이 남긴 핵심 교훈:
 
-- `curriculum_500.pt`에는 여전히
-  - `shoulder_neutral = -6.0`
-  - `stance_width_penalty = -3.0`
-  이 저장됨
-- `iter 500` 이후 collapse도 재발
+```text
+1. 코드에 적힌 값과 실제 적용값은 다를 수 있다
+2. curriculum_0.pt를 보지 않으면 구현 성공 여부를 말할 수 없다
+3. A1은 완전한 의도 실험은 아니었지만,
+   초기 ep_len 상승 자체는 가장 좋았던 축이었다
+```
 
-처음에는 이것을 "`soft ramp 가설 실패`"로 볼 수 있었지만,
-코드 재검증 결과 그 해석은 틀렸다.
+즉 `A1`은 "구현은 어긋났지만 baseline recovery는 잘 되는 방향"이라는
+첫 단서를 줬다.
 
-### 7.3 구조적 버그 원인
+### 7.3 A2: penalty ownership 정리 시도
+
+문제 의식:
+
+```text
+A1은 penalty가 의도대로 적용되지 않았다.
+그럼 V55가 의도한 penalty를 runtime에서 강제로 유지해보자.
+```
+
+실제로 한 것:
+
+```text
+- action_rate / joint_vel / dof_acc를 V55 값으로 runtime override
+```
+
+결과:
+
+```text
+- boot가 급격히 약해짐
+- ep_len이 짧아짐
+- dof_acc penalty dominance가 다시 커짐
+```
+
+결론:
+
+```text
+A1의 상대적 성공은 "penalty를 STAND table에 맡겼기 때문"일 가능성이 높다.
+즉 penalty ownership을 V55가 직접 가져가는 방향은 baseline recovery에 불리했다.
+```
+
+### 7.4 A3: penalty를 일부 풀고 forward를 더 올린 시도
+
+문제 의식:
+
+```text
+A2는 penalty가 너무 강했다.
+그럼 dof_acc를 완화하고, locomotion drive를 더 올려보자.
+```
+
+실제로 의도한 것:
+
+```text
+- dof_acc 완화
+- forward_velocity / bootstrap 강화
+```
+
+하지만 실제 런타임에서는
+`forward` 2개가 다시 `STAND phase table` 값으로 덮였다.
+
+결론:
+
+```text
+A3는 가설을 제대로 시험한 run이 아니었다.
+penalty 일부만 바뀌고, forward 강화는 실적용되지 않았다.
+```
+
+### 7.5 A4: forward ownership까지 정리한 시도
+
+문제 의식:
+
+```text
+A3가 무효였던 이유는 forward 2개가 runtime에서 유지되지 않았기 때문이다.
+그럼 forward까지 ownership을 V55가 직접 가져오자.
+```
+
+실제로 한 것:
+
+```text
+- forward_velocity / bootstrap runtime override 고정
+- penalty는 A3 계열 유지
+```
+
+결과:
+
+```text
+- forward 2개는 실제로 적용됨
+- 하지만 boot quality는 좋지 않았음
+- 살아 있으면서 걷기보다는, penalty에 눌린 채 짧게 끝나는 패턴
+```
+
+결론:
+
+```text
+forward 자체를 강하게 미는 것만으로는 해결되지 않았다.
+오히려 STAND phase penalty와 forward 공격성이 서로 잘 맞지 않는다는 의심이 생겼다.
+```
+
+### 7.6 A5: penalty는 STAND table로 되돌리고, forward 16/12만 유지
+
+문제 의식:
+
+```text
+A2~A4를 보면, penalty는 V55가 직접 쥐는 것보다
+legacy STAND table에 맡기는 쪽이 baseline recovery에 유리해 보였다.
+```
+
+실제로 한 것:
+
+```text
+- penalty 3개는 STAND phase table 관리로 복귀
+- forward_velocity / bootstrap만 16 / 12로 유지
+```
+
+결과:
+
+```text
+- STAND phase에서는 역대 V55 최고
+- ep_len 248
+- stride_length 2.06
+- diagonal_coupling_raw 0.52
+```
+
+하지만 `iter 500` 직후 붕괴:
+
+```text
+- _v47_boot_gate_released_iter = 500
+- termination이 time_out 중심에서 min_height 중심으로 급변
+- release 이후 walking penalty와 충돌
+```
+
+즉 `A5`는
+"STAND phase baseline recovery는 성공"
+"release 이후 transition은 실패"
+를 동시에 보여줬다.
+
+### 7.7 A5.1: 2개 shock source만 완화
+
+처음 해석:
+
+```text
+iter 500에서 직접 점프가 확인된 핵심은
+- shoulder_neutral
+- stance_width_penalty
+```
+
+그래서 `A5.1`의 가설은:
+
+```text
+이 2개만 soft ramp 하면 collapse가 완화될 것이다.
+```
+
+첫 시도 결과는 해석하면 안 됐다.
+왜냐하면 이후 재검증에서 구조적 버그가 발견됐기 때문이다.
+
+### 7.8 A5.1 첫 시도는 왜 무효였는가
 
 `reward_weight_curriculum()` 내부에서:
 
 ```text
 1. gait_gate release 이후 walking weight 적용
 2. _all_alphas_done 또는 "실제 변화 없음"이면 조기 return
-3. 그 아래쪽의 V55 runtime override / soft ramp 코드에 도달하지 못함
+3. 그 아래쪽의 V55 soft ramp/override 코드에 도달 못 함
 ```
 
-즉 첫 `A5.1`은 가설을 시험한 run이 아니라,
-`soft ramp가 지속 적용되지 못하는 구현 버그가 섞인 run`이었다.
+즉 첫 `A5.1`은
+가설 실패 run이 아니라
+`soft ramp 지속 적용 버그가 섞인 run`이었다.
 
-### 7.4 수정 완료 사항
+### 7.9 A5.1 재검증: 버그 수정 후에도 충분하지 않음
 
-현재 코드에서는 다음을 수정했다.
-
-- `_all_alphas_done` 조기 return 전에 V55 runtime override 실행
-- `실제 변화 없음` 조기 return 전에 V55 runtime override 실행
-- 따라서 `A5.1` soft ramp가 iter 500 이후에도 매 호출마다 계속 적용됨
-
-이제야 `A5.1`이 실제로 검증 가능한 상태가 되었다.
-
-### 7.5 A5.1 재검증 결과
-
-버그 수정 후 `A5.1` fresh start를 다시 돌린 결과:
-
-- `iter 500` 이후 collapse는 여전히 재발
-- `min_height` termination이 다시 지배적
-- 따라서 `shoulder_neutral`, `stance_width_penalty` 두 항목만으로는
-  iter 500 release shock를 충분히 완화하지 못했다
-
-중요:
+버그 수정 후 다시 fresh start로 검증한 결과:
 
 ```text
-이 결론은
-"두 항목이 원인이 아니다"
+- iter 500 이후 collapse 재발
+- min_height termination이 다시 지배적
+```
+
+중요한 해석:
+
+```text
+"shoulder_neutral / stance_width_penalty가 원인이 아니다"
 가 아니라
-"두 항목만으로는 충분하지 않았다"
-는 뜻이다.
+"그 2개만으로는 충분하지 않았다"
 ```
 
-### 7.6 A5.2 설계
+### 7.10 A5.2: shock group을 7개로 확대
 
-`A5.2`는 `A5.1`을 버리는 실험이 아니라,
-기존 2개 posture/splay ramp를 유지한 채
-다음으로 유력한 shock source를 추가로 묶는 실험이다.
-
-핵심 원칙:
+문제 의식:
 
 ```text
-1. 여러 항목을 한 번에 다 바꾸지 않는다
-2. 그래도 A5.1보다 한 단계 넓은 shock group을 본다
-3. per_leg_propulsion_floor, undesired_contacts는 아직 보류한다
+A5.1은 2개 shock source만 완화했지만 충분하지 않았다.
+그럼 다음으로 유력한 diff / floor 항목을 추가해보자.
 ```
 
-`A5.2` soft ramp 대상:
+실제로 추가한 항목:
 
 ```text
 기존 유지
@@ -367,76 +504,39 @@ release 이후 `shoulder_neutral`, `stance_width_penalty` 두 항목만 `500 ite
 - per_leg_contact_floor
 ```
 
-즉 총 7개 항목을
-`iter 500 release -> 500 iter ramp`로 완화한다.
-
-보류 항목:
+결과:
 
 ```text
-A5.3 후보
-- per_leg_propulsion_floor
-- undesired_contacts
+- 추가한 5개는 실제로 ramp 흔적이 보임
+- 하지만 전체적으로는 다시 min_height collapse
 ```
 
-### 7.7 다음 검증 규칙
-
-`A5.2`는 반드시 fresh start로 돌린다.
-
-검증 포인트:
+결론:
 
 ```text
-iter 500 직후
-- reward_manager weight 기준으로
-  7개 soft ramp 대상이 모두 pre 값 근처
-
-iter 500 ~ 1000
-- 7개 항목이 목표 post 값으로 점진적으로 이동
-- A5처럼 즉시 min_height 99% 붕괴가 재발하는지 여부 확인
+release shock 항목을 더 늘리는 것만으로는 충분하지 않았다.
 ```
 
-주의:
+### 7.11 A5.2가 남긴 더 근본적인 질문
+
+`A5`, `A5.1`, `A5.2`를 묶어 보면
+반복되는 패턴이 보인다.
 
 ```text
-curriculum_500.pt만으로 runtime soft ramp 성공 여부를 단정하지 않는다.
-가능하면 iter 499/500/501의 실제 term weight 로그를 직접 본다.
+STAND phase에서는 매우 잘 감
+iter 500 gait_gate release 이후에는 반복 붕괴
 ```
 
-해석 주의:
+그래서 질문이 바뀌었다.
 
 ```text
-이 값들은 "V47 값을 복원한 표"가 아니다.
-특히 dof_acc_l2는 V47 계열과 다른 임시 시작값이다.
+"어떤 penalty가 shock를 주는가?"
+보다
+"release 이전에 어떤 policy를 학습했는가?"
+를 먼저 봐야 하는 것 아닌가?
 ```
 
-따라서 구현 시:
-
-- `action_rate_l2`, `joint_vel_l2`는 현재 시작점으로 사용
-- `dof_acc_l2`는 `iter 100 audit` 후 조건부 조정 대상으로 본다
-
-중요:
-
-- 이 중 `leg_lift 15 -> 8`은 40%가 아니라 `53%`
-- 수치 표현은 문서에서 정확히 유지한다
-
-### 7.8 A5.2 결과와 해석
-
-`A5.2`는 `A5.1`보다 더 넓은 shock group을 soft ramp 했지만,
-결과적으로 `iter 500` 이후 collapse를 막지 못했다.
-
-현재까지 확인된 사실:
-
-- `A5.2`에서 새로 추가한 5개 soft ramp 항목은 실제로 점진 적용 흔적이 보임
-- 하지만 전체 학습 결과는 다시 `min_height` termination 지배로 붕괴
-- 즉 `release shock 항목을 더 늘리는 것`만으로는 충분하지 않았다
-
-이 해석의 의미:
-
-```text
-문제는 특정 penalty 1~2개가 너무 세다는 것만이 아니라,
-release 이전 STAND phase에서 policy가 어떤 전략을 학습했는가일 수 있다.
-```
-
-### 7.9 현재 최우선 가설
+### 7.12 현재 최우선 가설
 
 가장 유력한 설명은 다음이다.
 
@@ -459,34 +559,36 @@ A5 계열
 walking phase 요구와 양립 불가한 것일 수 있다.
 ```
 
-### 7.10 다음 우선 실험 방향
+### 7.13 A5.3: 현재 최우선 실험
 
-다음 실험(`A5.3` 또는 별도 `A7`)의 우선순위는 아래와 같다.
+그래서 다음 실험(`A5.3` 또는 별도 `A7`)의 목표는
+shock 항목을 더 늘려보는 것이 아니라,
+`STAND phase에서 무엇을 학습하게 할지`를 바꾸는 것이다.
+
+실험 정의:
 
 ```text
-1. STAND phase에서는 forward override를 제거한다
-   - forward_velocity = phase table STAND 값 (2.0)
-   - forward_velocity_bootstrap = STAND 값 (8.0)
+STAND phase
+- forward_velocity = phase table STAND 값 (2.0)
+- forward_velocity_bootstrap = STAND 값 (8.0)
+- 즉 STAND에서는 공격적 forward override 제거
 
-2. gait_gate release 이후에만
-   forward_velocity 2.0 -> 16.0
-   forward_velocity_bootstrap 8.0 -> 12.0
-   를 500 iter에 걸쳐 soft ramp 한다
+gait_gate release 이후 500 iter soft-ramp
+- forward_velocity: 2.0 -> 16.0
+- forward_velocity_bootstrap: 8.0 -> 12.0
 
-3. forward 항목도 ownership 충돌 없이
-   V55 전용 경로에서만 제어되게 한다
-
-4. iter 499 / 500 / 501에서
-   실제 reward_manager weight 로그를 직접 남긴다
+공통 원칙
+- forward 항목도 ownership 충돌 없이 V55 전용 경로에서만 제어
+- iter 499 / 500 / 501 실제 weight direct debug log 기록
+- A5.2의 shock 완화 가설과는 분리해서 해석
 ```
 
-평가:
+이 실험이 중요한 이유:
 
 ```text
-이 방향은
-- 17개 전체 soft ramp보다 원인 분리가 잘 되고
-- gait_gate 제거보다 V47 baseline ecology를 더 잘 보존하며
-- 지금까지 실패한 penalty-shock 완화보다 더 근본 원인을 직접 건드린다
+1. A5.1 / A5.2는 "release shock 완화" 축을 이미 충분히 보여줬다
+2. 이제는 "STAND에서 공격적 policy를 학습시키는 것이 문제인가"를 직접 시험해야 한다
+3. 이건 V47과 A5의 차이를 가장 직접적으로 검증하는 경로다
 ```
 
 ---
