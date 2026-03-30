@@ -194,8 +194,9 @@ def _handle_start(pending_confirm_ref: list, headless: bool = True) -> None:
             })
         common.send_text(
             f"<b>{common.TRAIN_VERSION} [{mode_str}]</b>\n"
-            f"iter 0 from-scratch.\n"
-            f"<i>Y to confirm (60s)</i>",
+            f"새 훈련 시작 (iter 0)\n\n"
+            f"승인하시겠습니까? [Yes / No]\n"
+            f"<i>(60초 내 응답)</i>",
             LOG, parse_mode="HTML",
         )
     else:
