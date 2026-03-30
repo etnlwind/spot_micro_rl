@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: 설계 확정 + A4 1차 구현 완료
+> 상태: 설계 확정 + A5 1차 구현 완료
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -276,7 +276,8 @@ phase observation = OFF
 phase reward      = OFF
 handoff           = 없음
 fallback          = 없음
-penalty           = 임시 완화값으로 시작
+penalty           = STAND phase table의 점진 ramp를 그대로 사용
+forward drive     = V55 override로만 보강
 ```
 
 V54 코드 처리 방침:
@@ -325,22 +326,23 @@ iter 500
 iter 100에서 반드시 볼 것:
 
 - 실제 active reward weight
-- `dof_acc_l2`, `joint_vel_l2`, `action_rate_l2` 실효 크기
+- `dof_acc_l2`, `joint_vel_l2`, `action_rate_l2`가 STAND table 값으로 유지되는지
 - `dof_acc_l2` raw magnitude
+- `forward_velocity`, `forward_velocity_bootstrap`가 override 값으로 유지되는지
 - `boot_standing`, `standing_height`, `feet_air_time`, `trot_gait`, `diagonal_coupling` 우세 항목
 - 비의도 reward dominance 여부
 
-`dof_acc_l2` 판단 로직:
+`A5` 판단 로직:
 
 ```text
-1. raw magnitude 확인
-2. weighted contribution 확인
-3. boot positive 대비 비율 확인
+1. penalty 3개는 override하지 않는다
+2. STAND phase table의 점진 ramp를 baseline 기준으로 사용한다
+3. override는 phase table이 충분히 밀지 못하는 forward drive 2개에만 적용한다
+4. iter 100에서 raw magnitude와 weighted contribution을 보고 penalty 조정 필요성을 재판정한다
 
 판정:
-- 과도하면 현재 완화값 유지
-- 안정적이면 상향 조정 검토
-- 강한 복원은 "조건부 검토"이지 기본값이 아님
+- STAND table만으로도 붕괴하면 그때 penalty 재조정을 검토
+- 기본값은 "penalty override 최소화"다
 ```
 
 A1 -> B1 전환 조건:
@@ -536,15 +538,15 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.A4
+- TRAIN_VERSION = V55.A5
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
 - A-track: phase observation OFF
 - A-track: phase reward OFF
 - B-track: phase auxiliary ON
-- V55 전용 penalty override 유지
 - V55 전용 forward override 유지
+- penalty는 legacy STAND table ramp 유지
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
@@ -552,7 +554,7 @@ for N updates
 - 다음 단계는 fresh start 기준 runtime validation이다
 ```
 
-### 10.1 A4에서 실제로 막은 경로
+### 10.1 A5에서 실제로 막은 경로
 
 `env_cfg` 값만 바꾸는 것으로는 충분하지 않았다.
 
@@ -567,9 +569,10 @@ legacy STAND phase table이 runtime에서 아래 항목을 다시 덮어썼다
 - forward_velocity_bootstrap
 ```
 
-`A2`는 penalty 3개를 막았고, `A4`는 forward 2개까지 포함해 총 5개를 `V55 runtime override`로 유지한다.
+`A2/A4`는 penalty까지 override했지만, `A5`는 forward 2개만 `V55 runtime override`로 유지한다.
+penalty 3개는 다시 STAND phase table이 관리하게 둔다.
 
-### 10.2 A4 fresh start 검증 규칙
+### 10.2 A5 fresh start 검증 규칙
 
 `코드값`이 아니라 `curriculum_0.pt`의 `_reward_weights`로 판정한다.
 
@@ -577,10 +580,11 @@ legacy STAND phase table이 runtime에서 아래 항목을 다시 덮어썼다
 
 ```text
 action_rate_l2             = -0.3
-joint_vel_l2               = -0.1
-dof_acc_l2                 = -5e-6
+joint_vel_l2               = -0.05
+dof_acc_l2                 = -5e-7
 forward_velocity           = 16.0
 forward_velocity_bootstrap = 12.0
+standing_height            = 40.0
 phase_contact              = 없음
 phase_clearance            = 없음
 ```
@@ -592,9 +596,9 @@ env_cfg에 적혀 있어도 충분하지 않다.
 curriculum_0.pt에서 실제 적용값이 맞아야 구현 완료로 본다.
 ```
 
-### 10.3 A4 초기 학습 판정
+### 10.3 A5 초기 학습 판정
 
-초기 `A4` 런은 아래 순서로 판정한다.
+초기 `A5` 런은 아래 순서로 판정한다.
 
 ```text
 iter 0
