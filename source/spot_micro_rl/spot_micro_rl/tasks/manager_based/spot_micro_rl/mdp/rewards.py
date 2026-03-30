@@ -64,12 +64,15 @@ def phase_contact_reward(
     duty_factor: float = 0.55,
     contact_threshold: float = 1.0,
     standing_vel_threshold: float = 0.08,
+    aggregation_mode: str = "mean",
+    ema_alpha: float = 0.0,
+    min_target: float = 0.60,
 ) -> torch.Tensor:
     """V54: Phase-conditioned contact reward — phase clock의 주연 reward.
 
     stance phase에서 접지, swing phase에서 이탈하면 보상.
     standing command (|vel| < threshold)일 때는 all-stance (4발 접지).
-    4발 match의 mean (binary score이므로 교훈#30 해당 없음).
+    V54.4: per-leg EMA + floor aggregation 옵션으로 one-leg sacrifice exploit 억제.
     범위 [0, 1] — match=1, mismatch=0.
     V54.3: boot-gate 제거 — curriculum이 weight를 0→20으로 ramp (soft handoff).
     """
@@ -100,7 +103,33 @@ def phase_contact_reward(
                                    expected_contact)
 
     match = (is_contact == expected_contact).float()
-    return match.mean(dim=1)  # 범위 [0, 1]
+    if ema_alpha > 0.0:
+        if not hasattr(env, "_phase_contact_ema"):
+            env._phase_contact_ema = match.clone()
+        else:
+            reset_mask = (env.episode_length_buf <= 1).unsqueeze(1)
+            env._phase_contact_ema = torch.where(
+                reset_mask,
+                match,
+                ema_alpha * env._phase_contact_ema + (1.0 - ema_alpha) * match,
+            )
+        score_src = env._phase_contact_ema
+    else:
+        score_src = match
+
+    mean_score = score_src.mean(dim=1)
+    if aggregation_mode == "mean":
+        return mean_score
+
+    min_score = score_src.min(dim=1).values
+    if aggregation_mode == "min":
+        return min_score
+    if aggregation_mode == "mean_min":
+        return 0.5 * (mean_score + min_score)
+    if aggregation_mode == "floor":
+        floor_gate = torch.clamp(min_score / max(min_target, 1.0e-6), 0.0, 1.0)
+        return mean_score * floor_gate
+    raise ValueError(f"Unsupported phase_contact aggregation_mode={aggregation_mode}")
 
 
 def phase_foot_clearance(
@@ -3852,6 +3881,7 @@ def reward_weight_curriculum(
     phase_contact_target: float = 0.0,      # 0이면 비활성
     phase_clearance_target: float = 0.0,    # 0이면 비활성
     phase_ramp_in_iters: int = 500,         # gait_gate 해제 후 몇 iter에 걸쳐 target까지
+    phase_table_enabled: bool = True,       # False면 legacy STAND/WALK/TROT phase table 비활성
     # 로깅
     log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
@@ -3921,43 +3951,44 @@ def reward_weight_curriculum(
         )
         env._crr_last_update = iteration
         env._crr_gate_paused = False
-        _curriculum_apply_weights(
-            env,
-            env._crr_alpha12,
-            env._crr_alpha23,
-            env._crr_validity_alpha,
-            validity_limb_usage_initial,
-            validity_limb_usage_final,
-            validity_rear_diff_initial,
-            validity_rear_diff_final,
-            floor_alpha=env._crr_floor_alpha,
-            load_alpha=env._crr_load_alpha,
-            floor_limb_usage_initial=floor_limb_usage_initial,
-            floor_limb_usage_final=floor_limb_usage_final,
-            floor_per_leg_contact_initial=floor_per_leg_contact_initial,
-            floor_per_leg_contact_final=floor_per_leg_contact_final,
-            floor_per_leg_propulsion_initial=floor_per_leg_propulsion_initial,
-            floor_per_leg_propulsion_final=floor_per_leg_propulsion_final,
-            load_rear_usage_diff_final=load_rear_usage_diff_final,
-            load_front_usage_diff_final=load_front_usage_diff_final,
-            load_rear_prop_diff_final=load_rear_prop_diff_final,
-            load_front_rear_balance_final=load_front_rear_balance_final,
-            load_front_prop_diff_final=load_front_prop_diff_final,
-            validity_gate_alpha=env._crr_validity_gate_alpha,
-            validity_gate_initial=validity_gate_initial,
-            validity_gate_final=validity_gate_final,
-            propulsion_floor_alpha=env._crr_propulsion_floor_alpha,
-            band_alpha=env._crr_band_alpha,
-            band_contact_initial=band_contact_initial,
-            band_contact_final=band_contact_final,
-            band_propulsion_initial=band_propulsion_initial,
-            band_propulsion_final=band_propulsion_final,
-            coop_alpha=env._crr_coop_alpha,
-            coop_usage_initial=coop_usage_initial,
-            coop_usage_final=coop_usage_final,
-            coop_reward_initial=coop_reward_initial,
-            coop_reward_final=coop_reward_final,
-        )
+        if phase_table_enabled:
+            _curriculum_apply_weights(
+                env,
+                env._crr_alpha12,
+                env._crr_alpha23,
+                env._crr_validity_alpha,
+                validity_limb_usage_initial,
+                validity_limb_usage_final,
+                validity_rear_diff_initial,
+                validity_rear_diff_final,
+                floor_alpha=env._crr_floor_alpha,
+                load_alpha=env._crr_load_alpha,
+                floor_limb_usage_initial=floor_limb_usage_initial,
+                floor_limb_usage_final=floor_limb_usage_final,
+                floor_per_leg_contact_initial=floor_per_leg_contact_initial,
+                floor_per_leg_contact_final=floor_per_leg_contact_final,
+                floor_per_leg_propulsion_initial=floor_per_leg_propulsion_initial,
+                floor_per_leg_propulsion_final=floor_per_leg_propulsion_final,
+                load_rear_usage_diff_final=load_rear_usage_diff_final,
+                load_front_usage_diff_final=load_front_usage_diff_final,
+                load_rear_prop_diff_final=load_rear_prop_diff_final,
+                load_front_rear_balance_final=load_front_rear_balance_final,
+                load_front_prop_diff_final=load_front_prop_diff_final,
+                validity_gate_alpha=env._crr_validity_gate_alpha,
+                validity_gate_initial=validity_gate_initial,
+                validity_gate_final=validity_gate_final,
+                propulsion_floor_alpha=env._crr_propulsion_floor_alpha,
+                band_alpha=env._crr_band_alpha,
+                band_contact_initial=band_contact_initial,
+                band_contact_final=band_contact_final,
+                band_propulsion_initial=band_propulsion_initial,
+                band_propulsion_final=band_propulsion_final,
+                coop_alpha=env._crr_coop_alpha,
+                coop_usage_initial=coop_usage_initial,
+                coop_usage_final=coop_usage_final,
+                coop_reward_initial=coop_reward_initial,
+                coop_reward_final=coop_reward_final,
+            )
         # V28.1: residency relay + symmetry + exit + min-leg factor 초기 적용
         _curriculum_apply_v281_weights(
             env,
@@ -4361,43 +4392,44 @@ def reward_weight_curriculum(
     env._crr_front_swing_alpha = new_front_swing
 
     # ── 가중치 적용 ──
-    _curriculum_apply_weights(
-        env,
-        new_12,
-        new_23,
-        new_validity,
-        validity_limb_usage_initial,
-        validity_limb_usage_final,
-        validity_rear_diff_initial,
-        validity_rear_diff_final,
-        floor_alpha=new_floor,
-        load_alpha=new_load,
-        floor_limb_usage_initial=floor_limb_usage_initial,
-        floor_limb_usage_final=floor_limb_usage_final,
-        floor_per_leg_contact_initial=floor_per_leg_contact_initial,
-        floor_per_leg_contact_final=floor_per_leg_contact_final,
-        floor_per_leg_propulsion_initial=floor_per_leg_propulsion_initial,
-        floor_per_leg_propulsion_final=floor_per_leg_propulsion_final,
-        load_rear_usage_diff_final=load_rear_usage_diff_final,
-        load_front_usage_diff_final=load_front_usage_diff_final,
-        load_rear_prop_diff_final=load_rear_prop_diff_final,
-        load_front_rear_balance_final=load_front_rear_balance_final,
-        load_front_prop_diff_final=load_front_prop_diff_final,
-        validity_gate_alpha=new_validity_gate,
-        validity_gate_initial=validity_gate_initial,
-        validity_gate_final=validity_gate_final,
-        propulsion_floor_alpha=new_prop_floor,
-        band_alpha=new_band,
-        band_contact_initial=band_contact_initial,
-        band_contact_final=band_contact_final,
-        band_propulsion_initial=band_propulsion_initial,
-        band_propulsion_final=band_propulsion_final,
-        coop_alpha=new_coop,
-        coop_usage_initial=coop_usage_initial,
-        coop_usage_final=coop_usage_final,
-        coop_reward_initial=coop_reward_initial,
-        coop_reward_final=coop_reward_final,
-    )
+    if phase_table_enabled:
+        _curriculum_apply_weights(
+            env,
+            new_12,
+            new_23,
+            new_validity,
+            validity_limb_usage_initial,
+            validity_limb_usage_final,
+            validity_rear_diff_initial,
+            validity_rear_diff_final,
+            floor_alpha=new_floor,
+            load_alpha=new_load,
+            floor_limb_usage_initial=floor_limb_usage_initial,
+            floor_limb_usage_final=floor_limb_usage_final,
+            floor_per_leg_contact_initial=floor_per_leg_contact_initial,
+            floor_per_leg_contact_final=floor_per_leg_contact_final,
+            floor_per_leg_propulsion_initial=floor_per_leg_propulsion_initial,
+            floor_per_leg_propulsion_final=floor_per_leg_propulsion_final,
+            load_rear_usage_diff_final=load_rear_usage_diff_final,
+            load_front_usage_diff_final=load_front_usage_diff_final,
+            load_rear_prop_diff_final=load_rear_prop_diff_final,
+            load_front_rear_balance_final=load_front_rear_balance_final,
+            load_front_prop_diff_final=load_front_prop_diff_final,
+            validity_gate_alpha=new_validity_gate,
+            validity_gate_initial=validity_gate_initial,
+            validity_gate_final=validity_gate_final,
+            propulsion_floor_alpha=new_prop_floor,
+            band_alpha=new_band,
+            band_contact_initial=band_contact_initial,
+            band_contact_final=band_contact_final,
+            band_propulsion_initial=band_propulsion_initial,
+            band_propulsion_final=band_propulsion_final,
+            coop_alpha=new_coop,
+            coop_usage_initial=coop_usage_initial,
+            coop_usage_final=coop_usage_final,
+            coop_reward_initial=coop_reward_initial,
+            coop_reward_final=coop_reward_final,
+        )
     # V28.1: residency relay + symmetry + exit + min-leg factor 적용
     _curriculum_apply_v281_weights(
         env,
@@ -4506,7 +4538,11 @@ _V47_STATE_KEYS = [
     "_v47_boot_gate_released_iter",
 ]
 
-_ALL_CURRICULUM_KEYS = _CRR_ALPHA_KEYS + _CRR_META_KEYS + _V44_STATE_KEYS + _V47_STATE_KEYS
+_PHASE_CONTACT_STATE_KEYS = [
+    "_phase_contact_ema",
+]
+
+_ALL_CURRICULUM_KEYS = _CRR_ALPHA_KEYS + _CRR_META_KEYS + _V44_STATE_KEYS + _V47_STATE_KEYS + _PHASE_CONTACT_STATE_KEYS
 
 
 def get_curriculum_snapshot(env) -> dict:
@@ -4566,7 +4602,15 @@ def restore_curriculum_snapshot(env, state: dict) -> bool:
     # Restore curriculum alphas and meta
     for key in _ALL_CURRICULUM_KEYS:
         if key in state:
-            setattr(env, key, state[key])
+            value = state[key]
+            if key == "_phase_contact_ema":
+                try:
+                    if tuple(value.shape) != (env.num_envs, 4):
+                        continue
+                    value = value.to(device=env.device)
+                except Exception:
+                    continue
+            setattr(env, key, value)
             restored_keys.append(key)
 
     # Restore reward weights

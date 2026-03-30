@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V54.3"
+TRAIN_VERSION = "V55.A1"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -22,10 +22,16 @@ _CLEAN_REWARDS = False   # V47: V38.3 순정 reward 구조 사용
 _CONNECTED_TROT = False  # V47: V43+ 구조 사용 안 함
 _USE_BOOT_STANDING = True
 
-# V54: Phase Clock 기반 구조 전환
-# True: phase_contact + phase_clearance 중심, 충돌 gait reward 비활성화
-# False: V38.3 reward 구조 유지 (V53 이하)
-_PHASE_CLOCK = True
+_IS_V54 = TRAIN_VERSION.startswith("V54")
+_IS_V55 = TRAIN_VERSION.startswith("V55")
+_V55_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V55 and "." in TRAIN_VERSION else ("A1" if _IS_V55 else "")
+_V55_PHASE_TRACKS = {"B1", "B2", "B3"}
+
+# V54: clean phase-centric handoff
+# V55.A1: baseline recovery (phase OFF)
+# V55.B*: baseline + phase auxiliary
+_PHASE_CLOCK = _IS_V54 or (_IS_V55 and _V55_TRACK in _V55_PHASE_TRACKS)
+_PHASE_AUXILIARY = _IS_V55 and _V55_TRACK in _V55_PHASE_TRACKS
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -1175,6 +1181,50 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.curriculum.reward_weights.params["boot_ramp_down_iters"] = 1500
 
         # ══════════════════════════════════════════════════════════
+        # V55: baseline recovery / phase probe 공통 설정
+        # A1: baseline recovery
+        # B1/B2/B3: baseline + phase auxiliary (handoff 없음)
+        # ══════════════════════════════════════════════════════════
+        if _IS_V55:
+            # Penalty는 A1 iter 100 audit 전까지 임시 시작점으로 둔다.
+            self.rewards.action_rate_l2.weight = -0.3
+            self.rewards.joint_vel_l2.weight = -0.1
+            self.rewards.dof_acc_l2.weight = -2.0e-5
+
+            # V55에서는 V54 handoff를 쓰지 않는다.
+            self.curriculum.reward_weights.params["phase_contact_target"] = 0.0
+            self.curriculum.reward_weights.params["phase_clearance_target"] = 0.0
+            self.curriculum.reward_weights.params["phase_ramp_in_iters"] = 0
+            self.curriculum.reward_weights.params["phase_table_enabled"] = True
+
+            if _V55_TRACK in {"B1", "B2", "B3"}:
+                # Track B: 직접 timing heuristic은 끄거나 감쇠하고, phase는 auxiliary로 추가한다.
+                self.rewards.trot_gait.weight = 0.0
+                self.rewards.diagonal_coupling.weight = 0.0
+                self.rewards.gait_cycle_period.weight = 0.0
+                self.rewards.feet_air_time.weight = 10.0
+                self.rewards.leg_lift.weight = 8.0
+                self.rewards.rear_alternation.weight = 5.0
+                self.rewards.rear_joint_velocity.weight = 4.0
+                self.rewards.stance_propulsion.weight = 4.0
+                self.rewards.foot_clearance.weight = 3.0
+                self.rewards.rear_swing.weight = 3.0
+
+                # A1/B1/B2 비교를 위해 Track B도 locomotion baseline은 유지한다.
+                if _V55_TRACK in {"B2", "B3"}:
+                    phase_contact_weight = 5.0
+                    phase_clearance_weight = 1.5
+                else:
+                    phase_contact_weight = 3.0
+                    phase_clearance_weight = 0.75
+            else:
+                phase_contact_weight = 0.0
+                phase_clearance_weight = 0.0
+        else:
+            phase_contact_weight = 0.0
+            phase_clearance_weight = 0.0
+
+        # ══════════════════════════════════════════════════════════
         # V54: Phase Clock 기반 구조 전환
         # phase_contact(주연) + phase_clearance + velocity tracking
         # 충돌 gait reward 비활성화 → ~17개 reward
@@ -1183,21 +1233,24 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             toe_cfg_phase = SceneEntityCfg("contact_forces", body_names=".*toe_link")
             foot_body_cfg_phase = SceneEntityCfg("robot", body_names=".*toe_link")
 
-            # ── Phase Clock 주연 ──
+            # ── Phase Clock ──
             self.rewards.phase_contact = RewTerm(
                 func=custom_mdp.phase_contact_reward,
-                weight=0.0,  # V54.3: curriculum이 0→20으로 ramp (soft handoff)
+                weight=phase_contact_weight,
                 params={
                     "sensor_cfg": toe_cfg_phase,
                     "frequency": 2.0,
                     "duty_factor": 0.55,
                     "contact_threshold": 1.0,
                     "standing_vel_threshold": 0.08,
+                    "aggregation_mode": "mean_min" if _PHASE_AUXILIARY else "floor",
+                    "ema_alpha": 0.90,
+                    "min_target": 0.60,
                 },
             )
             self.rewards.phase_clearance = RewTerm(
                 func=custom_mdp.phase_foot_clearance,
-                weight=0.0,  # V54.3: curriculum이 0→5로 ramp
+                weight=phase_clearance_weight,
                 params={
                     "asset_cfg": SceneEntityCfg("robot"),
                     "foot_cfg": foot_body_cfg_phase,
@@ -1214,81 +1267,84 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 params={"frequency": 2.0},
             )
 
-            # ── Velocity Tracking (phase 보조) ──
-            self.rewards.track_lin_vel_xy_exp.weight = 2.0
-            self.rewards.track_ang_vel_z_exp.weight = 3.0
+            # ── V55: baseline ecology 유지 + phase auxiliary만 추가 ──
+            if _PHASE_AUXILIARY:
+                pass
+            else:
+                # ── Velocity Tracking (phase 보조) ──
+                self.rewards.track_lin_vel_xy_exp.weight = 2.0
+                self.rewards.track_ang_vel_z_exp.weight = 3.0
 
-            # ── 자세/높이 (V50+ 검증 유지) ──
-            self.rewards.standing_height.weight = 15.0
-            self.rewards.flat_orientation_l2.weight = -8.0
-            self.rewards.base_height_l2.weight = -15.0
+                # ── 자세/높이 (V50+ 검증 유지) ──
+                self.rewards.standing_height.weight = 15.0
+                self.rewards.flat_orientation_l2.weight = -8.0
+                self.rewards.base_height_l2.weight = -15.0
 
-            # ── Penalty 축소 (V52 실측: movement penalty 14.36/step 과도) ──
-            self.rewards.action_rate_l2.weight = -0.5
-            self.rewards.dof_acc_l2.weight = -0.001
-            self.rewards.joint_vel_l2.weight = -0.3  # V54.2: -0.5→-0.3 (boot net -6.5→-2.3)
-            self.rewards.shoulder_neutral.weight = -4.0
-            self.rewards.stance_width_penalty.weight = -1.5
+                # ── Penalty 축소 (V52 실측: movement penalty 14.36/step 과도) ──
+                self.rewards.action_rate_l2.weight = -0.3
+                self.rewards.dof_acc_l2.weight = -2.0e-5
+                self.rewards.joint_vel_l2.weight = -0.1
+                self.rewards.shoulder_neutral.weight = -4.0
+                self.rewards.stance_width_penalty.weight = -1.5
 
-            # ── Minimal Bridge: outcome-based, phase와 비충돌 ──
-            # V52 실측: phase-only 16/step vs 검증된 78/step → bridge 필수
-            self.rewards.stride_length.weight = 5.0
-            self.rewards.forward_velocity_bootstrap.weight = 5.0
+                # ── Minimal Bridge: outcome-based, phase와 비충돌 ──
+                self.rewards.stride_length.weight = 5.0
+                self.rewards.forward_velocity_bootstrap.weight = 5.0
 
-            # ── Boot-only Bridge: boot phase에서 "다리를 움직여라" signal ──
-            # V54.1 실패 분석: 제거된 boot positive 6.50/step 중 핵심 2개 복원
-            # gait_gate 해제 후 boot ramp-down으로 0까지 감소 (phase가 대체)
-            # leg_lift: +2.52/step @boot (V52 실측)
-            # rear_joint_velocity: +1.76/step @boot (V52 실측)
-            self.curriculum.reward_weights.params["boot_leg_lift_initial"] = 15.0
-            self.curriculum.reward_weights.params["boot_rear_vel_initial"] = 12.0
-            self.curriculum.reward_weights.params["boot_bridge_ramp_down_iters"] = 500
-            # V54.3: phase ramp-in (soft handoff — bridge와 동일 구간, 반대 방향)
-            self.curriculum.reward_weights.params["phase_contact_target"] = 20.0
-            self.curriculum.reward_weights.params["phase_clearance_target"] = 5.0
-            self.curriculum.reward_weights.params["phase_ramp_in_iters"] = 500
+                # ── Boot-only Bridge / soft handoff ──
+                self.curriculum.reward_weights.params["boot_leg_lift_initial"] = 15.0
+                self.curriculum.reward_weights.params["boot_rear_vel_initial"] = 12.0
+                self.curriculum.reward_weights.params["boot_bridge_ramp_down_iters"] = 500
+                self.curriculum.reward_weights.params["phase_contact_target"] = 20.0
+                self.curriculum.reward_weights.params["phase_clearance_target"] = 5.0
+                self.curriculum.reward_weights.params["phase_ramp_in_iters"] = 500
+                self.curriculum.reward_weights.params["phase_table_enabled"] = False
+                self.curriculum.reward_weights.params["stride_length_max"] = 0.0
+                self.curriculum.reward_weights.params["swing_gate_max"] = 0.0
+                self.curriculum.reward_weights.params["front_swing_bonus_max"] = 0.0
+                self.curriculum.reward_weights.params["front_alternation_max"] = 0.0
+                self.curriculum.reward_weights.params["front_both_ground_max"] = 0.0
+                self.curriculum.reward_weights.params["min_swing_ratio_max"] = 0.0
+                self.curriculum.reward_weights.params["front_joint_velocity_max"] = 0.0
+                self.curriculum.reward_weights.params["front_joint_frozen_max"] = 0.0
 
-            # ── 충돌 gait reward 비활성화 ──
-            _phase_remove = [
-                "per_leg_contact_target_band", "per_leg_propulsion_target_band",
-                "limb_usage_target_band", "late_phase_band_exit",
-                "per_leg_contact_floor", "per_leg_propulsion_floor",
-                "contact_residency", "usage_residency", "prop_residency",
-                "rear_pair_residency_symmetry", "rear_pair_residency_gap",
-                "residency_ema_contact_fl", "residency_ema_contact_fr",
-                "residency_ema_contact_rl", "residency_ema_contact_rr",
-                "residency_ema_prop_rl", "residency_ema_prop_rr",
-                "diagonal_coupling", "trot_gait", "gait_cycle_period",
-                "front_leg_lift", "rear_alternation", "rear_swing",
-                "rear_forward_stride",
-                "swing_stride", "swing_gate_velocity",
-                "forward_velocity",
-                "four_limb_cooperation", "front_rear_symmetry",
-                "front_rear_support_balance_penalty",
-                "front_left_right_propulsion_diff_penalty",
-                "front_left_right_usage_diff_penalty",
-                "rear_left_right_propulsion_diff_penalty",
-                "rear_left_right_usage_diff_penalty",
-                "limb_usage_min_penalty", "single_limb_validity_penalty",
-                "rear_pair_contact_diff",
-                "feet_air_time", "foot_clearance",
-                "height_walking_gate", "height_bonus", "knee_height",
-                "front_swing", "front_alternation",
-                "front_joint_velocity", "front_joint_frozen",
-                "rear_joint_frozen", "rear_both_ground", "front_both_ground",
-                "min_swing_ratio", "stationary_penalty",
-                "leg_pose_symmetry", "same_side_penalty",
-                "feet_below_knees", "feet_on_ground",
-                "shoulder_symmetry", "foot_extension",
-                "stance_propulsion",
-            ]
-            for name in _phase_remove:
-                if hasattr(self.rewards, name):
-                    setattr(self.rewards, name, None)
-
-            # ── Curriculum: boot ramp-down만 유지, gait ramp 비활성화 ──
-            # reward_weight_curriculum은 boot_standing ramp-down을 포함하므로 유지 필수
-            # band/residency ramp는 해당 reward가 None이므로 자동으로 무효화됨
+                # ── 충돌 gait reward 비활성화 ──
+                _phase_remove = [
+                    "per_leg_contact_target_band", "per_leg_propulsion_target_band",
+                    "limb_usage_target_band", "late_phase_band_exit",
+                    "per_leg_contact_floor", "per_leg_propulsion_floor",
+                    "contact_residency", "usage_residency", "prop_residency",
+                    "rear_pair_residency_symmetry", "rear_pair_residency_gap",
+                    "residency_ema_contact_fl", "residency_ema_contact_fr",
+                    "residency_ema_contact_rl", "residency_ema_contact_rr",
+                    "residency_ema_prop_rl", "residency_ema_prop_rr",
+                    "diagonal_coupling", "trot_gait", "gait_cycle_period",
+                    "front_leg_lift", "rear_alternation", "rear_swing",
+                    "rear_forward_stride",
+                    "swing_stride", "swing_gate_velocity",
+                    "forward_velocity",
+                    "four_limb_cooperation", "front_rear_symmetry",
+                    "front_rear_support_balance_penalty",
+                    "front_left_right_propulsion_diff_penalty",
+                    "front_left_right_usage_diff_penalty",
+                    "rear_left_right_propulsion_diff_penalty",
+                    "rear_left_right_usage_diff_penalty",
+                    "limb_usage_min_penalty", "single_limb_validity_penalty",
+                    "rear_pair_contact_diff",
+                    "feet_air_time", "foot_clearance",
+                    "height_walking_gate", "height_bonus", "knee_height",
+                    "front_swing", "front_alternation",
+                    "front_joint_velocity", "front_joint_frozen",
+                    "rear_joint_frozen", "rear_both_ground", "front_both_ground",
+                    "min_swing_ratio", "stationary_penalty",
+                    "leg_pose_symmetry", "same_side_penalty",
+                    "feet_below_knees", "feet_on_ground",
+                    "shoulder_symmetry", "foot_extension",
+                    "stance_propulsion",
+                ]
+                for name in _phase_remove:
+                    if hasattr(self.rewards, name):
+                        setattr(self.rewards, name, None)
 
         # ══════════════════════════════════════════════════════════
         # V42: Clean Reward Restart — 16개 reward만 사용
