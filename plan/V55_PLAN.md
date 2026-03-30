@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: 설계 확정 + A5 1차 구현 완료
+> 상태: A6 설계 확정 + 구현 완료, fresh start 검증 대기
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -143,18 +143,27 @@ Track A는 baseline recovery다.
 
 ### 6.2 Track B
 
-Track B는 phase probe다.
+Track B는 단일 실험이 아니라 3단 probe다.
 
 - phase observation: ON
 - phase reward: ON
 - handoff: 없음
 - phase_contact aggregation: `mean_min`
 
-초기 phase weight:
+핵심 원칙:
 
 ```text
-phase_contact   = 3.0
-phase_clearance = 0.75
+B1 = additive probe
+- baseline locomotion을 거의 유지
+- phase가 읽히는지만 확인
+
+B2 = soft replacement
+- 기존 heuristic timing 일부 감쇠
+- phase가 구조 기여를 하는지 확인
+
+B3 = hard phase test
+- 기존 timing heuristic을 더 크게 줄임
+- phase가 구조 주도권을 가질 수 있는지 확인
 ```
 
 ### 6.3 phase_contact 집계
@@ -190,24 +199,27 @@ V47 실측에서 직접 timing/gait 지정에 가까운 positive 기여:
 
 이 군집을 그대로 두면 `phase_contact + phase_clearance` probe가 묻힌다.
 
-따라서 Track B는:
-
-- `pattern-defining reward`는 OFF
-- `movement-enabling reward`는 1/3~1/2로 감쇠
+현재 `A5` 실측 기준으로 `forward_velocity`, `trot_gait`, `diagonal_coupling_raw`,
+`leg_lift`, `rear_joint_velocity`가 모두 baseline 동력으로 작동하고 있다.
+따라서 `B1`에서 이것들을 처음부터 크게 깎으면 phase probe가 아니라 baseline 약화 실험이 된다.
 
 ```text
-Reward               | Track A | Track B
----------------------+---------+--------
-trot_gait            | 유지    | 0.0
-diagonal_coupling    | 유지    | 0.0
-gait_cycle_period    | 유지    | 0.0
-feet_air_time        | 유지    | 10.0
-leg_lift             | 유지    | 8.0
-rear_alternation     | 유지    | 5.0
-rear_joint_velocity  | 유지    | 4.0
-stance_propulsion    | 유지    | 4.0
-foot_clearance       | 유지    | 3.0
-rear_swing           | 유지    | 3.0
+Reward               | Track A | B1  | B2  | B3
+---------------------+---------+-----+-----+----
+forward_velocity     | 16.0    | 16  | 16  | 16
+fwd_vel_bootstrap    | 12.0    | 12  | 12  | 12
+trot_gait            | 유지    | 5   | 2   | 0
+diagonal_coupling    | 유지    | 5   | 2   | 0
+gait_cycle_period    | 유지    | 0   | 0   | 0
+feet_air_time        | 유지    | 20  | 15  | 10
+leg_lift             | 유지    | 20  | 12  | 8
+rear_alternation     | 유지    | 15  | 8   | 5
+rear_joint_velocity  | 유지    | 12  | 8   | 4
+stance_propulsion    | 유지    | 8   | 6   | 4
+foot_clearance       | 유지    | 2   | 2   | 2
+rear_swing           | 유지    | 6   | 4   | 3
+phase_contact        | OFF     | 1.5 | 3.0 | 5.0
+phase_clearance      | OFF     | 0.5 | 1.0 | 1.5
 ```
 
 주의:
@@ -375,8 +387,8 @@ A1 실패 시 fallback:
 중요:
 
 ```text
-B1은 반드시 from-scratch다.
-A1 checkpoint에서 resume하지 않는다.
+B1/B2/B3는 반드시 from-scratch다.
+A5 checkpoint에서 resume하지 않는다.
 ```
 
 이유:
@@ -390,12 +402,12 @@ A1 checkpoint에서 resume하지 않는다.
 ```text
 base          = A1 성공 설정
 phase_obs     = ON
-phase_contact = 3.0
-phase_clear   = 0.75
+phase_contact = 1.5
+phase_clear   = 0.5
 handoff       = 없음
 fallback      = 없음
 phase agg     = mean_min
-timing reward = Track B table 기준으로 감쇠/일부 OFF
+timing reward = additive probe 수준
 ```
 
 성공 기준:
@@ -417,6 +429,8 @@ iter 100
 - phase cluster가 완전히 묻히지 않았는지 확인
 - rear bias 또는 front 사용 악화가 생겼는지 확인
 - feet_air_time과 phase_contact의 timing 충돌 여부 확인
+- A5 대비 ep_len 급락이 없는지 확인
+- trot_gait / diagonal_coupling이 유지되는지 확인
 ```
 
 B1 추가 모니터링:
@@ -464,8 +478,18 @@ A1 -> B1 -> B2는 순차 실행이 기본
 설정:
 
 ```text
-phase_contact = 5.0
-phase_clear   = 1.5
+forward_velocity            = 16.0
+forward_velocity_bootstrap  = 12.0
+phase_contact               = 3.0
+phase_clear                 = 1.0
+trot_gait                   = 2.0
+diagonal_coupling           = 2.0
+feet_air_time               = 15.0
+leg_lift                    = 12.0
+rear_alternation            = 8.0
+rear_joint_velocity         = 8.0
+stance_propulsion           = 6.0
+rear_swing                  = 4.0
 ```
 
 성공 기준:
@@ -479,6 +503,23 @@ phase_clear   = 1.5
 전제:
 
 - B2까지 성공
+
+설정:
+
+```text
+forward_velocity            = 16.0
+forward_velocity_bootstrap  = 12.0
+phase_contact               = 5.0
+phase_clear                 = 1.5
+trot_gait                   = 0.0
+diagonal_coupling           = 0.0
+feet_air_time               = 10.0
+leg_lift                    = 8.0
+rear_alternation            = 5.0
+rear_joint_velocity         = 4.0
+stance_propulsion           = 4.0
+rear_swing                  = 3.0
+```
 
 release 조건 예시:
 
@@ -538,7 +579,7 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.A5
+- TRAIN_VERSION = V55.A6
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -546,12 +587,14 @@ for N updates
 - A-track: phase reward OFF
 - B-track: phase auxiliary ON
 - V55 전용 forward override 유지
-- penalty는 legacy STAND table ramp 유지
+- A5: penalty는 legacy STAND table ramp 유지
+- A6: A5 core + posture override + gait_gate release soft-ramp
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
-- V55.A4는 "구현 완료" 상태이지 "학습 성공 검증 완료" 상태는 아님
-- 다음 단계는 fresh start 기준 runtime validation이다
+- A5는 iter 500 이전까지 baseline recovery에 성공했지만
+  gait_gate release 직후 min_height collapse가 발생했다
+- 다음 단계는 A6 fresh start 기준 runtime validation이다
 ```
 
 ### 10.1 A5에서 실제로 막은 경로
@@ -572,7 +615,60 @@ legacy STAND phase table이 runtime에서 아래 항목을 다시 덮어썼다
 `A2/A4`는 penalty까지 override했지만, `A5`는 forward 2개만 `V55 runtime override`로 유지한다.
 penalty 3개는 다시 STAND phase table이 관리하게 둔다.
 
-### 10.2 A5 fresh start 검증 규칙
+### 10.2 A5에서 새로 드러난 붕괴 경로
+
+`A5`는 STAND phase에서 잘 올라갔지만, `iter 500`에서 gait gate release가 기록된 직후 붕괴했다.
+
+확인된 직접 shock source:
+
+```text
+curriculum_400.pt -> curriculum_500.pt
+
+stance_width_penalty   0.0  -> -3.0
+shoulder_neutral      -1.0  -> -6.0
+```
+
+붕괴 직후 termination:
+
+```text
+min_height       ~99%
+time_out          0%
+bad_orientation   ~1%
+```
+
+따라서 `A6`의 1차 목적은 posture reward를 새로 많이 추가하는 것이 아니라,
+`gait_gate release shock`를 직접 만든 두 항목만 `500 iter`에 걸쳐 soft-ramp하는 것이다.
+
+### 10.3 A6 구현 내용
+
+`A6`는 `A5 + posture correction + release shock 완화`다.
+
+```text
+유지
+- action_rate_l2 / joint_vel_l2 / dof_acc_l2: STAND table 관리
+- forward_velocity / forward_velocity_bootstrap: 16 / 12 runtime override 유지
+- trot_gait / diagonal_coupling / stride 동력 유지
+
+즉시 보강
+- standing_height: 40 -> 48 runtime override
+- height_bonus: 25 -> 30 runtime override
+- base_height_l2: -20.0 -> -23.0 env_cfg 직접 조정
+- front_rear_support_balance_penalty: -8.0 -> -9.6 env_cfg 직접 조정
+
+release 후 500 iter soft-ramp
+- shoulder_neutral: -1.0 -> -6.0
+- stance_width_penalty: 0.0 -> -3.0
+```
+
+원칙:
+
+```text
+첫 실험은 shock source 2개만 soft-ramp한다.
+undesired_contacts 등 다른 항목은 같이 건드리지 않는다.
+그래야 iter 500 collapse의 직접 원인을 분리해서 검증할 수 있다.
+```
+
+### 10.4 A6 fresh start 검증 규칙
 
 `코드값`이 아니라 `curriculum_0.pt`의 `_reward_weights`로 판정한다.
 
@@ -584,7 +680,10 @@ joint_vel_l2               = -0.05
 dof_acc_l2                 = -5e-7
 forward_velocity           = 16.0
 forward_velocity_bootstrap = 12.0
-standing_height            = 40.0
+standing_height            = 48.0
+height_bonus               = 30.0
+shoulder_neutral           = -1.0
+stance_width_penalty       = 0.0
 phase_contact              = 없음
 phase_clearance            = 없음
 ```
@@ -596,31 +695,44 @@ env_cfg에 적혀 있어도 충분하지 않다.
 curriculum_0.pt에서 실제 적용값이 맞아야 구현 완료로 본다.
 ```
 
-### 10.3 A5 초기 학습 판정
+추가 확인:
 
-초기 `A5` 런은 아래 순서로 판정한다.
+```text
+base_height_l2                        = -23.0
+front_rear_support_balance_penalty    = -9.6
+```
+
+이 두 항목은 phase table 관리 대상이 아니므로
+`reward_manager` snapshot 또는 audit 로그에서 확인한다.
+
+### 10.5 A6 초기 학습 판정
+
+초기 `A6` 런은 아래 순서로 판정한다.
 
 ```text
 iter 0
-- version = V55.A4
+- version = V55.A6
 - phase OFF
-- 5개 override 실제 적용 확인
+- forward 2개 + standing/height override 실제 적용 확인
+- shoulder_neutral=-1.0, stance_width_penalty=0.0 확인
 
 iter 100
 - active reward / penalty dominance 확인
 - dof_acc_l2 weighted contribution 확인
 - forward_velocity / forward_velocity_bootstrap 실효 확인
+- shoulder_left_right_diff, rear contact ratio, front/rear support imbalance 확인
 
 iter 500
-- baseline recovery 성공/실패 판정
-- B1 진입 가능 여부 결정
+- release 직후 shock가 완화되는지 확인
+- min_height collapse 재발 여부 확인
+- shoulder_neutral / stance_width_penalty ramp 중간값 확인
 ```
 
 ---
 
 ## 11. 최종 추천
 
-바로 실행할 1순위는 `Experiment A1`이다.
+바로 실행할 1순위는 `Experiment A6`이다.
 
 한 줄 요약:
 
