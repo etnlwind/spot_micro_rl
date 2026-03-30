@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: A6 설계 확정 + 구현 완료, fresh start 검증 대기
+> 상태: A5.1 release-shock soft ramp 버그 수정 완료, fresh start 재검증 대기
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -256,6 +256,91 @@ A1 iter 100 audit:
 action_rate_l2 = -0.30
 joint_vel_l2   = -0.10
 dof_acc_l2     = -2e-5
+```
+
+---
+
+## 7. A5 / A5.1 최신 판정
+
+### 7.1 A5 결과
+
+`A5`는 STAND phase에서는 가장 좋은 baseline recovery를 보였다.
+
+- `ep_len`이 `248`까지 상승
+- `stride_length`가 `2.06`까지 열림
+- `diagonal_coupling_raw`가 `0.52` 수준까지 상승
+
+하지만 `iter 500`에서 gait gate release가 기록된 직후 붕괴했다.
+
+확인된 사실:
+
+- `_v47_boot_gate_released_iter = 500`
+- `time_out -> min_height`로 termination 패턴 급변
+- `shoulder_neutral`, `stance_width_penalty` 등 posture/splay 관련 항목이 release 이후 walking 값으로 강해짐
+
+즉 현재 1차 문제는 `phase`가 아니라 `iter 500 release shock`다.
+
+### 7.2 A5.1 첫 시도에서 확인된 것
+
+`A5.1`의 목적은 `A5` baseline은 유지하고,
+release 이후 `shoulder_neutral`, `stance_width_penalty` 두 항목만 `500 iter`에 걸쳐 soft ramp 하는 것이었다.
+
+첫 시도에서 확인된 사실:
+
+- `curriculum_500.pt`에는 여전히
+  - `shoulder_neutral = -6.0`
+  - `stance_width_penalty = -3.0`
+  이 저장됨
+- `iter 500` 이후 collapse도 재발
+
+처음에는 이것을 "`soft ramp 가설 실패`"로 볼 수 있었지만,
+코드 재검증 결과 그 해석은 틀렸다.
+
+### 7.3 구조적 버그 원인
+
+`reward_weight_curriculum()` 내부에서:
+
+```text
+1. gait_gate release 이후 walking weight 적용
+2. _all_alphas_done 또는 "실제 변화 없음"이면 조기 return
+3. 그 아래쪽의 V55 runtime override / soft ramp 코드에 도달하지 못함
+```
+
+즉 첫 `A5.1`은 가설을 시험한 run이 아니라,
+`soft ramp가 지속 적용되지 못하는 구현 버그가 섞인 run`이었다.
+
+### 7.4 수정 완료 사항
+
+현재 코드에서는 다음을 수정했다.
+
+- `_all_alphas_done` 조기 return 전에 V55 runtime override 실행
+- `실제 변화 없음` 조기 return 전에 V55 runtime override 실행
+- 따라서 `A5.1` soft ramp가 iter 500 이후에도 매 호출마다 계속 적용됨
+
+이제야 `A5.1`이 실제로 검증 가능한 상태가 되었다.
+
+### 7.5 다음 검증 규칙
+
+`A5.1`은 반드시 fresh start로 다시 돌린다.
+
+검증 포인트:
+
+```text
+iter 500 직후
+- reward_manager weight 기준으로
+  shoulder_neutral = pre 값 근처
+  stance_width_penalty = pre 값 근처
+
+iter 500 ~ 1000
+- 두 항목이 목표 post 값으로 점진적으로 이동
+- A5처럼 즉시 min_height 99% 붕괴가 재발하는지 여부 확인
+```
+
+주의:
+
+```text
+curriculum_500.pt만으로 runtime soft ramp 성공 여부를 단정하지 않는다.
+가능하면 iter 499/500/501의 실제 term weight 로그를 직접 본다.
 ```
 
 해석 주의:

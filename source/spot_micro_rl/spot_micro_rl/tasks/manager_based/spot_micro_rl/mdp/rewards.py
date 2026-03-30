@@ -4504,8 +4504,33 @@ def reward_weight_curriculum(
                 phase_info = f" phase_c={phase_c_w:.1f} phase_cl={phase_cl_w:.1f}"
             print(f"  [V47-Boot] boot_standing={boot_st_w:.1f} boot_contact={boot_ct_w:.1f}{bridge_info}{phase_info}")
 
+    def _apply_v55_post_curriculum_overrides() -> None:
+        if not v55_track:
+            return
+        _apply_v55_runtime_overrides(
+            env,
+            action_rate_weight=v55_action_rate_weight,
+            joint_vel_weight=v55_joint_vel_weight,
+            dof_acc_weight=v55_dof_acc_weight,
+            forward_velocity_weight=v55_forward_velocity_weight,
+            forward_velocity_bootstrap_weight=v55_forward_velocity_bootstrap_weight,
+            standing_height_weight=v55_standing_height_weight,
+            height_bonus_weight=v55_height_bonus_weight,
+        )
+        if v55_release_soft_ramp_iters > 0:
+            _apply_v55_release_soft_ramp(
+                env,
+                iteration=iteration,
+                ramp_iters=v55_release_soft_ramp_iters,
+                shoulder_pre=v55_release_shoulder_neutral_pre,
+                shoulder_post=v55_release_shoulder_neutral_post,
+                stance_pre=v55_release_stance_width_pre,
+                stance_post=v55_release_stance_width_post,
+            )
+
     # ── Alpha 진행 (한 주기당 최대 증가량 제한) ──
     if _all_alphas_done:
+        _apply_v55_post_curriculum_overrides()
         return None  # alpha ramp 완료 — boot/bridge ramp-down은 위에서 처리됨
 
     max_step_12 = update_interval / max(1, ramp1_end - ramp1_start)
@@ -4569,6 +4594,7 @@ def reward_weight_curriculum(
         and abs(new_swing_gate - env._crr_swing_gate_alpha) < 1e-6
         and abs(new_front_swing - env._crr_front_swing_alpha) < 1e-6
     ):
+        _apply_v55_post_curriculum_overrides()
         return None
 
     old_12 = env._crr_alpha12
@@ -4664,27 +4690,7 @@ def reward_weight_curriculum(
         front_joint_frozen_max=front_joint_frozen_max,
     )
 
-    if v55_track:
-        _apply_v55_runtime_overrides(
-            env,
-            action_rate_weight=v55_action_rate_weight,
-            joint_vel_weight=v55_joint_vel_weight,
-            dof_acc_weight=v55_dof_acc_weight,
-            forward_velocity_weight=v55_forward_velocity_weight,
-            forward_velocity_bootstrap_weight=v55_forward_velocity_bootstrap_weight,
-            standing_height_weight=v55_standing_height_weight,
-            height_bonus_weight=v55_height_bonus_weight,
-        )
-        if v55_release_soft_ramp_iters > 0:
-            _apply_v55_release_soft_ramp(
-                env,
-                iteration=iteration,
-                ramp_iters=v55_release_soft_ramp_iters,
-                shoulder_pre=v55_release_shoulder_neutral_pre,
-                shoulder_post=v55_release_shoulder_neutral_post,
-                stance_pre=v55_release_stance_width_pre,
-                stance_post=v55_release_stance_width_post,
-            )
+    _apply_v55_post_curriculum_overrides()
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──
     if iteration % log_interval == 0:
