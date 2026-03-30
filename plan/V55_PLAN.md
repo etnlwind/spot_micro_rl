@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: A5.5 A5.4 유지 + min_height termination threshold 완화(0.15 -> 0.12) 구현 예정
+> 상태: A5.6 A5.5 유지 + min_height termination threshold 추가 완화(0.12 -> 0.10) 구현 예정
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -324,7 +324,7 @@ dof_acc_l2     = -2e-5
 
 ## 7. V55 실험 일지
 
-이 섹션은 `A1 -> A5.5`까지의 흐름을 시간순으로 정리한 것이다.
+이 섹션은 `A1 -> A5.6`까지의 흐름을 시간순으로 정리한 것이다.
 핵심은 "처음 계획이 무엇이었고, 실제로 무엇이 구현됐고, 결과가 어땠으며,
 그래서 왜 다음 실험으로 넘어갔는가"를 한 번에 읽히게 하는 것이다.
 
@@ -804,6 +804,50 @@ A5.5 = A5.4 유지
 3. 원인 분리가 더 깨끗함
 ```
 
+### 7.18 A5.5 결과: 증폭기 가설 지지
+
+`A5.5`는 collapse를 완전히 막지는 못했지만, 패턴을 바꿨다.
+
+```text
+iter 500
+- A5 / A5.4: ep_len 약 4
+- A5.5:      ep_len 6.2
+
+iter 600
+- A5 / A5.4: ep_len 약 5
+- A5.5:      ep_len 18.4
+```
+
+의미:
+
+```text
+1. iter 500 release collapse 자체는 남아 있다
+2. 하지만 collapse의 깊이와 회복 속도는 분명히 개선됐다
+3. 따라서 min_height는 근본 원인이라기보다
+   collapse를 더 깊고 회복 불가능하게 만드는 증폭기였을 가능성이 높다
+```
+
+### 7.19 A5.6: 현재 최우선 실험
+
+`A5.5`가 유의미한 완화를 보여줬으므로,
+다음 최소 단계는 min_height threshold를 한 번 더 낮추는 것이다.
+
+정의:
+
+```text
+A5.6 = A5.5 유지
+     + min_height termination threshold
+       0.12 -> 0.10
+```
+
+이 순서를 택하는 이유:
+
+```text
+1. A5.5가 완전 무효가 아니라 부분 성공이었다
+2. 완전 비활성화보다 작은 변경이라 해석력이 좋다
+3. collapse 깊이와 회복 속도의 추가 개선 여부를 보기 좋다
+```
+
 ---
 
 ## 8. 실험 단계
@@ -1108,7 +1152,7 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.A5.5
+- TRAIN_VERSION = V55.A5.6
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -1122,13 +1166,14 @@ for N updates
 - A5.3: STAND forward 제거 + post-release forward ramp
 - A5.4: A5.2 7항목 shock soft-ramp + A5.3 forward ramp 결합
 - A5.5: A5.4 유지 + min_height termination threshold 0.12 완화
+- A5.6: A5.5 유지 + min_height termination threshold 0.10 완화
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
 - A5는 iter 500 이전까지 baseline recovery에 성공했지만
   gait_gate release 직후 min_height collapse가 발생했다
 - 다음 단계의 최우선 검증은
-  A5.5 fresh start로 "min_height가 iter-500 collapse 증폭기인지"를 checkpoint/runtime 기준으로 확인하는 것이다
+  A5.6 fresh start로 min_height threshold 추가 완화가 collapse 깊이와 회복 속도를 더 개선하는지 확인하는 것이다
 ```
 
 ### 11.1 A5에서 실제로 막은 경로
@@ -1175,8 +1220,8 @@ bad_orientation   ~1%
 
 ### 11.3 다음 우선 실험 방향
 
-다음 우선 실험(`A5.5`)은
-`A5.4`를 유지한 채 `min_height termination`만 완화하는 작은 ablation이다.
+다음 우선 실험(`A5.6`)은
+`A5.5`를 유지한 채 `min_height termination` threshold를 한 단계 더 내리는 작은 ablation이다.
 
 ```text
 STAND phase
@@ -1196,7 +1241,7 @@ gait_gate release 이후 500 iter soft-ramp
 - per_leg_contact_floor soft-ramp
 
 추가 변경
-- min_height termination threshold: 0.15 -> 0.12
+- min_height termination threshold: 0.12 -> 0.10
 
 공통 원칙
 - forward 항목도 ownership 충돌 없이 V55 전용 경로에서만 제어
@@ -1207,9 +1252,9 @@ gait_gate release 이후 500 iter soft-ramp
 이 방향을 우선하는 이유:
 
 ```text
-1. A5.4도 iter 500 collapse를 막지 못했다
-2. V47에는 min_height termination이 없고, A5.x에는 있다
-3. min_height가 release 직후 불안정을 즉사로 바꾸는 증폭기인지 먼저 분리할 가치가 있다
+1. A5.5는 collapse 자체는 남았지만 깊이와 회복 속도를 개선했다
+2. 따라서 min_height 증폭기 가설은 지지된다
+3. 다음은 더 작은 threshold 완화로 추가 개선 여부를 본다
 ```
 
 ### 11.4 다음 우선 실험 검증 규칙
@@ -1278,11 +1323,11 @@ iter 499 / 500 / 501
 
 ```text
 iter 0
-- version = V55.A5.5
+- version = V55.A5.6
 - phase OFF
 - forward 2개가 STAND table 값(2.0 / 8.0)인지 확인
 - 7개 shock term이 pre 값(-1/0/-1 계열)인지 확인
-- min_height termination threshold가 0.12인지 확인
+- min_height termination threshold가 0.10인지 확인
 
 iter 100
 - active reward / penalty dominance 확인
@@ -1292,16 +1337,19 @@ iter 100
 iter 500
 - release 직후 forward ramp가 시작되는지 확인
 - 7개 shock term soft-ramp가 post 값으로 즉시 점프하지 않는지 확인
-- min_height collapse가 완화되는지 확인
+- min_height collapse 깊이가 A5.5보다 더 완화되는지 확인
 - forward 2개 ramp 중간값 확인
+
+iter 600
+- ep_len 회복 속도가 A5.5(18.4)보다 더 빠른지 확인
 ```
 
 ---
 
 ## 12. 최종 추천
 
-바로 실행할 1순위는 `A5.5`다.
+바로 실행할 1순위는 `A5.6`다.
 
 한 줄 요약:
 
-`지금은 reward를 더 크게 뜯을 때가 아니라, A5.4를 유지한 채 min_height termination threshold를 낮춰 iter-500 collapse가 termination 증폭 문제인지 먼저 분리해야 한다.`
+`지금은 구조를 더 크게 뜯을 때가 아니라, A5.5의 부분 개선을 이어서 min_height termination threshold를 0.10까지 낮춰 collapse 깊이와 회복 속도가 더 좋아지는지 먼저 확인해야 한다.`
