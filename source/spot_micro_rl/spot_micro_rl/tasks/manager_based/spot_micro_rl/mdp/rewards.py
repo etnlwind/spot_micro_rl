@@ -3678,6 +3678,92 @@ _LOG_RAW_GAIT_TERMS = ["forward_velocity", "trot_gait", "diagonal_coupling", "le
 _LOG_RAW_QUALITY_TERMS = ["joint_vel_l2", "dof_acc_l2", "action_rate_l2"]
 
 
+def _safe_policy_obs_dim(env: ManagerBasedRLEnv) -> int | None:
+    obs_buf = getattr(env, "obs_buf", None)
+    if isinstance(obs_buf, torch.Tensor) and obs_buf.ndim >= 2:
+        return int(obs_buf.shape[1])
+    return None
+
+
+def _safe_policy_obs_term_names(env: ManagerBasedRLEnv) -> list[str]:
+    om = getattr(env, "observation_manager", None)
+    if om is None:
+        return []
+    candidates = [
+        getattr(om, "_group_obs_term_names", None),
+        getattr(om, "group_obs_term_names", None),
+        getattr(om, "_group_term_names", None),
+    ]
+    for candidate in candidates:
+        try:
+            names = candidate.get("policy")
+            if names:
+                return list(names)
+        except Exception:
+            pass
+    return []
+
+
+def _log_v55_audit_snapshot(env: ManagerBasedRLEnv, iteration: int, v55_track: str) -> None:
+    logged = getattr(env, "_v55_logged_audits", set())
+    if iteration in logged:
+        return
+
+    term_names = list(getattr(env.reward_manager, "_term_names", []))
+    policy_obs_terms = _safe_policy_obs_term_names(env)
+    obs_dim = _safe_policy_obs_dim(env)
+
+    def _weight_of(term_name: str) -> str:
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            return f"{cfg.weight:.4f}"
+        except Exception:
+            return "n/a"
+
+    active_terms = []
+    for name in term_names:
+        try:
+            cfg = env.reward_manager.get_term_cfg(name)
+            if abs(float(cfg.weight)) > 1.0e-8:
+                active_terms.append(name)
+        except Exception:
+            pass
+
+    print(f"\n{'=' * 60}")
+    print(f"[V55 Audit] iter {iteration} | track={v55_track}")
+    print(
+        "  phase_obs="
+        f"{'ON' if 'phase_clock' in policy_obs_terms else 'OFF'}"
+        f"  phase_contact={_weight_of('phase_contact')}"
+        f"  phase_clearance={_weight_of('phase_clearance')}"
+        f"  obs_dim={obs_dim if obs_dim is not None else 'unknown'}"
+        f"  active_reward_terms={len(active_terms)}"
+    )
+
+    focus_terms = [
+        "boot_standing",
+        "standing_height",
+        "feet_air_time",
+        "trot_gait",
+        "diagonal_coupling",
+        "phase_contact",
+        "phase_clearance",
+        "joint_vel_l2",
+        "dof_acc_l2",
+        "action_rate_l2",
+    ]
+    parts = []
+    for name in focus_terms:
+        if name in term_names:
+            parts.append(f"{name}={_weight_of(name)}")
+    if parts:
+        print(f"  focus_weights: {', '.join(parts)}")
+
+    logged.add(iteration)
+    env._v55_logged_audits = logged
+    print(f"{'=' * 60}")
+
+
 def _curriculum_log_snapshot(env: ManagerBasedRLEnv, iteration: int,
                              alpha12: float, alpha23: float, validity_alpha: float, gate_paused: bool) -> None:
     """Ramp 상태 + key weight + raw metric snapshot 로깅.
@@ -3748,6 +3834,7 @@ def reward_weight_curriculum(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
     num_steps_per_env: int = 48,
+    v55_track: str = "",
     # Ramp 구간 정의
     ramp1_start: int = 1500,    # Phase 1→2 ramp 시작
     ramp1_end: int = 3000,      # Phase 1→2 ramp 완료
@@ -4050,6 +4137,8 @@ def reward_weight_curriculum(
                 pass
         if weight_parts:
             print(f"  init weights: {', '.join(weight_parts)}")
+        if v55_track:
+            _log_v55_audit_snapshot(env, iteration, v55_track)
         return None
 
     # ── V35.5: Boot stability ramp ──
@@ -4072,6 +4161,9 @@ def reward_weight_curriculum(
             env.command_manager.get_term("base_velocity").cfg.ranges.lin_vel_x = (cur_vel_min, cur_vel_max)
         except Exception:
             pass
+
+    if v55_track and iteration in (100, 500):
+        _log_v55_audit_snapshot(env, iteration, v55_track)
 
         # Log boot ramp state periodically
         if iteration % log_interval == 0:

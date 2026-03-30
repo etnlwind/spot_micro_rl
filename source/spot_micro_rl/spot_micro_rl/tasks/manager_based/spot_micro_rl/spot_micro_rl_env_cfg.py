@@ -1186,6 +1186,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # B1/B2/B3: baseline + phase auxiliary (handoff 없음)
         # ══════════════════════════════════════════════════════════
         if _IS_V55:
+            self.curriculum.reward_weights.params["v55_track"] = _V55_TRACK
             # Penalty는 A1 iter 100 audit 전까지 임시 시작점으로 둔다.
             self.rewards.action_rate_l2.weight = -0.3
             self.rewards.joint_vel_l2.weight = -0.1
