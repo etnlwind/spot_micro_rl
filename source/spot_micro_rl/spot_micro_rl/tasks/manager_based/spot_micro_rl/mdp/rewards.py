@@ -3764,6 +3764,28 @@ def _log_v55_audit_snapshot(env: ManagerBasedRLEnv, iteration: int, v55_track: s
     print(f"{'=' * 60}")
 
 
+def _apply_v55_penalty_overrides(
+    env: ManagerBasedRLEnv,
+    action_rate_weight: float | None,
+    joint_vel_weight: float | None,
+    dof_acc_weight: float | None,
+) -> None:
+    overrides = {
+        "action_rate_l2": action_rate_weight,
+        "joint_vel_l2": joint_vel_weight,
+        "dof_acc_l2": dof_acc_weight,
+    }
+    for term_name, weight in overrides.items():
+        if weight is None:
+            continue
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = float(weight)
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+
 def _curriculum_log_snapshot(env: ManagerBasedRLEnv, iteration: int,
                              alpha12: float, alpha23: float, validity_alpha: float, gate_paused: bool) -> None:
     """Ramp 상태 + key weight + raw metric snapshot 로깅.
@@ -3835,6 +3857,9 @@ def reward_weight_curriculum(
     env_ids: torch.Tensor,
     num_steps_per_env: int = 48,
     v55_track: str = "",
+    v55_action_rate_weight: float | None = None,
+    v55_joint_vel_weight: float | None = None,
+    v55_dof_acc_weight: float | None = None,
     # Ramp 구간 정의
     ramp1_start: int = 1500,    # Phase 1→2 ramp 시작
     ramp1_end: int = 3000,      # Phase 1→2 ramp 완료
@@ -4137,6 +4162,13 @@ def reward_weight_curriculum(
                 pass
         if weight_parts:
             print(f"  init weights: {', '.join(weight_parts)}")
+        if v55_track:
+            _apply_v55_penalty_overrides(
+                env,
+                action_rate_weight=v55_action_rate_weight,
+                joint_vel_weight=v55_joint_vel_weight,
+                dof_acc_weight=v55_dof_acc_weight,
+            )
         if v55_track:
             _log_v55_audit_snapshot(env, iteration, v55_track)
         return None
@@ -4553,6 +4585,14 @@ def reward_weight_curriculum(
         front_joint_velocity_max=front_joint_velocity_max,
         front_joint_frozen_max=front_joint_frozen_max,
     )
+
+    if v55_track:
+        _apply_v55_penalty_overrides(
+            env,
+            action_rate_weight=v55_action_rate_weight,
+            joint_vel_weight=v55_joint_vel_weight,
+            dof_acc_weight=v55_dof_acc_weight,
+        )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──
     if iteration % log_interval == 0:

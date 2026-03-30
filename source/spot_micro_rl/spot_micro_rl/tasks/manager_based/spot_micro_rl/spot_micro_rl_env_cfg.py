@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V55.A1"
+TRAIN_VERSION = "V55.A2"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1187,6 +1187,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ══════════════════════════════════════════════════════════
         if _IS_V55:
             self.curriculum.reward_weights.params["v55_track"] = _V55_TRACK
+            self.curriculum.reward_weights.params["v55_action_rate_weight"] = -0.3
+            self.curriculum.reward_weights.params["v55_joint_vel_weight"] = -0.1
+            self.curriculum.reward_weights.params["v55_dof_acc_weight"] = -2.0e-5
             # Penalty는 A1 iter 100 audit 전까지 임시 시작점으로 둔다.
             self.rewards.action_rate_l2.weight = -0.3
             self.rewards.joint_vel_l2.weight = -0.1
