@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니다. V49+는 4,096개, V42~V48은 8,192개, V41 이하는 20,480개 환경을 사용합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: `V55` 계열 실험 진행 중. `V47`의 강한 baseline locomotion을 참고하되, `V54`의 handoff collapse를 피하기 위해 **baseline recovery first, phase probe second** 전략으로 재설계했다. 현재 active track은 `V55.A5.3`이며, `STAND` phase에서는 보수적 forward policy를 유지하고 `gait-gate release` 이후에만 forward drive를 점진 강화하는 실험을 검증 중이다.
+**현재 상태**: `V55` 계열 실험 진행 중. `V47`의 강한 baseline locomotion을 참고하되, `V54`의 handoff collapse를 피하기 위해 **baseline recovery first, phase probe second** 전략으로 재설계했다. 현재 active track은 `V55.A5.6`이며, `A5.5`에서 확인된 `min_height` 증폭기 가설을 이어서 `min_height` termination threshold를 `0.12 -> 0.10`으로 한 단계 더 낮춘 ablation을 검증 중이다.
 
 ### 기술 스택
 
@@ -211,7 +211,7 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V55.A5.3` (STAND forward override 제거 + post-release forward ramp 실험)
+- 학습 버전: `V55.A5.6` (A5.5 유지 + min_height termination threshold 0.10 완화 실험)
 - active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
 - 기능 플래그: `_CLEAN_REWARDS=False`, `_CONNECTED_TROT=False`, `_USE_BOOT_STANDING=True`

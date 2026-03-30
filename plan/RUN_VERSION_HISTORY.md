@@ -1,6 +1,6 @@
 # Run Version History
 
-Generated: 2026-03-15, Updated: 2026-03-30
+Generated: 2026-03-15, Updated: 2026-03-31
 
 ## 데이터 위치
 
@@ -11,10 +11,10 @@ Generated: 2026-03-15, Updated: 2026-03-30
 ## Current V55 Note
 
 - 최신 active family: `V55`
-- 현재 기본 track: `V55.A5.3`
-- 현재 실험 목적: `STAND` phase에서는 phase-table forward(2/8)를 유지하고,
-  `gait-gate release` 이후에만 `forward_velocity 2 -> 16`,
-  `forward_velocity_bootstrap 8 -> 12` soft ramp가 collapse를 완화하는지 검증
+- 현재 기본 track: `V55.A5.6`
+- 현재 실험 목적: `A5.5`의 부분 개선을 이어 `min_height termination`
+  threshold를 `0.12 -> 0.10`으로 한 단계 더 낮췄을 때,
+  `iter 500` release collapse의 깊이와 `iter 600` 회복 속도가 더 좋아지는지 검증
 - 현재 direct debug 대상: `forward_velocity`, `forward_velocity_bootstrap`,
   `shoulder_neutral`, `stance_width_penalty`,
   `rear/front left_right propulsion diff penalty`,
