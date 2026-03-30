@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: 설계 확정
+> 상태: 설계 확정 + A4 1차 구현 완료
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -530,7 +530,91 @@ for N updates
 
 ---
 
-## 10. 최종 추천
+## 10. 구현 상태
+
+현재 코드 기준 구현 상태:
+
+```text
+기본 실행 버전
+- TRAIN_VERSION = V55.A4
+
+구현 완료
+- Track A / Track B / B2 / B3 분기
+- A-track: phase observation OFF
+- A-track: phase reward OFF
+- B-track: phase auxiliary ON
+- V55 전용 penalty override 유지
+- V55 전용 forward override 유지
+- iter 0 / 100 / 500 V55 audit 로그
+
+주의
+- V55.A4는 "구현 완료" 상태이지 "학습 성공 검증 완료" 상태는 아님
+- 다음 단계는 fresh start 기준 runtime validation이다
+```
+
+### 10.1 A4에서 실제로 막은 경로
+
+`env_cfg` 값만 바꾸는 것으로는 충분하지 않았다.
+
+실제 문제:
+
+```text
+legacy STAND phase table이 runtime에서 아래 항목을 다시 덮어썼다
+- action_rate_l2
+- joint_vel_l2
+- dof_acc_l2
+- forward_velocity
+- forward_velocity_bootstrap
+```
+
+`A2`는 penalty 3개를 막았고, `A4`는 forward 2개까지 포함해 총 5개를 `V55 runtime override`로 유지한다.
+
+### 10.2 A4 fresh start 검증 규칙
+
+`코드값`이 아니라 `curriculum_0.pt`의 `_reward_weights`로 판정한다.
+
+초기 fresh start에서 반드시 확인할 값:
+
+```text
+action_rate_l2             = -0.3
+joint_vel_l2               = -0.1
+dof_acc_l2                 = -5e-6
+forward_velocity           = 16.0
+forward_velocity_bootstrap = 12.0
+phase_contact              = 없음
+phase_clearance            = 없음
+```
+
+판정 원칙:
+
+```text
+env_cfg에 적혀 있어도 충분하지 않다.
+curriculum_0.pt에서 실제 적용값이 맞아야 구현 완료로 본다.
+```
+
+### 10.3 A4 초기 학습 판정
+
+초기 `A4` 런은 아래 순서로 판정한다.
+
+```text
+iter 0
+- version = V55.A4
+- phase OFF
+- 5개 override 실제 적용 확인
+
+iter 100
+- active reward / penalty dominance 확인
+- dof_acc_l2 weighted contribution 확인
+- forward_velocity / forward_velocity_bootstrap 실효 확인
+
+iter 500
+- baseline recovery 성공/실패 판정
+- B1 진입 가능 여부 결정
+```
+
+---
+
+## 11. 최종 추천
 
 바로 실행할 1순위는 `Experiment A1`이다.
 
