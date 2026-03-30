@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: A5.4 STAND forward 2/8 유지 + post-release forward ramp + 7항목 shock soft-ramp 구현 예정
+> 상태: A5.5 A5.4 유지 + min_height termination threshold 완화(0.15 -> 0.12) 구현 예정
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -324,7 +324,7 @@ dof_acc_l2     = -2e-5
 
 ## 7. V55 실험 일지
 
-이 섹션은 `A1 -> A5.4`까지의 흐름을 시간순으로 정리한 것이다.
+이 섹션은 `A1 -> A5.5`까지의 흐름을 시간순으로 정리한 것이다.
 핵심은 "처음 계획이 무엇이었고, 실제로 무엇이 구현됐고, 결과가 어땠으며,
 그래서 왜 다음 실험으로 넘어갔는가"를 한 번에 읽히게 하는 것이다.
 
@@ -736,6 +736,74 @@ gait_gate release 이후 500 iter
    release shock와 post-release forward recovery를 동시에 시험할 수 있다
 ```
 
+### 7.16 A5.4 결과: 결합만으로도 collapse는 막지 못함
+
+`A5.4`는 `A5.2`의 7개 shock soft-ramp와 `A5.3`의 conservative forward를 결합했지만,
+checkpoint `500`에서 다시 붕괴했다.
+
+확인된 사실:
+
+```text
+curriculum_0.pt
+- forward_velocity = 2.0
+- forward_velocity_bootstrap = 8.0
+- 7개 shock term = pre 값
+
+iter 500 latest
+- mean_episode_length 4.37
+- min_height termination 0.997
+- stride_length 0.032
+- diagonal_coupling_raw 0.0067
+```
+
+의미:
+
+```text
+1. A5.4의 초기 설정은 의도대로 들어갔다
+2. 그럼에도 iter 500에서 다시 min_height collapse가 발생했다
+3. 따라서 "shock 완화 + conservative forward" 결합도 충분조건은 아니었다
+```
+
+### 7.17 A5.5: min_height 증폭기 가설 검증
+
+`V47`과 `A5.x`의 중요한 차이가 하나 더 확인됐다.
+
+```text
+V47
+- iter 500에서도 ep_len이 높게 유지
+- min_height termination 없음
+
+A5.x
+- iter 500에서 min_height termination이 99% 가까이 지배
+```
+
+현재 가장 타당한 해석:
+
+```text
+release 직후 자세가 잠깐 흔들리는 것은 V47에서도 있었을 수 있다.
+하지만 V47은 회복할 시간이 있었고,
+A5.x는 min_height termination이 그 순간을 즉사로 바꿔버리는
+"collapse amplifier" 역할을 할 수 있다.
+```
+
+그래서 다음 실험은 `A5.5`다.
+
+정의:
+
+```text
+A5.5 = A5.4 유지
+     + min_height termination threshold 완화
+       0.15 -> 0.12
+```
+
+왜 `비활성`이 아니라 `threshold 완화`부터 하는가:
+
+```text
+1. 일시적 release 흔들림은 허용
+2. 실제 심한 낙하는 여전히 termination으로 잡음
+3. 원인 분리가 더 깨끗함
+```
+
 ---
 
 ## 8. 실험 단계
@@ -1040,7 +1108,7 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.A5.4
+- TRAIN_VERSION = V55.A5.5
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -1053,13 +1121,14 @@ for N updates
 - A5.2: 7항목 release soft-ramp
 - A5.3: STAND forward 제거 + post-release forward ramp
 - A5.4: A5.2 7항목 shock soft-ramp + A5.3 forward ramp 결합
+- A5.5: A5.4 유지 + min_height termination threshold 0.12 완화
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
 - A5는 iter 500 이전까지 baseline recovery에 성공했지만
   gait_gate release 직후 min_height collapse가 발생했다
 - 다음 단계의 최우선 검증은
-  A5.4 fresh start로 "conservative STAND forward + 7항목 shock 완화" 결합 실험을 checkpoint/runtime 기준으로 확인하는 것이다
+  A5.5 fresh start로 "min_height가 iter-500 collapse 증폭기인지"를 checkpoint/runtime 기준으로 확인하는 것이다
 ```
 
 ### 11.1 A5에서 실제로 막은 경로
@@ -1106,8 +1175,8 @@ bad_orientation   ~1%
 
 ### 11.3 다음 우선 실험 방향
 
-다음 우선 실험(`A5.4`)은
-`A5.2`와 `A5.3`를 결합한 교차 실험이다.
+다음 우선 실험(`A5.5`)은
+`A5.4`를 유지한 채 `min_height termination`만 완화하는 작은 ablation이다.
 
 ```text
 STAND phase
@@ -1126,6 +1195,9 @@ gait_gate release 이후 500 iter soft-ramp
 - rear/front usage diff penalty soft-ramp
 - per_leg_contact_floor soft-ramp
 
+추가 변경
+- min_height termination threshold: 0.15 -> 0.12
+
 공통 원칙
 - forward 항목도 ownership 충돌 없이 V55 전용 경로에서만 제어
 - iter 499 / 500 / 501의 실제 weight를 직접 로그로 확인
@@ -1135,9 +1207,9 @@ gait_gate release 이후 500 iter soft-ramp
 이 방향을 우선하는 이유:
 
 ```text
-1. A5.2는 shock 완화 only로는 충분하지 않음을 보여줌
-2. A5.3는 conservative forward only로도 충분하지 않음을 보여줌
-3. 따라서 다음 최소 조합은 두 가설의 교차 실험이다
+1. A5.4도 iter 500 collapse를 막지 못했다
+2. V47에는 min_height termination이 없고, A5.x에는 있다
+3. min_height가 release 직후 불안정을 즉사로 바꾸는 증폭기인지 먼저 분리할 가치가 있다
 ```
 
 ### 11.4 다음 우선 실험 검증 규칙
@@ -1206,10 +1278,11 @@ iter 499 / 500 / 501
 
 ```text
 iter 0
-- version = V55.A5.4
+- version = V55.A5.5
 - phase OFF
 - forward 2개가 STAND table 값(2.0 / 8.0)인지 확인
 - 7개 shock term이 pre 값(-1/0/-1 계열)인지 확인
+- min_height termination threshold가 0.12인지 확인
 
 iter 100
 - active reward / penalty dominance 확인
@@ -1219,7 +1292,7 @@ iter 100
 iter 500
 - release 직후 forward ramp가 시작되는지 확인
 - 7개 shock term soft-ramp가 post 값으로 즉시 점프하지 않는지 확인
-- min_height collapse 재발 여부 확인
+- min_height collapse가 완화되는지 확인
 - forward 2개 ramp 중간값 확인
 ```
 
@@ -1227,8 +1300,8 @@ iter 500
 
 ## 12. 최종 추천
 
-바로 실행할 1순위는 `A5.4`다.
+바로 실행할 1순위는 `A5.5`다.
 
 한 줄 요약:
 
-`지금은 A5.2와 A5.3 중 하나를 더 밀 때가 아니라, STAND에서는 보수적 forward policy를 유지하면서 gait_gate 이후에는 forward와 7개 shock term을 함께 soft-ramp하는 A5.4 교차 실험으로 넘어가야 한다.`
+`지금은 reward를 더 크게 뜯을 때가 아니라, A5.4를 유지한 채 min_height termination threshold를 낮춰 iter-500 collapse가 termination 증폭 문제인지 먼저 분리해야 한다.`
