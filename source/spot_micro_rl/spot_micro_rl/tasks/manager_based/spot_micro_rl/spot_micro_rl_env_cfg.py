@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V55.A5.3"
+TRAIN_VERSION = "V55.A5.4"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1187,8 +1187,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ══════════════════════════════════════════════════════════
         if _IS_V55:
             self.curriculum.reward_weights.params["v55_track"] = _V55_TRACK
-            if _V55_TRACK in {"A5.3", "A7"}:
-                # A5.3/A7: STAND에서는 legacy phase table의 보수적 forward(2/8)를 사용하고,
+            if _V55_TRACK in {"A5.3", "A5.4", "A7"}:
+                # A5.3/A5.4/A7: STAND에서는 legacy phase table의 보수적 forward(2/8)를 사용하고,
                 # gait_gate release 이후에만 16/12로 점진 ramp 한다.
                 self.curriculum.reward_weights.params["v55_release_forward_ramp_iters"] = 500
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_pre"] = 2.0
@@ -1216,9 +1216,11 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
                 self.curriculum.reward_weights.params["v55_release_stance_width_post"] = -3.0
 
-            elif _V55_TRACK == "A5.2":
+            elif _V55_TRACK in {"A5.2", "A5.4"}:
                 # A5.2: expand release-shock mitigation to the next most likely
                 # gait-gate jump group while preserving the A5 baseline core.
+                # A5.4: keep the same 7-term release soft-ramp, but combine it with
+                # the conservative STAND forward policy + post-release forward ramp.
                 self.curriculum.reward_weights.params["v55_release_soft_ramp_iters"] = 500
                 self.curriculum.reward_weights.params["v55_release_shoulder_neutral_pre"] = -1.0
                 self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = -6.0

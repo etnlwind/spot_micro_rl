@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: A5.3 STAND forward override 제거 + gait_gate 이후 forward ramp 구현 완료, fresh start 검증 대기
+> 상태: A5.4 STAND forward 2/8 유지 + post-release forward ramp + 7항목 shock soft-ramp 구현 예정
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -105,6 +105,68 @@ iter 150에서 ep_len = 25
 - 추세도 상승
 
 => 즉시 abort가 아니라 보류 + 추가 관찰
+```
+
+### 원칙 5: 한 실험 = 한 가설
+
+`V55`에서는 한 실험이 무엇을 검증하는지 명확해야 한다.
+
+```text
+A5.1 = posture/splay 2개 soft-ramp 가설
+A5.2 = shock group 7개 soft-ramp 가설
+A5.3 = conservative STAND forward 가설
+A5.4 = A5.2 + A5.3 교차 실험
+```
+
+즉 한 번 실패했다고 바로 "원인이 아니다"라고 말하지 않고,
+항상 다음처럼 표현한다.
+
+```text
+- 이 조건만으로는 충분하지 않았다
+- 다음 최소 조합이 무엇인지 본다
+```
+
+### 원칙 6: iteration은 checkpoint 기준으로만 말한다
+
+TensorBoard scalar의 내부 `step`과 학습 checkpoint iteration을 섞지 않는다.
+
+이 문서에서 `iter 500`이라고 할 때는 항상 다음을 뜻한다.
+
+```text
+- model_500.pt
+- curriculum_500.pt
+- 또는 그에 대응하는 checkpoint iteration
+```
+
+`TensorBoard`에서 보이는 scalar step 숫자는 보조 정보일 뿐,
+핵심 판정 기준으로 쓰지 않는다.
+
+### 원칙 7: env_cfg / snapshot / runtime / TensorBoard를 분리해서 해석한다
+
+이 프로젝트에서 같은 항목이라도 네 층위가 다를 수 있다.
+
+```text
+1. env_cfg 값
+   - 코드에 적은 의도값
+
+2. checkpoint snapshot 값
+   - curriculum_0.pt / 500.pt / 600.pt 안의 저장값
+
+3. runtime direct weight
+   - reward_manager.get_term_cfg(...).weight
+   - 실제 그 iteration에 policy가 받는 값
+
+4. TensorBoard episode scalar
+   - weight × raw score × episode 집계 결과
+```
+
+해석 규칙:
+
+```text
+- env_cfg만 보고 "구현됐다"고 말하지 않는다
+- curriculum_x.pt만 보고 runtime 성공/실패를 단정하지 않는다
+- TensorBoard scalar만 보고 실제 weight를 역산해 확정하지 않는다
+- 중요한 충돌은 반드시 direct weight debug 로그로 본다
 ```
 
 ---
@@ -262,7 +324,7 @@ dof_acc_l2     = -2e-5
 
 ## 7. V55 실험 일지
 
-이 섹션은 `A1 -> A5.3`까지의 흐름을 시간순으로 정리한 것이다.
+이 섹션은 `A1 -> A5.4`까지의 흐름을 시간순으로 정리한 것이다.
 핵심은 "처음 계획이 무엇이었고, 실제로 무엇이 구현됐고, 결과가 어땠으며,
 그래서 왜 다음 실험으로 넘어갔는가"를 한 번에 읽히게 하는 것이다.
 
@@ -591,6 +653,89 @@ gait_gate release 이후 500 iter soft-ramp
 3. 이건 V47과 A5의 차이를 가장 직접적으로 검증하는 경로다
 ```
 
+### 7.14 A5.3 결과: 가설 약화
+
+`A5.3`의 실제 데이터는 다음을 보여줬다.
+
+```text
+iter 400
+- ep_len 250
+- stride 3.24
+- diagonal_coupling_raw 0.53
+- min_height 0.0
+
+iter 500
+- ep_len 3.75
+- min_height 0.999
+- time_out 사실상 0
+```
+
+그리고 snapshot 기준:
+
+```text
+curriculum_0.pt
+- forward_velocity = 2.0
+- forward_velocity_bootstrap = 8.0
+
+curriculum_600.pt
+- forward_velocity = 4.8
+- forward_velocity_bootstrap = 8.8
+```
+
+의미:
+
+```text
+1. STAND에서 forward 2/8이어도 pre-release baseline은 충분히 강했다
+2. 즉 "STAND forward 16/12가 A5 성공의 핵심"은 아니었다
+3. 그럼에도 iter 500 collapse는 그대로 재발했다
+4. 따라서 conservative forward only도 충분조건이 아니었다
+```
+
+### 7.15 A5.4: 현재 최우선 실험
+
+현재까지의 두 분리 실험 결과:
+
+```text
+A5.2
+- shock 완화 only
+- 실패
+
+A5.3
+- conservative forward only
+- 실패
+```
+
+따라서 다음 최소 합리적 조합은 `A5.4`다.
+
+정의:
+
+```text
+STAND phase
+- forward_velocity = 2.0
+- forward_velocity_bootstrap = 8.0
+
+gait_gate release 이후 500 iter
+- forward_velocity 2.0 -> 16.0 soft-ramp
+- forward_velocity_bootstrap 8.0 -> 12.0 soft-ramp
+
+동시에 유지
+- A5.2의 7개 release shock term soft-ramp
+  * shoulder_neutral
+  * stance_width_penalty
+  * rear/front propulsion diff penalties
+  * rear/front usage diff penalties
+  * per_leg_contact_floor
+```
+
+왜 이게 지금 맞는가:
+
+```text
+1. A5.2와 A5.3은 이미 분리 검증한 두 가설이다
+2. A5.4는 무작정 변수 추가가 아니라 두 가설의 교차 실험이다
+3. STAND baseline은 보수적으로 유지하면서,
+   release shock와 post-release forward recovery를 동시에 시험할 수 있다
+```
+
 ---
 
 ## 8. 실험 단계
@@ -895,7 +1040,7 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.A5.3
+- TRAIN_VERSION = V55.A5.4
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -906,13 +1051,15 @@ for N updates
 - A5: penalty는 legacy STAND table ramp 유지
 - A5.1: posture/splay 2항목 release soft-ramp
 - A5.2: 7항목 release soft-ramp
+- A5.3: STAND forward 제거 + post-release forward ramp
+- A5.4: A5.2 7항목 shock soft-ramp + A5.3 forward ramp 결합
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
 - A5는 iter 500 이전까지 baseline recovery에 성공했지만
   gait_gate release 직후 min_height collapse가 발생했다
 - 다음 단계의 최우선 검증은
-  A5.3 fresh start로 STAND forward 제거 가설을 checkpoint/runtime 기준으로 확인하는 것이다
+  A5.4 fresh start로 "conservative STAND forward + 7항목 shock 완화" 결합 실험을 checkpoint/runtime 기준으로 확인하는 것이다
 ```
 
 ### 11.1 A5에서 실제로 막은 경로
@@ -959,9 +1106,8 @@ bad_orientation   ~1%
 
 ### 11.3 다음 우선 실험 방향
 
-다음 우선 실험(`A5.3` 또는 별도 `A7`)은
-`release shock 항목을 더 늘리는 것`이 아니라
-`STAND phase에서 어떤 forward policy를 학습시키는가`를 바꾸는 것이다.
+다음 우선 실험(`A5.4`)은
+`A5.2`와 `A5.3`를 결합한 교차 실험이다.
 
 ```text
 STAND phase
@@ -973,6 +1119,13 @@ gait_gate release 이후 500 iter soft-ramp
 - forward_velocity: 2.0 -> 16.0
 - forward_velocity_bootstrap: 8.0 -> 12.0
 
+동시에 유지
+- shoulder_neutral soft-ramp
+- stance_width_penalty soft-ramp
+- rear/front propulsion diff penalty soft-ramp
+- rear/front usage diff penalty soft-ramp
+- per_leg_contact_floor soft-ramp
+
 공통 원칙
 - forward 항목도 ownership 충돌 없이 V55 전용 경로에서만 제어
 - iter 499 / 500 / 501의 실제 weight를 직접 로그로 확인
@@ -982,9 +1135,9 @@ gait_gate release 이후 500 iter soft-ramp
 이 방향을 우선하는 이유:
 
 ```text
-1. A5.1 / A5.2는 release 후 penalty shock 완화만으로는 충분하지 않음을 보여줌
-2. 더 근본 원인은 STAND phase에서 학습한 공격적 forward policy일 수 있음
-3. V47은 같은 gait_gate release를 버텼고, 차이는 release 이전 forward policy일 가능성이 큼
+1. A5.2는 shock 완화 only로는 충분하지 않음을 보여줌
+2. A5.3는 conservative forward only로도 충분하지 않음을 보여줌
+3. 따라서 다음 최소 조합은 두 가설의 교차 실험이다
 ```
 
 ### 11.4 다음 우선 실험 검증 규칙
@@ -999,6 +1152,13 @@ joint_vel_l2               = -0.05
 dof_acc_l2                 = -5e-7
 forward_velocity           = 2.0
 forward_velocity_bootstrap = 8.0
+shoulder_neutral           = -1.0
+stance_width_penalty       = 0.0
+rear_left_right_propulsion_diff_penalty  = 0.0
+front_left_right_propulsion_diff_penalty = 0.0
+rear_left_right_usage_diff_penalty       = 0.0
+front_left_right_usage_diff_penalty      = 0.0
+per_leg_contact_floor      = -1.0
 phase_contact              = 없음
 phase_clearance            = 없음
 ```
@@ -1046,9 +1206,10 @@ iter 499 / 500 / 501
 
 ```text
 iter 0
-- version = V55.A5.3 또는 V55.A7
+- version = V55.A5.4
 - phase OFF
 - forward 2개가 STAND table 값(2.0 / 8.0)인지 확인
+- 7개 shock term이 pre 값(-1/0/-1 계열)인지 확인
 
 iter 100
 - active reward / penalty dominance 확인
@@ -1057,6 +1218,7 @@ iter 100
 
 iter 500
 - release 직후 forward ramp가 시작되는지 확인
+- 7개 shock term soft-ramp가 post 값으로 즉시 점프하지 않는지 확인
 - min_height collapse 재발 여부 확인
 - forward 2개 ramp 중간값 확인
 ```
@@ -1065,8 +1227,8 @@ iter 500
 
 ## 12. 최종 추천
 
-바로 실행할 1순위는 `STAND forward override 제거 + gait_gate 이후 forward ramp` 실험이다.
+바로 실행할 1순위는 `A5.4`다.
 
 한 줄 요약:
 
-`지금은 release shock penalty를 더 늘려 조정할 때가 아니라, STAND phase에서 V47과 양립 가능한 보수적 forward policy를 먼저 학습시키고, gait_gate 이후에만 forward drive를 강화하는 방향으로 넘어가야 한다.`
+`지금은 A5.2와 A5.3 중 하나를 더 밀 때가 아니라, STAND에서는 보수적 forward policy를 유지하면서 gait_gate 이후에는 forward와 7개 shock term을 함께 soft-ramp하는 A5.4 교차 실험으로 넘어가야 한다.`
