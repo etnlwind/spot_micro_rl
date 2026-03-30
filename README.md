@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니다. V49+는 4,096개, V42~V48은 8,192개, V41 이하는 20,480개 환경을 사용합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: V53 훈련 중. V38.3 base(77 reward) + boot_standing + soft height gate + min_height termination + front_leg_lift_reward. 자연스러운 4발 trot 보행을 목표로 앞다리 들기(front_leg_lift) 문제 해결 중. V47~V52에서 귀뚜라미 보행(앞다리 미사용) 원인 분석 → 4발 평균 leg_lift가 앞다리 사용을 penalty화하는 구조 발견 → V53에서 FL/FR 전용 reward 추가.
+**현재 상태**: `V55` 계열 실험 진행 중. `V47`의 강한 baseline locomotion을 참고하되, `V54`의 handoff collapse를 피하기 위해 **baseline recovery first, phase probe second** 전략으로 재설계했다. 현재 active track은 `V55.A5.3`이며, `STAND` phase에서는 보수적 forward policy를 유지하고 `gait-gate release` 이후에만 forward drive를 점진 강화하는 실험을 검증 중이다.
 
 ### 기술 스택
 
@@ -211,14 +211,15 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V53` 훈련 중 (V38.3 base + boot_standing + height gate + front_leg_lift)
+- 학습 버전: `V55.A5.3` (STAND forward override 제거 + post-release forward ramp 실험)
 - active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
 - 접촉 해석 기본값: `toe_link`
 - 기능 플래그: `_CLEAN_REWARDS=False`, `_CONNECTED_TROT=False`, `_USE_BOOT_STANDING=True`
 - 병렬 환경: 4,096
 - save_interval: 100
-- 신규 기능: `height_walking_gate` (boot-gated), `min_height_termination` (boot-gated), `front_leg_lift_reward` (FL/FR only), `front_rear_symmetry`
-- 참고 문서: `plan/V53_PLAN.md` (현재), `plan/V43-V53_HISTORY.md`
+- 현재 핵심 이슈: `iter 500` gait-gate release 이후 발생하는 `min_height` collapse의 근본 원인이 `release shock`인지, 아니면 `STAND`에서 학습한 공격적 forward policy인지 분리 검증
+- 현재 완화 실험: `STAND`에서는 forward를 phase-table 값(2/8)으로 두고, release 이후에만 `2/8 -> 16/12` soft ramp
+- 참고 문서: `plan/V55_PLAN.md` (현재), `plan/V43-V53_HISTORY.md`
 - CLI 명령: start/stop/resume은 Telegram→Listener 경유 (직접 실행 아님), status/hb/selfcheck만 로컬
 - `/start gui` 옵션으로 GUI 모드 훈련 시작 가능
 - **주의**: listen.cmd는 Windows 터미널에서만 직접 실행 (WSL 금지)

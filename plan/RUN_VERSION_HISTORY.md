@@ -1,12 +1,24 @@
 # Run Version History
 
-Generated: 2026-03-15, Updated: 2026-03-18
+Generated: 2026-03-15, Updated: 2026-03-30
 
 ## 데이터 위치
 
 - **런 디렉토리**: `logs/rsl_rl/spot_micro_flat/YYYY-MM-DD_HH-MM-SS/`
 - **각 런 버전 파일**: `logs/rsl_rl/spot_micro_flat/<run_dir>/train_version.txt`
 - **이 문서 원본**: `plan/RUN_VERSION_HISTORY.md` (V21~V26 이후 분석 문서들과 함께 관리)
+
+## Current V55 Note
+
+- 최신 active family: `V55`
+- 현재 기본 track: `V55.A5.3`
+- 현재 실험 목적: `STAND` phase에서는 phase-table forward(2/8)를 유지하고,
+  `gait-gate release` 이후에만 `forward_velocity 2 -> 16`,
+  `forward_velocity_bootstrap 8 -> 12` soft ramp가 collapse를 완화하는지 검증
+- 현재 direct debug 대상: `forward_velocity`, `forward_velocity_bootstrap`,
+  `shoulder_neutral`, `stance_width_penalty`,
+  `rear/front left_right propulsion diff penalty`,
+  `rear/front left_right usage diff penalty`, `per_leg_contact_floor`
 
 ## Background
 

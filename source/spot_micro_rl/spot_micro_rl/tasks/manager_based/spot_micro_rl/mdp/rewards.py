@@ -3856,6 +3856,67 @@ def _apply_v55_release_soft_ramp(
             pass
 
 
+def _apply_v55_release_forward_ramp(
+    env: ManagerBasedRLEnv,
+    iteration: int,
+    ramp_iters: int,
+    forward_pre: float | None,
+    forward_post: float | None,
+    forward_bootstrap_pre: float | None,
+    forward_bootstrap_post: float | None,
+) -> None:
+    if ramp_iters <= 0:
+        ramp_iters = 1
+    release_iter = getattr(env, "_v47_boot_gate_released_iter", -1)
+    if release_iter is None or release_iter < 0:
+        alpha = 0.0
+    else:
+        alpha = min(1.0, max(0.0, (iteration - release_iter) / float(ramp_iters)))
+
+    def _blend(pre: float | None, post: float | None) -> float | None:
+        if pre is None or post is None:
+            return None
+        return float(pre + (post - pre) * alpha)
+
+    overrides = {
+        "forward_velocity": _blend(forward_pre, forward_post),
+        "forward_velocity_bootstrap": _blend(forward_bootstrap_pre, forward_bootstrap_post),
+    }
+    for term_name, weight in overrides.items():
+        if weight is None:
+            continue
+        try:
+            cfg = env.reward_manager.get_term_cfg(term_name)
+            cfg.weight = float(weight)
+            env.reward_manager.set_term_cfg(term_name, cfg)
+        except Exception:
+            pass
+
+
+def _log_v55_release_debug(env: ManagerBasedRLEnv, iteration: int) -> None:
+    if iteration not in (499, 500, 501):
+        return
+    names = [
+        "forward_velocity",
+        "forward_velocity_bootstrap",
+        "shoulder_neutral",
+        "stance_width_penalty",
+        "rear_left_right_propulsion_diff_penalty",
+        "front_left_right_propulsion_diff_penalty",
+        "rear_left_right_usage_diff_penalty",
+        "front_left_right_usage_diff_penalty",
+        "per_leg_contact_floor",
+    ]
+    parts: list[str] = []
+    for name in names:
+        try:
+            cfg = env.reward_manager.get_term_cfg(name)
+            parts.append(f"{name}={cfg.weight:.4f}")
+        except Exception:
+            parts.append(f"{name}=<missing>")
+    print(f"[ReleaseDebug] iter {iteration}: " + ", ".join(parts))
+
+
 def _curriculum_log_snapshot(env: ManagerBasedRLEnv, iteration: int,
                              alpha12: float, alpha23: float, validity_alpha: float, gate_paused: bool) -> None:
     """Ramp 상태 + key weight + raw metric snapshot 로깅.
@@ -4068,6 +4129,11 @@ def reward_weight_curriculum(
     v55_forward_velocity_bootstrap_weight: float | None = None,
     v55_standing_height_weight: float | None = None,
     v55_height_bonus_weight: float | None = None,
+    v55_release_forward_ramp_iters: int = 0,
+    v55_release_forward_velocity_pre: float | None = None,
+    v55_release_forward_velocity_post: float | None = None,
+    v55_release_forward_velocity_bootstrap_pre: float | None = None,
+    v55_release_forward_velocity_bootstrap_post: float | None = None,
     v55_release_soft_ramp_iters: int = 0,
     v55_release_shoulder_neutral_pre: float | None = None,
     v55_release_shoulder_neutral_post: float | None = None,
@@ -4271,7 +4337,28 @@ def reward_weight_curriculum(
                     shoulder_post=v55_release_shoulder_neutral_post,
                     stance_pre=v55_release_stance_width_pre,
                     stance_post=v55_release_stance_width_post,
+                    rear_prop_diff_pre=v55_release_rear_prop_diff_pre,
+                    rear_prop_diff_post=v55_release_rear_prop_diff_post,
+                    front_prop_diff_pre=v55_release_front_prop_diff_pre,
+                    front_prop_diff_post=v55_release_front_prop_diff_post,
+                    rear_usage_diff_pre=v55_release_rear_usage_diff_pre,
+                    rear_usage_diff_post=v55_release_rear_usage_diff_post,
+                    front_usage_diff_pre=v55_release_front_usage_diff_pre,
+                    front_usage_diff_post=v55_release_front_usage_diff_post,
+                    per_leg_contact_floor_pre=v55_release_per_leg_contact_floor_pre,
+                    per_leg_contact_floor_post=v55_release_per_leg_contact_floor_post,
                 )
+            if v55_release_forward_ramp_iters > 0:
+                _apply_v55_release_forward_ramp(
+                    env,
+                    iteration=iteration,
+                    ramp_iters=v55_release_forward_ramp_iters,
+                    forward_pre=v55_release_forward_velocity_pre,
+                    forward_post=v55_release_forward_velocity_post,
+                    forward_bootstrap_pre=v55_release_forward_velocity_bootstrap_pre,
+                    forward_bootstrap_post=v55_release_forward_velocity_bootstrap_post,
+                )
+            _log_v55_release_debug(env, iteration)
         if v55_track:
             _log_v55_audit_snapshot(env, iteration, v55_track)
         return None
@@ -4562,6 +4649,17 @@ def reward_weight_curriculum(
                 per_leg_contact_floor_pre=v55_release_per_leg_contact_floor_pre,
                 per_leg_contact_floor_post=v55_release_per_leg_contact_floor_post,
             )
+        if v55_release_forward_ramp_iters > 0:
+            _apply_v55_release_forward_ramp(
+                env,
+                iteration=iteration,
+                ramp_iters=v55_release_forward_ramp_iters,
+                forward_pre=v55_release_forward_velocity_pre,
+                forward_post=v55_release_forward_velocity_post,
+                forward_bootstrap_pre=v55_release_forward_velocity_bootstrap_pre,
+                forward_bootstrap_post=v55_release_forward_velocity_bootstrap_post,
+            )
+        _log_v55_release_debug(env, iteration)
 
     # ── Alpha 진행 (한 주기당 최대 증가량 제한) ──
     if _all_alphas_done:

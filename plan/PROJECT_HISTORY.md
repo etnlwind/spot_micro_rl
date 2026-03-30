@@ -1,21 +1,21 @@
 # SpotMicro RL Training Project History
 
-**Last Updated**: 2026-03-27
-**Project Status**: V47 훈련 중 — V38.3 순정 + boot 가속. stride 6.29, coupling 0.46, shoulder 0.43
-**Current Active Run**: V47 (`2026-03-26_17-54-03`)
+**Last Updated**: 2026-03-30
+**Project Status**: V55 active — baseline recovery 후 `iter 500` gait-gate release collapse의 근본 원인을 `STAND` forward policy vs release shock로 분리 검증하는 단계
+**Current Active Run**: V55.A5.3
 
 > 최신 핸드오프: `plan/HANDOFF.md` 참조
 
 ---
 
-## Current Status Snapshot (V46 설계 완료)
+## Current Status Snapshot (V55 A5.3)
 
 | 항목 | 값 |
 |------|-----|
-| TRAIN_VERSION | `”V44”` (훈련 중), `”V46”` (다음) |
-| 상태 | V44 수렴 확정, V46 설계 완료 |
+| TRAIN_VERSION | `V55.A5.3` |
+| 상태 | `A5` baseline recovery 성공 후, `A5.3`에서 STAND forward override 제거 + post-release forward ramp 검증 중 |
 | 진입점 | `isaac_ops/listen.cmd` (listener), `isaac_ops/cli.cmd` (CLI) |
-| V46 핵심 | V38.3 기반 ~30 reward + boot gating(V43-E) + shoulder_neutral 분리(V44) |
+| V55 핵심 | baseline recovery first, phase probe second, iter-500 gait-gate release shock 완화 |
 
 ### V42~V46 학습 버전 요약
 

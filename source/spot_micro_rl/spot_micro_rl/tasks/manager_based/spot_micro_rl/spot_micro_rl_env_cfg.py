@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V55.A5.2"
+TRAIN_VERSION = "V55.A5.3"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1187,10 +1187,19 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ══════════════════════════════════════════════════════════
         if _IS_V55:
             self.curriculum.reward_weights.params["v55_track"] = _V55_TRACK
-            self.rewards.forward_velocity.weight = 16.0
-            self.rewards.forward_velocity_bootstrap.weight = 12.0
-            self.curriculum.reward_weights.params["v55_forward_velocity_weight"] = 16.0
-            self.curriculum.reward_weights.params["v55_forward_velocity_bootstrap_weight"] = 12.0
+            if _V55_TRACK in {"A5.3", "A7"}:
+                # A5.3/A7: STAND에서는 legacy phase table의 보수적 forward(2/8)를 사용하고,
+                # gait_gate release 이후에만 16/12로 점진 ramp 한다.
+                self.curriculum.reward_weights.params["v55_release_forward_ramp_iters"] = 500
+                self.curriculum.reward_weights.params["v55_release_forward_velocity_pre"] = 2.0
+                self.curriculum.reward_weights.params["v55_release_forward_velocity_post"] = 16.0
+                self.curriculum.reward_weights.params["v55_release_forward_velocity_bootstrap_pre"] = 8.0
+                self.curriculum.reward_weights.params["v55_release_forward_velocity_bootstrap_post"] = 12.0
+            else:
+                self.rewards.forward_velocity.weight = 16.0
+                self.rewards.forward_velocity_bootstrap.weight = 12.0
+                self.curriculum.reward_weights.params["v55_forward_velocity_weight"] = 16.0
+                self.curriculum.reward_weights.params["v55_forward_velocity_bootstrap_weight"] = 12.0
 
             # V55에서는 V54 handoff를 쓰지 않는다.
             self.curriculum.reward_weights.params["phase_contact_target"] = 0.0

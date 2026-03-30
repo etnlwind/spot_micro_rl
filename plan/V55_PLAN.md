@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: A5.2 release-shock 7항목 soft ramp 구현 완료, fresh start 재검증 대기
+> 상태: A5.3 STAND forward override 제거 + gait_gate 이후 forward ramp 구현 완료, fresh start 검증 대기
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -418,9 +418,80 @@ curriculum_500.pt만으로 runtime soft ramp 성공 여부를 단정하지 않�
 - 이 중 `leg_lift 15 -> 8`은 40%가 아니라 `53%`
 - 수치 표현은 문서에서 정확히 유지한다
 
+### 7.8 A5.2 결과와 해석
+
+`A5.2`는 `A5.1`보다 더 넓은 shock group을 soft ramp 했지만,
+결과적으로 `iter 500` 이후 collapse를 막지 못했다.
+
+현재까지 확인된 사실:
+
+- `A5.2`에서 새로 추가한 5개 soft ramp 항목은 실제로 점진 적용 흔적이 보임
+- 하지만 전체 학습 결과는 다시 `min_height` termination 지배로 붕괴
+- 즉 `release shock 항목을 더 늘리는 것`만으로는 충분하지 않았다
+
+이 해석의 의미:
+
+```text
+문제는 특정 penalty 1~2개가 너무 세다는 것만이 아니라,
+release 이전 STAND phase에서 policy가 어떤 전략을 학습했는가일 수 있다.
+```
+
+### 7.9 현재 최우선 가설
+
+가장 유력한 설명은 다음이다.
+
+```text
+V47
+- STAND phase에서 보수적 forward policy
+- gait_gate release 이후 walking penalty와 양립 가능
+
+A5 계열
+- STAND phase에서 forward 16 / bootstrap 12 override
+- 넓고 낮게 벌리고 빠르게 미는 공격적 전략 학습
+- gait_gate release 이후 walking penalty와 근본적으로 충돌
+```
+
+즉 현재 문제의 본질은:
+
+```text
+"release 후 penalty jump" 자체보다
+"release 전에 학습한 공격적 forward policy"가
+walking phase 요구와 양립 불가한 것일 수 있다.
+```
+
+### 7.10 다음 우선 실험 방향
+
+다음 실험(`A5.3` 또는 별도 `A7`)의 우선순위는 아래와 같다.
+
+```text
+1. STAND phase에서는 forward override를 제거한다
+   - forward_velocity = phase table STAND 값 (2.0)
+   - forward_velocity_bootstrap = STAND 값 (8.0)
+
+2. gait_gate release 이후에만
+   forward_velocity 2.0 -> 16.0
+   forward_velocity_bootstrap 8.0 -> 12.0
+   를 500 iter에 걸쳐 soft ramp 한다
+
+3. forward 항목도 ownership 충돌 없이
+   V55 전용 경로에서만 제어되게 한다
+
+4. iter 499 / 500 / 501에서
+   실제 reward_manager weight 로그를 직접 남긴다
+```
+
+평가:
+
+```text
+이 방향은
+- 17개 전체 soft ramp보다 원인 분리가 잘 되고
+- gait_gate 제거보다 V47 baseline ecology를 더 잘 보존하며
+- 지금까지 실패한 penalty-shock 완화보다 더 근본 원인을 직접 건드린다
+```
+
 ---
 
-## 7. 실험 단계
+## 8. 실험 단계
 
 ### Experiment A1: Pure Baseline Recovery
 
@@ -675,7 +746,7 @@ for N updates
 
 ---
 
-## 8. 모니터링 지표
+## 9. 모니터링 지표
 
 필수:
 
@@ -703,7 +774,7 @@ for N updates
 
 ---
 
-## 9. 구현 전 체크리스트
+## 10. 구현 전 체크리스트
 
 구현 전에 아래 6가지를 반드시 확인한다.
 
@@ -716,13 +787,13 @@ for N updates
 
 ---
 
-## 10. 구현 상태
+## 11. 구현 상태
 
 현재 코드 기준 구현 상태:
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.A6
+- TRAIN_VERSION = V55.A5.3
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -731,16 +802,18 @@ for N updates
 - B-track: phase auxiliary ON
 - V55 전용 forward override 유지
 - A5: penalty는 legacy STAND table ramp 유지
-- A6: A5 core + posture override + gait_gate release soft-ramp
+- A5.1: posture/splay 2항목 release soft-ramp
+- A5.2: 7항목 release soft-ramp
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
 - A5는 iter 500 이전까지 baseline recovery에 성공했지만
   gait_gate release 직후 min_height collapse가 발생했다
-- 다음 단계는 A6 fresh start 기준 runtime validation이다
+- 다음 단계의 최우선 검증은
+  A5.3 fresh start로 STAND forward 제거 가설을 checkpoint/runtime 기준으로 확인하는 것이다
 ```
 
-### 10.1 A5에서 실제로 막은 경로
+### 11.1 A5에서 실제로 막은 경로
 
 `env_cfg` 값만 바꾸는 것으로는 충분하지 않았다.
 
@@ -758,7 +831,7 @@ legacy STAND phase table이 runtime에서 아래 항목을 다시 덮어썼다
 `A2/A4`는 penalty까지 override했지만, `A5`는 forward 2개만 `V55 runtime override`로 유지한다.
 penalty 3개는 다시 STAND phase table이 관리하게 둔다.
 
-### 10.2 A5에서 새로 드러난 붕괴 경로
+### 11.2 A5에서 새로 드러난 붕괴 경로
 
 `A5`는 STAND phase에서 잘 올라갔지만, `iter 500`에서 gait gate release가 기록된 직후 붕괴했다.
 
@@ -782,38 +855,39 @@ bad_orientation   ~1%
 따라서 `A6`의 1차 목적은 posture reward를 새로 많이 추가하는 것이 아니라,
 `gait_gate release shock`를 직접 만든 두 항목만 `500 iter`에 걸쳐 soft-ramp하는 것이다.
 
-### 10.3 A6 구현 내용
+### 11.3 다음 우선 실험 방향
 
-`A6`는 `A5 + posture correction + release shock 완화`다.
-
-```text
-유지
-- action_rate_l2 / joint_vel_l2 / dof_acc_l2: STAND table 관리
-- forward_velocity / forward_velocity_bootstrap: 16 / 12 runtime override 유지
-- trot_gait / diagonal_coupling / stride 동력 유지
-
-즉시 보강
-- standing_height: 40 -> 48 runtime override
-- height_bonus: 25 -> 30 runtime override
-- base_height_l2: -20.0 -> -23.0 env_cfg 직접 조정
-- front_rear_support_balance_penalty: -8.0 -> -9.6 env_cfg 직접 조정
-
-release 후 500 iter soft-ramp
-- shoulder_neutral: -1.0 -> -6.0
-- stance_width_penalty: 0.0 -> -3.0
-```
-
-원칙:
+다음 우선 실험(`A5.3` 또는 별도 `A7`)은
+`release shock 항목을 더 늘리는 것`이 아니라
+`STAND phase에서 어떤 forward policy를 학습시키는가`를 바꾸는 것이다.
 
 ```text
-첫 실험은 shock source 2개만 soft-ramp한다.
-undesired_contacts 등 다른 항목은 같이 건드리지 않는다.
-그래야 iter 500 collapse의 직접 원인을 분리해서 검증할 수 있다.
+STAND phase
+- forward_velocity = phase table STAND 값 (2.0)
+- forward_velocity_bootstrap = STAND 값 (8.0)
+- 즉 STAND에서는 공격적 forward override를 제거
+
+gait_gate release 이후 500 iter soft-ramp
+- forward_velocity: 2.0 -> 16.0
+- forward_velocity_bootstrap: 8.0 -> 12.0
+
+공통 원칙
+- forward 항목도 ownership 충돌 없이 V55 전용 경로에서만 제어
+- iter 499 / 500 / 501의 실제 weight를 직접 로그로 확인
+- posture correction(A6)은 이 실험 이후 보류/재평가
 ```
 
-### 10.4 A6 fresh start 검증 규칙
+이 방향을 우선하는 이유:
 
-`코드값`이 아니라 `curriculum_0.pt`의 `_reward_weights`로 판정한다.
+```text
+1. A5.1 / A5.2는 release 후 penalty shock 완화만으로는 충분하지 않음을 보여줌
+2. 더 근본 원인은 STAND phase에서 학습한 공격적 forward policy일 수 있음
+3. V47은 같은 gait_gate release를 버텼고, 차이는 release 이전 forward policy일 가능성이 큼
+```
+
+### 11.4 다음 우선 실험 검증 규칙
+
+`코드값`이 아니라 `curriculum_0.pt`, `curriculum_500.pt`, runtime weight 로그로 판정한다.
 
 초기 fresh start에서 반드시 확인할 값:
 
@@ -821,12 +895,8 @@ undesired_contacts 등 다른 항목은 같이 건드리지 않는다.
 action_rate_l2             = -0.3
 joint_vel_l2               = -0.05
 dof_acc_l2                 = -5e-7
-forward_velocity           = 16.0
-forward_velocity_bootstrap = 12.0
-standing_height            = 48.0
-height_bonus               = 30.0
-shoulder_neutral           = -1.0
-stance_width_penalty       = 0.0
+forward_velocity           = 2.0
+forward_velocity_bootstrap = 8.0
 phase_contact              = 없음
 phase_clearance            = 없음
 ```
@@ -841,42 +911,60 @@ curriculum_0.pt에서 실제 적용값이 맞아야 구현 완료로 본다.
 추가 확인:
 
 ```text
-base_height_l2                        = -23.0
-front_rear_support_balance_penalty    = -9.6
+iter 499 / 500 / 501
+- reward_manager.get_term_cfg(\"forward_velocity\").weight
+- reward_manager.get_term_cfg(\"forward_velocity_bootstrap\").weight
+- reward_manager.get_term_cfg(\"shoulder_neutral\").weight
+- reward_manager.get_term_cfg(\"stance_width_penalty\").weight
+- reward_manager.get_term_cfg(\"rear_left_right_propulsion_diff_penalty\").weight
+- reward_manager.get_term_cfg(\"front_left_right_propulsion_diff_penalty\").weight
+- reward_manager.get_term_cfg(\"rear_left_right_usage_diff_penalty\").weight
+- reward_manager.get_term_cfg(\"front_left_right_usage_diff_penalty\").weight
+- reward_manager.get_term_cfg(\"per_leg_contact_floor\").weight
 ```
 
-이 두 항목은 phase table 관리 대상이 아니므로
-`reward_manager` snapshot 또는 audit 로그에서 확인한다.
+가능하면 로그 형식도 고정한다:
 
-### 10.5 A6 초기 학습 판정
+```text
+[ReleaseDebug] iter 499
+  forward_velocity=...
+  forward_velocity_bootstrap=...
+  shoulder_neutral=...
+  stance_width_penalty=...
+  rear_left_right_propulsion_diff_penalty=...
+  front_left_right_propulsion_diff_penalty=...
+  rear_left_right_usage_diff_penalty=...
+  front_left_right_usage_diff_penalty=...
+  per_leg_contact_floor=...
+```
 
-초기 `A6` 런은 아래 순서로 판정한다.
+### 11.5 다음 우선 실험 초기 학습 판정
+
+초기 새 런은 아래 순서로 판정한다.
 
 ```text
 iter 0
-- version = V55.A6
+- version = V55.A5.3 또는 V55.A7
 - phase OFF
-- forward 2개 + standing/height override 실제 적용 확인
-- shoulder_neutral=-1.0, stance_width_penalty=0.0 확인
+- forward 2개가 STAND table 값(2.0 / 8.0)인지 확인
 
 iter 100
 - active reward / penalty dominance 확인
 - dof_acc_l2 weighted contribution 확인
-- forward_velocity / forward_velocity_bootstrap 실효 확인
-- shoulder_left_right_diff, rear contact ratio, front/rear support imbalance 확인
+- 보수적 STAND policy가 형성되는지 확인
 
 iter 500
-- release 직후 shock가 완화되는지 확인
+- release 직후 forward ramp가 시작되는지 확인
 - min_height collapse 재발 여부 확인
-- shoulder_neutral / stance_width_penalty ramp 중간값 확인
+- forward 2개 ramp 중간값 확인
 ```
 
 ---
 
-## 11. 최종 추천
+## 12. 최종 추천
 
-바로 실행할 1순위는 `Experiment A6`이다.
+바로 실행할 1순위는 `STAND forward override 제거 + gait_gate 이후 forward ramp` 실험이다.
 
 한 줄 요약:
 
-`지금은 clean V54를 더 밀 때가 아니라, 먼저 baseline을 복구하고, 그 다음 분리된 Track B에서 phase가 실제로 구조를 만드는가를 검증해야 한다.`
+`지금은 release shock penalty를 더 늘려 조정할 때가 아니라, STAND phase에서 V47과 양립 가능한 보수적 forward policy를 먼저 학습시키고, gait_gate 이후에만 forward drive를 강화하는 방향으로 넘어가야 한다.`
