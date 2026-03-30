@@ -3744,6 +3744,8 @@ def _log_v55_audit_snapshot(env: ManagerBasedRLEnv, iteration: int, v55_track: s
         "boot_standing",
         "standing_height",
         "feet_air_time",
+        "forward_velocity",
+        "forward_velocity_bootstrap",
         "trot_gait",
         "diagonal_coupling",
         "phase_contact",
@@ -3769,11 +3771,15 @@ def _apply_v55_penalty_overrides(
     action_rate_weight: float | None,
     joint_vel_weight: float | None,
     dof_acc_weight: float | None,
+    forward_velocity_weight: float | None,
+    forward_velocity_bootstrap_weight: float | None,
 ) -> None:
     overrides = {
         "action_rate_l2": action_rate_weight,
         "joint_vel_l2": joint_vel_weight,
         "dof_acc_l2": dof_acc_weight,
+        "forward_velocity": forward_velocity_weight,
+        "forward_velocity_bootstrap": forward_velocity_bootstrap_weight,
     }
     for term_name, weight in overrides.items():
         if weight is None:
@@ -3856,10 +3862,6 @@ def reward_weight_curriculum(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
     num_steps_per_env: int = 48,
-    v55_track: str = "",
-    v55_action_rate_weight: float | None = None,
-    v55_joint_vel_weight: float | None = None,
-    v55_dof_acc_weight: float | None = None,
     # Ramp 구간 정의
     ramp1_start: int = 1500,    # Phase 1→2 ramp 시작
     ramp1_end: int = 3000,      # Phase 1→2 ramp 완료
@@ -3994,6 +3996,12 @@ def reward_weight_curriculum(
     phase_clearance_target: float = 0.0,    # 0이면 비활성
     phase_ramp_in_iters: int = 500,         # gait_gate 해제 후 몇 iter에 걸쳐 target까지
     phase_table_enabled: bool = True,       # False면 legacy STAND/WALK/TROT phase table 비활성
+    v55_track: str | None = None,
+    v55_action_rate_weight: float | None = None,
+    v55_joint_vel_weight: float | None = None,
+    v55_dof_acc_weight: float | None = None,
+    v55_forward_velocity_weight: float | None = None,
+    v55_forward_velocity_bootstrap_weight: float | None = None,
     # 로깅
     log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
@@ -4168,6 +4176,8 @@ def reward_weight_curriculum(
                 action_rate_weight=v55_action_rate_weight,
                 joint_vel_weight=v55_joint_vel_weight,
                 dof_acc_weight=v55_dof_acc_weight,
+                forward_velocity_weight=v55_forward_velocity_weight,
+                forward_velocity_bootstrap_weight=v55_forward_velocity_bootstrap_weight,
             )
         if v55_track:
             _log_v55_audit_snapshot(env, iteration, v55_track)
@@ -4592,6 +4602,8 @@ def reward_weight_curriculum(
             action_rate_weight=v55_action_rate_weight,
             joint_vel_weight=v55_joint_vel_weight,
             dof_acc_weight=v55_dof_acc_weight,
+            forward_velocity_weight=v55_forward_velocity_weight,
+            forward_velocity_bootstrap_weight=v55_forward_velocity_bootstrap_weight,
         )
 
     # ── 주기적 로깅 (key weight + raw metric snapshot) ──
