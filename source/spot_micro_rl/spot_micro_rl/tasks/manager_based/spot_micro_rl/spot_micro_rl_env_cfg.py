@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V55.A5.1"
+TRAIN_VERSION = "V55.A5.2"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1206,6 +1206,25 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = -6.0
                 self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
                 self.curriculum.reward_weights.params["v55_release_stance_width_post"] = -3.0
+
+            elif _V55_TRACK == "A5.2":
+                # A5.2: expand release-shock mitigation to the next most likely
+                # gait-gate jump group while preserving the A5 baseline core.
+                self.curriculum.reward_weights.params["v55_release_soft_ramp_iters"] = 500
+                self.curriculum.reward_weights.params["v55_release_shoulder_neutral_pre"] = -1.0
+                self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = -6.0
+                self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
+                self.curriculum.reward_weights.params["v55_release_stance_width_post"] = -3.0
+                self.curriculum.reward_weights.params["v55_release_rear_prop_diff_pre"] = 0.0
+                self.curriculum.reward_weights.params["v55_release_rear_prop_diff_post"] = -20.0
+                self.curriculum.reward_weights.params["v55_release_front_prop_diff_pre"] = 0.0
+                self.curriculum.reward_weights.params["v55_release_front_prop_diff_post"] = -20.0
+                self.curriculum.reward_weights.params["v55_release_rear_usage_diff_pre"] = 0.0
+                self.curriculum.reward_weights.params["v55_release_rear_usage_diff_post"] = -10.0
+                self.curriculum.reward_weights.params["v55_release_front_usage_diff_pre"] = 0.0
+                self.curriculum.reward_weights.params["v55_release_front_usage_diff_post"] = -8.0
+                self.curriculum.reward_weights.params["v55_release_per_leg_contact_floor_pre"] = -1.0
+                self.curriculum.reward_weights.params["v55_release_per_leg_contact_floor_post"] = -12.0
 
             elif _V55_TRACK == "A6":
                 self.rewards.base_height_l2.weight = -23.0

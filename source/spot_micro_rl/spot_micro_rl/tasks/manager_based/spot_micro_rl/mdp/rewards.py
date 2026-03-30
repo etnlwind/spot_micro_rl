@@ -3812,6 +3812,16 @@ def _apply_v55_release_soft_ramp(
     shoulder_post: float | None,
     stance_pre: float | None,
     stance_post: float | None,
+    rear_prop_diff_pre: float | None = None,
+    rear_prop_diff_post: float | None = None,
+    front_prop_diff_pre: float | None = None,
+    front_prop_diff_post: float | None = None,
+    rear_usage_diff_pre: float | None = None,
+    rear_usage_diff_post: float | None = None,
+    front_usage_diff_pre: float | None = None,
+    front_usage_diff_post: float | None = None,
+    per_leg_contact_floor_pre: float | None = None,
+    per_leg_contact_floor_post: float | None = None,
 ) -> None:
     if ramp_iters <= 0:
         ramp_iters = 1
@@ -3829,6 +3839,11 @@ def _apply_v55_release_soft_ramp(
     overrides = {
         "shoulder_neutral": _blend(shoulder_pre, shoulder_post),
         "stance_width_penalty": _blend(stance_pre, stance_post),
+        "rear_left_right_propulsion_diff_penalty": _blend(rear_prop_diff_pre, rear_prop_diff_post),
+        "front_left_right_propulsion_diff_penalty": _blend(front_prop_diff_pre, front_prop_diff_post),
+        "rear_left_right_usage_diff_penalty": _blend(rear_usage_diff_pre, rear_usage_diff_post),
+        "front_left_right_usage_diff_penalty": _blend(front_usage_diff_pre, front_usage_diff_post),
+        "per_leg_contact_floor": _blend(per_leg_contact_floor_pre, per_leg_contact_floor_post),
     }
     for term_name, weight in overrides.items():
         if weight is None:
@@ -4058,6 +4073,16 @@ def reward_weight_curriculum(
     v55_release_shoulder_neutral_post: float | None = None,
     v55_release_stance_width_pre: float | None = None,
     v55_release_stance_width_post: float | None = None,
+    v55_release_rear_prop_diff_pre: float | None = None,
+    v55_release_rear_prop_diff_post: float | None = None,
+    v55_release_front_prop_diff_pre: float | None = None,
+    v55_release_front_prop_diff_post: float | None = None,
+    v55_release_rear_usage_diff_pre: float | None = None,
+    v55_release_rear_usage_diff_post: float | None = None,
+    v55_release_front_usage_diff_pre: float | None = None,
+    v55_release_front_usage_diff_post: float | None = None,
+    v55_release_per_leg_contact_floor_pre: float | None = None,
+    v55_release_per_leg_contact_floor_post: float | None = None,
     # 로깅
     log_interval: int = 100,    # N iteration마다 상태 출력
 ) -> None:
@@ -4526,6 +4551,16 @@ def reward_weight_curriculum(
                 shoulder_post=v55_release_shoulder_neutral_post,
                 stance_pre=v55_release_stance_width_pre,
                 stance_post=v55_release_stance_width_post,
+                rear_prop_diff_pre=v55_release_rear_prop_diff_pre,
+                rear_prop_diff_post=v55_release_rear_prop_diff_post,
+                front_prop_diff_pre=v55_release_front_prop_diff_pre,
+                front_prop_diff_post=v55_release_front_prop_diff_post,
+                rear_usage_diff_pre=v55_release_rear_usage_diff_pre,
+                rear_usage_diff_post=v55_release_rear_usage_diff_post,
+                front_usage_diff_pre=v55_release_front_usage_diff_pre,
+                front_usage_diff_post=v55_release_front_usage_diff_post,
+                per_leg_contact_floor_pre=v55_release_per_leg_contact_floor_pre,
+                per_leg_contact_floor_post=v55_release_per_leg_contact_floor_post,
             )
 
     # ── Alpha 진행 (한 주기당 최대 증가량 제한) ──

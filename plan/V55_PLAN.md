@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: A5.1 release-shock soft ramp 버그 수정 완료, fresh start 재검증 대기
+> 상태: A5.2 release-shock 7항목 soft ramp 구현 완료, fresh start 재검증 대기
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -319,20 +319,78 @@ release 이후 `shoulder_neutral`, `stance_width_penalty` 두 항목만 `500 ite
 
 이제야 `A5.1`이 실제로 검증 가능한 상태가 되었다.
 
-### 7.5 다음 검증 규칙
+### 7.5 A5.1 재검증 결과
 
-`A5.1`은 반드시 fresh start로 다시 돌린다.
+버그 수정 후 `A5.1` fresh start를 다시 돌린 결과:
+
+- `iter 500` 이후 collapse는 여전히 재발
+- `min_height` termination이 다시 지배적
+- 따라서 `shoulder_neutral`, `stance_width_penalty` 두 항목만으로는
+  iter 500 release shock를 충분히 완화하지 못했다
+
+중요:
+
+```text
+이 결론은
+"두 항목이 원인이 아니다"
+가 아니라
+"두 항목만으로는 충분하지 않았다"
+는 뜻이다.
+```
+
+### 7.6 A5.2 설계
+
+`A5.2`는 `A5.1`을 버리는 실험이 아니라,
+기존 2개 posture/splay ramp를 유지한 채
+다음으로 유력한 shock source를 추가로 묶는 실험이다.
+
+핵심 원칙:
+
+```text
+1. 여러 항목을 한 번에 다 바꾸지 않는다
+2. 그래도 A5.1보다 한 단계 넓은 shock group을 본다
+3. per_leg_propulsion_floor, undesired_contacts는 아직 보류한다
+```
+
+`A5.2` soft ramp 대상:
+
+```text
+기존 유지
+- shoulder_neutral
+- stance_width_penalty
+
+추가
+- rear_left_right_propulsion_diff_penalty
+- front_left_right_propulsion_diff_penalty
+- rear_left_right_usage_diff_penalty
+- front_left_right_usage_diff_penalty
+- per_leg_contact_floor
+```
+
+즉 총 7개 항목을
+`iter 500 release -> 500 iter ramp`로 완화한다.
+
+보류 항목:
+
+```text
+A5.3 후보
+- per_leg_propulsion_floor
+- undesired_contacts
+```
+
+### 7.7 다음 검증 규칙
+
+`A5.2`는 반드시 fresh start로 돌린다.
 
 검증 포인트:
 
 ```text
 iter 500 직후
 - reward_manager weight 기준으로
-  shoulder_neutral = pre 값 근처
-  stance_width_penalty = pre 값 근처
+  7개 soft ramp 대상이 모두 pre 값 근처
 
 iter 500 ~ 1000
-- 두 항목이 목표 post 값으로 점진적으로 이동
+- 7개 항목이 목표 post 값으로 점진적으로 이동
 - A5처럼 즉시 min_height 99% 붕괴가 재발하는지 여부 확인
 ```
 
