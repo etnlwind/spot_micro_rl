@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: A5.6 A5.5 유지 + min_height termination threshold 추가 완화(0.12 -> 0.10) 구현 예정
+> 상태: A6 A5.6 유지 + posture/usage correction(B1 진입용 baseline quality gate) 구현 완료
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -1152,7 +1152,7 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.A5.6
+- TRAIN_VERSION = V55.A6
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -1167,13 +1167,14 @@ for N updates
 - A5.4: A5.2 7항목 shock soft-ramp + A5.3 forward ramp 결합
 - A5.5: A5.4 유지 + min_height termination threshold 0.12 완화
 - A5.6: A5.5 유지 + min_height termination threshold 0.10 완화
+- A6: A5.6 유지 + posture/usage correction(B1 진입용 baseline quality gate)
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
 - A5는 iter 500 이전까지 baseline recovery에 성공했지만
   gait_gate release 직후 min_height collapse가 발생했다
-- 다음 단계의 최우선 검증은
-  A5.6 fresh start로 min_height threshold 추가 완화가 collapse 깊이와 회복 속도를 더 개선하는지 확인하는 것이다
+- 현재 기본 실행 버전은 A6이며,
+  다음 검증 우선순위는 RL 바닥 고착과 shoulder_splay가 실제로 완화되는지 확인하는 것이다
 ```
 
 ### 11.1 A5에서 실제로 막은 경로
@@ -1344,12 +1345,121 @@ iter 600
 - ep_len 회복 속도가 A5.5(18.4)보다 더 빠른지 확인
 ```
 
+### 11.6 A6 준비 계획: B1 진입용 baseline quality gate
+
+`A6`는 원래 논의됐던 "cricket gait 완전 해결" 실험이 아니다.
+현재 합의된 정의는 아래와 같다.
+
+핵심 목표:
+
+```text
+A6의 목적은
+cricket gait를 A-track에서 완전히 해결하는 것이 아니라,
+RL contact_ratio 바닥 고착과 shoulder_splay를 조금 완화해서
+B1 phase probe로 넘어갈 수 있는 최소 baseline 품질을 만드는 것이다.
+```
+
+배경:
+
+```text
+- A5.6은 iter 500 release collapse를 상당 부분 완화했다
+- 하지만 장기 구간에서는 RL(왼쪽 뒤) contact_ratio 바닥 고착과
+  shoulder_splay termination이 새 병목으로 보인다
+- 이 상태에서 바로 B1로 가면
+  phase가 gait를 개선한 것인지,
+  기존 3발 보행 위에 phase가 덧씌워진 것인지 해석이 흐려질 수 있다
+```
+
+가설:
+
+```text
+posture/splay를 소폭 교정하면
+RL usage가 0.01 수준의 바닥 고착에서 0.1+ 수준으로 완화되고,
+shoulder_splay termination도 줄어
+B1 additive probe를 해석 가능한 baseline 위에서 시작할 수 있다.
+```
+
+예정 변경 항목:
+
+```text
+유지
+- A5.6 구조 전체 유지
+- min_height threshold 0.10
+- STAND forward 2/8
+- post-release forward ramp
+- 7개 shock soft ramp
+
+소폭 강화
+- stance_width_penalty post: -3 -> -4
+- shoulder_neutral post: -6 -> -8
+- front_rear_support_balance_penalty: 절대값 +20%
+- base_height_l2: 절대값 +10~15%
+```
+
+의도적으로 보류하는 항목:
+
+```text
+- per_leg_contact_floor 추가 강화
+- limb_usage_min 추가 강화
+- single_limb_validity 추가 강화
+- B-track phase probe
+```
+
+이유:
+
+```text
+1. RL 미사용을 직접 penalty로 더 강하게 누르면
+   release-collapse를 다시 키울 위험이 있다
+2. A6는 "RL을 강제로 쓰게 하기"보다
+   "자세와 지지 구조를 조금 더 자연스럽게 만들어
+    RL 바닥 고착을 완화할 수 있는지"를 보는 실험이다
+3. 이 실험은 해결책의 끝이 아니라
+   B1 진입 가능 여부를 판단하는 분기점 실험이다
+```
+
+성공 기준:
+
+```text
+iter 400
+- ep_len 220+
+- stride 2.5+
+- diagonal_raw 0.45+
+
+iter 900
+- RL contact_ratio > 0.10
+- shoulder_splay termination < 0.20
+- time_out > 0.75
+- stride가 A5.6 대비 크게 악화되지 않음
+```
+
+실패 기준:
+
+```text
+- RL contact_ratio가 계속 0.01~0.05 바닥
+- shoulder_splay가 그대로 높음
+- stride/ep_len만 나빠짐
+```
+
+다음 분기:
+
+```text
+A6 성공
+-> B1 additive probe 진입
+
+A6 부분 성공
+-> usage/contact direct correction 한 번 더
+
+A6 실패
+-> A-track에서 더 버티지 말고
+   B 진입 전략 또는 direct correction 우선순위 재검토
+```
+
 ---
 
 ## 12. 최종 추천
 
-바로 실행할 1순위는 `A5.6`다.
+바로 실행할 다음 1순위는 `A6` 준비다.
 
 한 줄 요약:
 
-`지금은 구조를 더 크게 뜯을 때가 아니라, A5.5의 부분 개선을 이어서 min_height termination threshold를 0.10까지 낮춰 collapse 깊이와 회복 속도가 더 좋아지는지 먼저 확인해야 한다.`
+`A5.6으로 release collapse 완화 축은 충분히 확인했으므로, 다음은 A6에서 posture/usage를 소폭 교정해 B1으로 넘어갈 수 있는 최소 baseline 품질을 만드는 것이 맞다.`
