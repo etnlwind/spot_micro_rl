@@ -1,265 +1,167 @@
-# V55 Plan: 검증된 기반 복구 후 Phase 보조 삽입
+# V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: **설계 승인 대기**
-> 목적: `V54`에서 드러난 handoff collapse를 교훈으로 삼아, 성공이 검증된 boot/gait 기반 위에서 phase를 보조 신호로 다시 검증한다.
+> 상태: 설계 확정
+> 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
 
 ## 1. 결론
 
-현재 최적 전략은 `clean V54를 계속 미세조정`하는 것이 아니라, `V47/V53 계열의 검증된 기반을 복구한 뒤 phase를 auxiliary reward로 삽입`하는 것이다. 이 전략 변경을 별도 메이저 버전 `V55`로 정의한다.
+`V55`는 `V54`의 하위 튜닝이 아니다.
 
-핵심 이유:
+- `V54`: clean phase-centric handoff 실험
+- `V55`: baseline recovery + phase probe 실험
 
-1. `V43-E`, `V47`은 boot 성공 기록이 있다.
-2. `V54.3~V54.4`는 clean start에는 성공했지만 boot 생존성이 계속 하락했다.
-3. 현재 실패는 one-leg exploit 이전에 `handoff collapse`가 먼저 온다.
-4. 즉, 지금 부족한 것은 phase 수식이 아니라 `phase를 받아낼 locomotion 기반`이다.
+핵심 판단:
+
+1. `V54` 실패의 본질은 `phase 수식`보다 `phase를 받아낼 locomotion 기반 부재`였다.
+2. 따라서 지금 우선순위는 `clean V54 미세조정`이 아니라 `baseline 복구`다.
+3. phase는 처음부터 주연 reward가 아니라 `probe`로 다뤄야 한다.
 
 ---
 
-## 2. 목표 재정의
-
-이번 플랜의 목표는 두 단계다.
+## 2. 목표
 
 ### 2.1 단기 목표
 
-`V47/V53급 boot 생존성`을 다시 확보한다.
-
-성공 조건:
-
-- iter `300`에서 `mean_episode_length > 80`
-- iter `500`에서 `mean_episode_length > 120`
-- 4발 `contact_ratio`가 모두 바닥으로 가지 않음
+`V47/V53급 baseline locomotion`을 다시 확보한다.
 
 ### 2.2 중기 목표
 
-phase 신호가 실제로 gait structure를 만드는지 `보조 신호` 상태에서 검증한다.
-
-성공 조건:
-
-- phase reward를 넣어도 boot가 무너지지 않음
-- `diagonal_coupling_raw`가 `0.0` 고착에서 벗어남
-- 특정 다리 희생 없이 `contact_ratio`가 유지됨
+분리된 Track B에서 phase가 baseline을 망치지 않는지, 그리고 추가 구조 이득을 주는지 검증한다.
 
 ### 2.3 장기 목표
 
-phase reward가 실제 구조 형성에 기여한다는 증거가 모이면, 그때부터 legacy/bridge를 천천히 덜어내고 phase-centric 구조로 이동한다.
+phase의 실제 구조 기여가 확인되면, 그때만 handoff와 phase-centric 축소를 다시 설계한다.
 
 ---
 
-## 3. V54 실패 해석과 V55로 올리는 이유
+## 3. V54 실패 해석
 
-현재 `V54.4` 런(`2026-03-30_07-03-05`)에서 확인된 사실:
+현재 `V54.4` 런에서 확인된 사실:
 
-- `curriculum_500.pt`에서도 `_crr_gate_paused=True`
-- `_crr_alpha12=0`, `_crr_alpha23=0`
-- 그런데 `iter 500 fallback`으로 boot handoff는 강제 시작
-- `mean_episode_length`: `21.35 -> 11.65 -> 10.38 -> 11.06 -> 8.71 -> 4.94 -> 4.36`
-- `phase_contact`는 `step 600`에서도 `~0.0015`
-- `diagonal_coupling_raw=0.0`
+- `_crr_gate_paused=True`가 유지된 상태에서도 `iter 500 fallback`으로 handoff가 시작됨
+- `mean_episode_length`가 `21.35 -> 11.65 -> 10.38 -> 11.06 -> 8.71 -> 4.94 -> 4.36`으로 하락
+- `phase_contact`는 `step 600`에서도 사실상 0에 가까움
+- `diagonal_coupling_raw = 0.0`
 
 해석:
 
-1. boot가 성공하지 못한 상태에서
-2. handoff가 강제로 시작됐고
-3. phase reward는 아직 locomotion 주연 역할을 못 했다.
+1. boot가 성공하지 못했다
+2. 그런데 handoff가 강제 시작됐다
+3. phase reward는 아직 locomotion 주연 역할을 못 했다
 
-따라서 지금 문제는 `phase_contact 집계 방식`보다 먼저 `기반 locomotion 자체가 약하다`는 것이다.
-
-이 문서를 `V54B`가 아니라 `V55`로 두는 이유는 명확하다.
-
-- `V54`는 clean phase-centric handoff 계열 실험이다.
-- 이번 문서는 handoff를 잠정 포기하고 baseline recovery를 우선한다.
-- 즉, 같은 실험군의 세부 분기가 아니라 전략 축이 바뀐다.
+즉 `V54`의 문제는 `phase 집계 방식` 이전에 `기반 locomotion이 약한 상태에서 handoff가 시작된 것`이다.
 
 ---
 
-## 4. 새 전략의 설계 원칙
+## 4. 설계 원칙
 
-### 원칙 1: 작동하는 기반을 먼저 복구한다
+### 원칙 1: baseline을 먼저 복구한다
 
 `작동하는 시스템을 고치지 말 것`이라는 기존 교훈을 따른다.
 
-즉:
+### 원칙 2: Track A와 Track B를 분리한다
 
-- `V47`의 강한 boot 생태계
-- `V53`의 앞다리 사용 문제 인식
+이번 플랜은 하나의 run family가 아니다.
 
-를 기반으로 삼고, phase는 그 위에 얹는다.
+```text
+Track A: Baseline Recovery
+- phase observation 없음
+- phase reward 없음
+- 목적: baseline locomotion 복구
 
-### 원칙 2: phase는 처음부터 주연이 아니다
+Track B: Phase Probe
+- phase observation 있음
+- phase auxiliary reward 있음
+- 목적: baseline 위에서 phase의 추가 기여 검증
+```
 
-초기 phase는 `teacher`, `regularizer`, `structure probe` 역할만 수행한다.
+### 원칙 3: handoff는 이번 단계에서 제거한다
 
-즉:
+이번 단계에서는:
 
-- locomotion을 혼자 책임지지 않는다
-- boot/handoff의 주 제어축이 아니다
-- 먼저 "정말 유효한 신호인가"를 본다
+- `iter 500 fallback` 사용 안 함
+- bridge ramp-out / phase ramp-in 사용 안 함
+- phase는 상수 auxiliary weight로만 켠다
 
-### 원칙 3: handoff보다 병행 검증이 먼저다
+### 원칙 4: abort는 절대값만으로 결정하지 않는다
 
-이번 단계에서는 `boot -> phase hard/soft handoff` 자체를 목표로 하지 않는다.
+반드시 함께 볼 것:
 
-먼저 해야 할 일:
+```text
+1. 절대 기준 미달 여부
+2. V54.4 동일 iter 대비 개선 여부
+3. 최근 2~3 체크포인트의 회복 추세
+```
 
-- 기반 locomotion이 살아나는지
-- 그 위에 phase 보조 reward가 들어가도 망가지지 않는지
-- phase metric이 실제로 따라오는지
+예:
 
-### 원칙 4: abort 기준을 더 엄격히 둔다
+```text
+iter 150에서 ep_len = 25
+- 절대 기준 30 미달
+- 하지만 V54.4보다 개선
+- 추세도 상승
 
-다음 중 하나면 즉시 abort 검토:
-
-- iter `150`에서 `mean_episode_length < 30`
-- iter `300`에서 `mean_episode_length < 50`
-- iter `300` 이후 `diagonal_coupling_raw = 0.0` 고착
-- 특정 다리 `contact_ratio < 0.01` 고착
+=> 즉시 abort가 아니라 보류 + 추가 관찰
+```
 
 ---
 
-## 5. 베이스라인 선택
+## 5. Baseline 정의
 
-### 권장 베이스: `V47` 생태계 + `V53` 문제 인식
+이번 문서의 `baseline`은 막연히 "옛 reward를 많이 남긴 상태"가 아니다.
 
-이유:
+정확한 의미:
 
-- `V47`은 boot와 locomotion 모두 실제 성과가 검증됨
-- `V53`은 앞다리 미사용 문제를 가장 최근까지 추적한 버전
-- `V54`처럼 reward inventory를 과도하게 비우지 않았음
+1. `V47`이 검증한 강한 boot/locomotion ecology를 유지한다
+2. `V53`까지 확인된 front-leg / one-leg 문제는 관찰 대상으로 유지한다
+3. `V54`의 handoff, phase-only inventory, legacy phase table 차단은 baseline의 기본축이 아니다
 
-### 구현 방침
+즉 `V55`는:
 
-실제 코드 베이스는 다음 철학을 따른다.
+`V54를 약하게 돌리는 버전`
 
-1. `V47`의 강한 boot/locomotion ecology 복구
-2. `V53` 이후 확인된 one-leg/front-leg 문제는 유지
-3. phase는 작은 weight로 추가
+이 아니라,
 
-즉 `phase-only 재설계`가 아니라:
-
-`working baseline + phase probe`
-
----
-
-## 6. Reward Inventory 설계
-
-### 6.1 유지할 핵심 기반 reward
-
-다음 계열은 유지한다.
-
-- `boot_standing`
-- `boot_contact`
-- `alive_bonus`
-- `standing_height`
-- 기존 `V38.3/V47` locomotion 구조 reward
-- 현재까지 유효했던 termination / safety
-
-핵심 의도:
-
-- 먼저 `걷는 정책`을 다시 만든다.
-- phase가 없어도 최소한 stride와 ep_len이 살아나야 한다.
-
-### 6.2 phase 보조 reward
-
-이번 단계에서 phase는 아래처럼 약하게 넣는다.
-
-```text
-phase_contact      2.0 ~ 4.0
-phase_clearance    0.5 ~ 1.0
-```
-
-권장 시작값:
-
-```text
-phase_contact      = 3.0
-phase_clearance    = 0.75
-```
-
-이 값이 의미하는 것:
-
-- gait의 주연 reward는 아님
-- 그러나 policy가 phase 구조를 무시하기 어렵게는 만든다
-- boot를 깨뜨릴 정도로 강하지는 않다
-
-### 6.3 penalty
-
-이번 단계에서는 V54.4에서 확인한 완화값을 유지하는 쪽이 유리하다.
-
-```text
-action_rate_l2  = -0.30
-joint_vel_l2    = -0.10
-dof_acc_l2      = -2e-5
-```
-
-이유:
-
-- 현재 V54.4에서 이 penalty 완화는 실제로 boot 붕괴를 줄였다
-- 이 항목은 되돌리는 것보다 유지하면서 baseline 쪽을 복구하는 편이 낫다
-
----
-
-## 7. Curriculum 설계
-
-### 7.1 이번 단계의 핵심: handoff를 제거한다
-
-이번 플랜에서는 `iter 500 fallback handoff`를 쓰지 않는다.
-
-즉:
-
-- phase reward는 시작부터 작은 상수 weight로 켠다
-- boot bridge를 phase로 넘기는 구조를 이번 단계 목표로 삼지 않는다
-- locomotion 기반과 phase signal이 `같이 존재할 때도` 학습이 되는지 본다
-
-### 7.2 왜 handoff를 빼는가
-
-현재는 handoff가 실험 변수를 너무 많이 만든다.
-
-동시에 변하는 것:
-
-- boot reward 감소
-- bridge reward 감소
-- phase reward 증가
-- gait gate 상태
-
-이 상태에선 무엇이 원인인지 분리하기 어렵다.
-
-따라서 이번 단계는:
-
-`handoff 실험`이 아니라 `phase 유효성 검증 실험`
+`V47/V53 기반 위에 phase probe를 추가하는 새 실험군`
 
 이다.
 
-### 7.3 다음 단계에서만 handoff 재도입
-
-아래 조건이 만족될 때만 handoff를 다시 설계한다.
-
-- baseline locomotion이 안정적
-- phase auxiliary 삽입 후에도 성능 유지
-- phase metric이 실제로 상승
-
 ---
 
-## 8. phase_contact 집계 방식
+## 6. Reward 설계
 
-이번 플랜에서는 `floor-only`를 바로 쓰지 않는다.
+### 6.1 Track A
 
-이유:
+Track A는 baseline recovery다.
 
-- 현재 V54.4에서 `floor + EMA + min_target`는 초기 phase reward를 너무 sparse하게 만들었다
-- auxiliary 단계에서는 reward density가 더 중요하다
+- phase observation: OFF
+- phase reward: OFF
+- 목적: V47/V53 계열 baseline locomotion이 실제로 복구되는지 확인
 
-권장 순서:
+### 6.2 Track B
 
-### Stage B1
+Track B는 phase probe다.
+
+- phase observation: ON
+- phase reward: ON
+- handoff: 없음
+- phase_contact aggregation: `mean_min`
+
+초기 phase weight:
 
 ```text
-aggregation = mean_min
+phase_contact   = 3.0
+phase_clearance = 0.75
 ```
 
-설계:
+### 6.3 phase_contact 집계
+
+`V54.4`의 `floor-only`는 초기 reward가 너무 sparse했다.
+
+따라서 B1 단계는:
 
 ```text
 score = 0.5 * mean(c_i) + 0.5 * min(c_i)
@@ -267,52 +169,246 @@ score = 0.5 * mean(c_i) + 0.5 * min(c_i)
 
 여기서 `c_i`는 per-leg compliance EMA.
 
-### Stage B2
+이 선택의 의미:
 
-phase가 실제로 먹히는 증거가 나오면 그때:
+- one-leg exploit 완전 차단이 목적이 아님
+- 초기 phase probe에서 reward density를 확보하는 것이 우선
+- exploit 억제 강도는 `floor`보다 약하지만 B1 단계에는 충분
+
+### 6.4 Track B에서 줄일 reward
+
+이 수치는 추측이 아니라 `plan/REWARDS.md`의 `V47 iter 5897` 실측을 기준으로 정한다.
+
+V47 실측에서 직접 timing/gait 지정에 가까운 positive 기여:
+
+- `rear_joint_velocity = +9.34`
+- `leg_lift = +6.66`
+- `stance_propulsion = +4.80`
+- `rear_alternation = +4.01`
+- `diagonal_coupling = +1.40`
+- `rear_swing = +1.05`
+
+이 군집을 그대로 두면 `phase_contact + phase_clearance` probe가 묻힌다.
+
+따라서 Track B는:
+
+- `pattern-defining reward`는 OFF
+- `movement-enabling reward`는 1/3~1/2로 감쇠
 
 ```text
-aggregation = floor
+Reward               | Track A | Track B
+---------------------+---------+--------
+trot_gait            | 유지    | 0.0
+diagonal_coupling    | 유지    | 0.0
+gait_cycle_period    | 유지    | 0.0
+feet_air_time        | 유지    | 10.0
+leg_lift             | 유지    | 8.0
+rear_alternation     | 유지    | 5.0
+rear_joint_velocity  | 유지    | 4.0
+stance_propulsion    | 유지    | 4.0
+foot_clearance       | 유지    | 3.0
+rear_swing           | 유지    | 3.0
 ```
 
-로 이동한다.
+주의:
 
-즉 one-leg exploit 방지 장치는 `처음부터 최대로` 거는 것이 아니라, 정책이 최소 locomotion을 확보한 뒤 강화한다.
+```text
+위 표는 설정 weight 기준이다.
+실제 reward contribution은 policy 분포에 따라 비선형적으로 바뀐다.
+```
+
+따라서 `B1 iter 100 audit`에서 반드시 다시 확인한다.
+
+### 6.5 penalty
+
+Penalty는 `V47/V52 값으로 기계적으로 복원`하지 않는다.
+
+이유:
+
+- 현재 세션 실측상 `dof_acc_l2=-0.001`은 boot를 과하게 눌렀다
+- 하지만 `V47 ecology + -2e-5` 조합도 아직 미실측이다
+
+따라서 원칙은:
+
+```text
+A1 초기값:
+  V54.4 완화값을 임시 시작점으로 사용
+
+A1 iter 100 audit:
+  active reward / penalty 실측 후 최종 확정
+```
+
+초기값:
+
+```text
+action_rate_l2 = -0.30
+joint_vel_l2   = -0.10
+dof_acc_l2     = -2e-5
+```
+
+중요:
+
+- 이 중 `leg_lift 15 -> 8`은 40%가 아니라 `53%`
+- 수치 표현은 문서에서 정확히 유지한다
 
 ---
 
-## 9. 실험 단계
+## 7. 실험 단계
 
-### Experiment B1: Baseline Recovery + Weak Phase
-
-목적:
-
-- boot와 locomotion 복구
-- phase 신호가 같이 있어도 정책이 죽지 않는지 확인
+### Experiment A1: Pure Baseline Recovery
 
 설정:
 
 ```text
-base          = V47/V53 ecology
+phase observation = OFF
+phase reward      = OFF
+handoff           = 없음
+fallback          = 없음
+penalty           = 임시 완화값으로 시작
+```
+
+V54 코드 처리 방침:
+
+```text
+1. _PHASE_CLOCK=False 만으로 끝내지 않는다
+2. A1은 "V47 baseline inventory를 명시적으로 복원"하는 실험이어야 한다
+3. _phase_remove, phase_table_enabled, phase ramp/bridge 잔재가 A1에 개입하지 않도록 확인한다
+```
+
+성공 기준:
+
+```text
+iter 300: ep_len > 80
+iter 500: ep_len > 120
+특정 발 contact_ratio 바닥 고착 없음
+```
+
+abort 판단:
+
+```text
+1. 절대 기준 미달
+2. V54.4 동일 iter 대비 개선 없음
+3. 최근 2~3 체크포인트에서 회복 추세 없음
+```
+
+A1 필수 audit:
+
+```text
+iter 0
+- phase observation OFF 확인
+- phase reward OFF 확인
+- A1 observation dimension이 baseline과 동일한지 확인
+
+iter 100
+- active reward audit
+- active penalty audit
+- dof_acc_l2 raw magnitude 확인
+- dof_acc_l2 weighted contribution 확인
+- 교훈 #34: 설정값이 아니라 실제 활성 reward 기준 판단
+
+iter 500
+- A1 종료 가능 여부 최종 판정
+```
+
+iter 100에서 반드시 볼 것:
+
+- 실제 active reward weight
+- `dof_acc_l2`, `joint_vel_l2`, `action_rate_l2` 실효 크기
+- `dof_acc_l2` raw magnitude
+- `boot_standing`, `standing_height`, `feet_air_time`, `trot_gait`, `diagonal_coupling` 우세 항목
+- 비의도 reward dominance 여부
+
+A1 -> B1 전환 조건:
+
+```text
+1. 최소 iter 500 도달
+2. iter 300, 400, 500 구간에서 ep_len 하락 추세가 아님
+3. min(contact_ratio_*)가 바닥 고착이 아님
+4. iter 100 active reward audit 통과
+5. iter 500 active reward audit에서 비의도 dominance 없음
+```
+
+A1 실패 시 fallback:
+
+```text
+1. V54 잔재 처리 상태 점검
+   - _phase_remove
+   - phase_table_enabled
+   - phase ramp/bridge params
+
+2. V47 기준 env_cfg / reward inventory 명시 복원
+
+3. penalty만 audit 기반으로 재설정
+
+4. A1 재시도
+```
+
+### Experiment B1: Baseline + Weak Phase Probe
+
+중요:
+
+```text
+B1은 반드시 from-scratch다.
+A1 checkpoint에서 resume하지 않는다.
+```
+
+이유:
+
+- A1은 phase observation OFF
+- B1은 phase observation ON
+- observation dimension과 input distribution이 다르다
+
+설정:
+
+```text
+base          = A1 성공 설정
+phase_obs     = ON
 phase_contact = 3.0
 phase_clear   = 0.75
 handoff       = 없음
 fallback      = 없음
 phase agg     = mean_min
+timing reward = Track B table 기준으로 감쇠/일부 OFF
 ```
 
 성공 기준:
 
-- iter `300`: `ep_len > 80`
-- iter `500`: `ep_len > 120`
-- `diagonal_coupling_raw > 0.05`
-- 특정 발 `contact_ratio` 바닥 고착 없음
+```text
+iter 400: ep_len > 80
+iter 500: ep_len > 120 또는 A1 대비 20~25% 지연 이내
+A1 대비 성능 급락 없음
+phase_contact 0 고착 아님
+diagonal_coupling_raw > 0.05
+특정 발 contact_ratio 바닥 고착 없음
+```
 
-### Experiment B2: Same Base + Stronger Phase
+B1 필수 audit:
+
+```text
+iter 100
+- 감쇠 reward의 실제 contribution이 예상 범위인지 확인
+- phase cluster가 완전히 묻히지 않았는지 확인
+- rear bias 또는 front 사용 악화가 생겼는지 확인
+```
+
+B1 추가 모니터링:
+
+- `front_leg_lift_mean_raw`
+- `rear_leg_lift_mean_raw`
+- `front/rear leg_lift ratio`
+
+판정:
+
+```text
+front/rear ratio가 A1 대비 나빠지면
+rear-side timing reward 감쇠가 역효과일 수 있음
+```
+
+### Experiment B2: Stronger Phase Probe
 
 전제:
 
-- B1이 성공
+- B1 성공
 
 설정:
 
@@ -321,14 +417,10 @@ phase_contact = 5.0
 phase_clear   = 1.5
 ```
 
-목표:
-
-- phase가 실제 구조 형성에 기여하는지 확인
-
 성공 기준:
 
-- stride/coupling 개선
-- ep_len 유지
+- A1/B1 대비 stride/coupling 개선
+- ep_len 유지 또는 개선
 - phase reward 상승
 
 ### Experiment B3: Delayed Handoff Reintroduction
@@ -337,15 +429,9 @@ phase_clear   = 1.5
 
 - B2까지 성공
 
-설정:
-
-- 그때만 boot/bridge 일부를 서서히 줄인다
-- release 조건은 `iteration`이 아니라 `metric` 기반이어야 한다
-
-예:
+release 조건 예시:
 
 ```text
-release only if:
 mean_episode_length > 150
 and diagonal_coupling_raw > 0.08
 and min(contact_ratio_*) > 0.03
@@ -354,9 +440,9 @@ for N updates
 
 ---
 
-## 10. 모니터링 지표
+## 8. 모니터링 지표
 
-### 필수 지표
+필수:
 
 - `Train/mean_episode_length`
 - `Train/mean_reward`
@@ -367,8 +453,11 @@ for N updates
 - `Episode_Reward/contact_ratio_fr`
 - `Episode_Reward/contact_ratio_rl`
 - `Episode_Reward/contact_ratio_rr`
+- `front_leg_lift_mean_raw`
+- `rear_leg_lift_mean_raw`
+- `front/rear leg_lift ratio`
 
-### 보조 지표
+보조:
 
 - `boot_standing`
 - `standing_height`
@@ -377,64 +466,25 @@ for N updates
 - `joint_vel_l2`
 - `action_rate_l2`
 
-### 체크포인트
+---
 
-```text
-iter 0     | 설정 반영 여부
-iter 100   | boot 생존
-iter 300   | locomotion 기반 형성
-iter 500   | phase 보조 삽입 상태 평가
-iter 1000  | diagonal/contact 구조 수렴 평가
-```
+## 9. 구현 전 체크리스트
+
+구현 전에 아래 6가지를 반드시 확인한다.
+
+1. `A1`에서 `_phase_remove`가 실질적으로 비활성화되는가
+2. `A1`의 observation dimension이 baseline과 정확히 같은가
+3. `A1 iter 100`에서 `dof_acc_l2` raw magnitude와 weighted contribution을 반드시 확인하는가
+4. `B1/B2`는 반드시 from-scratch인가
+5. `Track B` 감쇠 수치는 weight 기준이며, 실측 contribution은 `B1 iter 100`에서 다시 검증하는가
+6. `A1` 실패 시 fallback은 `V47 원본 env/reward inventory 명시 복원 후 재시도`인가
 
 ---
 
-## 11. 성공/실패 판정
+## 10. 최종 추천
 
-### 성공
-
-다음이 동시에 만족되면 성공 방향:
-
-1. `ep_len`이 계속 상승 또는 유지
-2. `phase_contact`가 0 고착이 아님
-3. `diagonal_coupling_raw`가 0에서 벗어남
-4. 특정 다리 희생 없이 contact가 유지됨
-
-### 실패
-
-다음 중 하나면 실패:
-
-1. boot 생존성 자체가 다시 무너짐
-2. phase를 넣자마자 ep_len 하락
-3. `diagonal_coupling_raw = 0.0` 지속
-4. one-leg exploit 재발
-
----
-
-## 12. 이번 플랜의 핵심 차별점
-
-기존 `V54`는:
-
-`clean phase-centric design을 먼저 만들고, 그 설계를 학습시키려 했다`
-
-이번 `V55`는:
-
-`이미 걷는 기반을 먼저 복구하고, phase가 그 기반 위에서 실제 도움이 되는지 검증한다`
-
-즉 이 플랜은 철학 후퇴가 아니다.
-
-오히려 더 현실적인 순서다:
-
-1. 걷게 만든다
-2. phase가 진짜 도움이 되는지 본다
-3. 도움이 확인되면 그때 phase 중심으로 축소한다
-
----
-
-## 13. 최종 추천
-
-바로 실행할 1순위는 `Experiment B1`이다.
+바로 실행할 1순위는 `Experiment A1`이다.
 
 한 줄 요약:
 
-`지금은 clean V54를 더 밀 때가 아니라, 검증된 기반 위에 약한 phase를 얹어 "phase가 실제로 구조를 만드는가"부터 증명해야 한다.`
+`지금은 clean V54를 더 밀 때가 아니라, 먼저 baseline을 복구하고, 그 다음 분리된 Track B에서 phase가 실제로 구조를 만드는가를 검증해야 한다.`
