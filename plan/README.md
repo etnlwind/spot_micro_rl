@@ -282,6 +282,42 @@ reward weight를 올려보고, height gate를 걸어보고, termination을 추�
 
 ---
 
+# 9기 — Baseline Recovery First, Phase Probe Second 시대 (V54 ~ V55)
+
+## 이 시기의 핵심
+
+V53까지는 "앞다리를 더 쓰게 만들자"가 중심이었지만,
+V54부터는 질문이 달라졌다.
+
+> **baseline locomotion이 없는 상태에서 phase를 먼저 얹으면 어떻게 되는가?**
+
+V54는 이 질문에 대해 아주 분명한 실패를 보여줬다.
+phase_contact/phase_clearance를 주연으로 올리고 handoff까지 걸자,
+로봇은 phase를 받아낼 locomotion 기반이 없는 상태에서 반복적으로 collapse했다.
+
+그래서 V55에서는 전략 자체를 다시 세웠다.
+
+> **phase를 먼저 강제하지 말고, baseline을 먼저 다시 살린 뒤 probe로 얹자.**
+
+즉 V54~V55는 reward 미세조정보다,
+실험 방법론과 검증 방법 자체를 재정의한 시기라고 보는 게 맞다.
+
+## 버전별 한 줄 요약
+
+- **V54** — clean phase-centric 전환. reward를 대폭 줄이고 phase_contact/phase_clearance를 주연으로 올린 handoff 실험. 하지만 baseline locomotion이 없는 상태에서 phase handoff를 걸자 반복적으로 collapse. 결론: **phase 수식보다 locomotion 기반이 먼저 필요하다.**
+
+- **V55** — baseline recovery first, phase probe second 재설계. A-track에서 baseline을 되살리고(`A5.x`), `iter 500` gait-gate release collapse를 forward, release shock, min_height 증폭기 관점으로 분해 분석. `A6`에서 posture/usage gate를 보강해 baseline quality를 확보했고, 현재는 **`B1`에서 A6 baseline 위에 weak phase probe를 얹었을 때 baseline을 유지하는지** 검증 중이다.
+
+## 핵심 교훈
+
+- **phase를 먼저 주연으로 올리면 안 된다** — baseline 없이 handoff를 걸면 collapse한다 (V54)
+- **코드값이 아니라 실제 적용값으로 판정해야 한다** — env_cfg, checkpoint snapshot, runtime weight, TensorBoard scalar를 분리해 봐야 한다 (V55)
+- **한 실험 = 한 가설** — shock 완화, conservative forward, min_height 완화 같은 실험을 따로 분리해야 원인 분리가 가능하다 (V55)
+- **min_height는 근본 원인보다 증폭기일 수 있다** — threshold를 낮추자 iter 500 collapse가 즉사에서 회복 가능한 흔들림으로 바뀌었다 (V55 A5.5~A5.6)
+- **A-track과 B-track의 목적을 분리해야 한다** — A는 baseline quality gate, B는 phase probe여야 해석 가능성이 생긴다 (V55)
+
+---
+
 # 전체 흐름을 가장 짧게 다시 요약하면
 
 - **V1~V8**: 일단 걷게 만들기
@@ -294,6 +330,8 @@ reward weight를 올려보고, height gate를 걸어보고, termination을 추�
 - **V47**: V38.3 순정 + boot만 추가 → stride 6.29, shoulder 0.43 **성공**
 - **V48~V52**: 귀뚜라미 보행(앞다리 미사용) 원인 추적 → 4발 평균 reward의 perverse incentive 발견
 - **V53**: 앞다리 전용 reward로 구조적 해결 시도 중
+- **V54**: phase를 주연으로 올렸더니 baseline 없는 handoff collapse 확인
+- **V55**: baseline을 다시 살린 뒤 phase를 probe로 얹는 전략으로 재설계
 
 ---
 
@@ -301,4 +339,4 @@ reward weight를 올려보고, height gate를 걸어보고, termination을 추�
 
 이 프로젝트의 흐름은,
 
-> **"걷게 만들기"에서 시작해, "꼼수를 막고", "reward를 줄여보고", "작동하는 시스템을 고치지 말 것"을 배우고, 이제 "왜 앞다리를 안 드는가"를 데이터로 분석해 구조적으로 해결하는 단계에 도달한 실험의 연속**이라고 볼 수 있음.
+> **"걷게 만들기"에서 시작해, "꼼수를 막고", "reward를 줄여보고", "작동하는 시스템을 고치지 말 것"을 배우고, "앞다리 미사용"을 데이터로 분석한 뒤, 이제는 baseline을 복구한 상태에서 phase probe가 실제로 gait 구조를 개선하는지 검증하는 단계까지 온 실험의 연속**이라고 볼 수 있음.

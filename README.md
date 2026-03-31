@@ -250,7 +250,7 @@ prob(dev) = base_prob × clamp((max_dev - threshold) / margin, 0, 1)
 
 **Soft CaT 결과** (V38.3): shoulder dev 0.54→0.45 (-16%), 0.45에서 local optimum 정체.
 
-### V47~V53 (현재)
+### V47~V55 (현재)
 
 **V47**: V38.3 순정(77 reward) + boot_standing(+15) + boot_contact(+5)만 추가. "작동하는 시스템을 고치지 말고, 부족한 것만 더하자." 상세: `plan/V47_PLAN.md`
 
@@ -261,8 +261,10 @@ prob(dev) = base_prob × clamp((max_dev - threshold) / margin, 0, 1)
 - **V51**: soft height gate hybrid (analysis team 공동 설계) → anti-crouch 성공, anti-cricket 실패
 - **V52**: min_height termination + data-driven weight 재설계 → leg_lift 4발 평균이 앞다리를 penalty화하는 구조 발견
 - **V53**: front_leg_lift_reward (FL/FR only, w=15) additive 추가 → from-scratch 훈련 중
+- **V54**: clean phase-centric handoff 실험 → baseline locomotion 없는 상태에서 handoff collapse 확인
+- **V55**: baseline recovery first, phase probe second 재설계 → A5.x로 release collapse 완화, A6 baseline gate 확보, 현재 B1 probe 검증 중
 
-상세: `plan/V53_PLAN.md`, `plan/V43-V53_HISTORY.md`
+상세: `plan/V53_PLAN.md`, `plan/V54_PLAN.md`, `plan/V55_PLAN.md`, `plan/V43-V53_HISTORY.md`
 
 **부팅 안정화** (V35.5 검증 완료):
 - `alive_bonus=10.0`: 매 step 생존 보상
@@ -388,6 +390,8 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 | **V51** | **03-28** | **Soft height gate hybrid (walking reward에 height 조건부 penalty)** | 🟡 anti-crouch 성공(front_lift 0.257), anti-cricket 실패(iter 3300 재하락) |
 | **V52** | **03-29** | **Min height termination(0.15m, boot-gated) + data-driven weight 재설계** | 🟡 height 0.19 안정, leg_lift 4발 평균이 앞다리 penalty화하는 구조 발견 |
 | **V53** | **03-29~** | **front_leg_lift_reward (FL/FR only, w=15) additive 추가** | from-scratch 훈련 중 |
+| **V54** | **03-30** | **Clean phase-centric 전환: phase_contact/clearance + handoff + reward 대폭 축소** | ❌ handoff collapse, baseline locomotion 부재 확인 |
+| **V55** | **03-30~03-31** | **baseline recovery first, phase probe second 재설계** | 🟡 A5.x로 release collapse 완화, A6 baseline gate 확보, 현재 B1 probe 검증 중 |
 
 ### 핵심 교훈
 
