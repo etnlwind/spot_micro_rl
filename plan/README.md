@@ -5,9 +5,8 @@
 전체 맥락이 보이도록 해설을 덧붙인 요약 문서임.
 
 > 최신 active family는 `V55`.
-> 현재는 `V55.A5.6`에서 `A5.5`가 보여준 부분 회복을 이어,
-> `min_height` termination threshold 완화가 `iter 500` collapse 깊이와
-> 회복 속도를 추가로 개선하는지 검증 중임.
+> 현재는 `V55.B1`에서 `A6` baseline quality gate를 그대로 계승한 채,
+> 약한 phase probe가 baseline을 유지하는지 검증 중임.
 
 ---
 

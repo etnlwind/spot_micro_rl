@@ -11,10 +11,10 @@ Generated: 2026-03-15, Updated: 2026-03-31
 ## Current V55 Note
 
 - 최신 active family: `V55`
-- 현재 기본 track: `V55.A5.6`
-- 현재 실험 목적: `A5.5`의 부분 개선을 이어 `min_height termination`
-  threshold를 `0.12 -> 0.10`으로 한 단계 더 낮췄을 때,
-  `iter 500` release collapse의 깊이와 `iter 600` 회복 속도가 더 좋아지는지 검증
+- 현재 기본 track: `V55.B1`
+- 현재 실험 목적: `A6` baseline quality gate를 그대로 계승한 채
+  `phase_contact=1.5`, `phase_clearance=0.5`의 additive probe가
+  baseline을 유지하는지 확인
 - 현재 direct debug 대상: `forward_velocity`, `forward_velocity_bootstrap`,
   `shoulder_neutral`, `stance_width_penalty`,
   `rear/front left_right propulsion diff penalty`,

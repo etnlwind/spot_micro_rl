@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: A6 A5.6 유지 + posture/usage correction(B1 진입용 baseline quality gate) 구현 완료
+> 상태: B1 A6 baseline quality gate 계승 + weak phase probe 실행 중
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -1170,7 +1170,7 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.A6
+- TRAIN_VERSION = V55.B1
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -1186,13 +1186,14 @@ for N updates
 - A5.5: A5.4 유지 + min_height termination threshold 0.12 완화
 - A5.6: A5.5 유지 + min_height termination threshold 0.10 완화
 - A6: A5.6 유지 + posture/usage correction(B1 진입용 baseline quality gate)
+- B1: A6 baseline 계승 + weak phase probe 실행
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
 - A5는 iter 500 이전까지 baseline recovery에 성공했지만
   gait_gate release 직후 min_height collapse가 발생했다
-- 현재 기본 실행 버전은 A6이며,
-  다음 검증 우선순위는 RL 바닥 고착과 shoulder_splay가 실제로 완화되는지 확인하는 것이다
+- 현재 기본 실행 버전은 B1이며,
+  다음 검증 우선순위는 phase probe가 baseline(A6)을 유지하는지 확인하는 것이다
 ```
 
 ### 11.1 A5에서 실제로 막은 경로
@@ -1476,8 +1477,8 @@ A6 실패
 
 ## 12. 최종 추천
 
-바로 실행할 다음 1순위는 `A6` 준비다.
+바로 실행할 다음 1순위는 `B1` 검증이다.
 
 한 줄 요약:
 
-`A5.6으로 release collapse 완화 축은 충분히 확인했으므로, 다음은 A6에서 posture/usage를 소폭 교정해 B1으로 넘어갈 수 있는 최소 baseline 품질을 만드는 것이 맞다.`
+`A6 baseline quality gate는 확보됐고, 지금은 B1에서 약한 phase probe가 baseline을 유지하는지 먼저 확인하는 것이 맞다.`

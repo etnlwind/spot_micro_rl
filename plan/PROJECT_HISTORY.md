@@ -1,19 +1,19 @@
 # SpotMicro RL Training Project History
 
 **Last Updated**: 2026-03-31
-**Project Status**: V55 active — baseline recovery 후 `iter 500` gait-gate release collapse를 완화하는 단계이며, 현재는 `A5.5`의 부분 개선을 이어 `min_height` termination threshold 추가 완화를 검증 중
-**Current Active Run**: V55.A5.6
+**Project Status**: V55 active — baseline recovery와 A6 posture/usage gate를 바탕으로, 현재는 약한 phase probe가 baseline을 유지하는지 검증하는 단계
+**Current Active Run**: V55.B1
 
 > 최신 핸드오프: `plan/HANDOFF.md` 참조
 
 ---
 
-## Current Status Snapshot (V55 A5.6)
+## Current Status Snapshot (V55 B1)
 
 | 항목 | 값 |
 |------|-----|
-| TRAIN_VERSION | `V55.A5.6` |
-| 상태 | `A5.5`에서 확인된 min_height 증폭기 가설을 이어, `A5.6`에서 min_height threshold `0.12 -> 0.10` 추가 완화 검증 중 |
+| TRAIN_VERSION | `V55.B1` |
+| 상태 | `A6` baseline quality gate를 그대로 계승한 채 `B1` additive phase probe 검증 중 |
 | 진입점 | `isaac_ops/listen.cmd` (listener), `isaac_ops/cli.cmd` (CLI) |
 | V55 핵심 | baseline recovery first, phase probe second, iter-500 gait-gate release shock 완화 |
 

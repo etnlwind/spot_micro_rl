@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니다. V49+는 4,096개, V42~V48은 8,192개, V41 이하는 20,480개 환경을 사용합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: `V55` 계열 실험 진행 중. `V47`의 강한 baseline locomotion을 참고하되, `V54`의 handoff collapse를 피하기 위해 **baseline recovery first, phase probe second** 전략으로 재설계했다. 현재 active track은 `V55.A5.6`이며, `A5.5`에서 확인된 `min_height` 증폭기 가설을 이어서 `min_height` termination threshold를 `0.12 -> 0.10`으로 한 단계 더 낮춘 ablation을 검증 중이다.
+**현재 상태**: `V55` 계열 실험 진행 중. `V47`의 강한 baseline locomotion을 참고하되, `V54`의 handoff collapse를 피하기 위해 **baseline recovery first, phase probe second** 전략으로 재설계했다. 현재 active track은 `V55.B1`이며, `A6`에서 확보한 baseline quality gate 위에 약한 phase probe를 얹었을 때 baseline을 유지하는지 검증 중이다.
 
 ### 기술 스택
 
