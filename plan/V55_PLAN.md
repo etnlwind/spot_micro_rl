@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: B1 A6 baseline quality gate 계승 + weak phase probe 실행 중
+> 상태: B1.1 posture gate 소폭 강화 설계/구현 완료, fresh start 검증 대기
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -1037,6 +1037,88 @@ front/rear ratio가 A6 대비 나빠지면
 phase probe가 baseline quality를 해치고 있을 가능성이 높다
 ```
 
+### Experiment B1.1: Weak Phase Probe + Slightly Stronger Posture Gate
+
+목적:
+
+```text
+B1의 phase 강도는 유지하되,
+후반에 다시 커진 shoulder_splay와 front-heavy drift만
+작게 눌러서 baseline quality를 회복할 수 있는지 확인한다.
+```
+
+가설:
+
+```text
+현재 B1의 병목은 phase 자체보다
+posture gate가 약해서 뒤로 갈수록 shoulder_splay가 다시 커지는 것이다.
+
+따라서
+- phase_contact / phase_clearance는 그대로 두고
+- shoulder_neutral / stance_width / front_rear_support
+만 소폭 강화하면
+
+1. shoulder_splay termination이 감소하고
+2. time_out / diagonal / stride가 다시 안정되며
+3. RL contact 바닥 고착 없이 B2 진입 가능한 baseline을 유지할 수 있다.
+```
+
+설정:
+
+```text
+base          = B1과 동일한 A6 baseline 계승
+phase probe   = B1과 동일
+변경 항목     = posture gate 3개만 소폭 강화
+
+구체적으로는
+- shoulder_neutral post  -8.0 -> -9.0
+- stance_width post      -4.0 -> -4.5
+- front_rear_support_balance_penalty  -9.6 -> -10.5
+```
+
+변경하지 않는 항목:
+
+```text
+- phase_contact / phase_clearance
+- STAND forward 2 / 8
+- post-release forward ramp
+- 7개 release shock soft-ramp
+- min_height threshold 0.10
+```
+
+성공 기준:
+
+```text
+iter 900 이후
+- shoulder_splay termination < 0.20
+- time_out > 0.75
+- diagonal_coupling_raw > 0.45
+- stride > 4.0
+- RL contact_ratio > 0.20 유지
+```
+
+실패 기준:
+
+```text
+- shoulder_splay가 여전히 0.30+로 높음
+- time_out / stride / diagonal이 B1보다 더 나빠짐
+- RL contact가 다시 바닥 쪽으로 내려감
+```
+
+해석:
+
+```text
+B1.1은 B1 반복 실험이 아니다.
+
+가설은 하나다:
+"phase 강도는 유지하고 posture gate만 소폭 강화하면
+B1 후반 품질 저하를 줄일 수 있는가?"
+
+이 한 번으로 효과가 없으면
+B1.2, B1.3처럼 길게 끌지 않고
+B2 또는 다른 방향을 재검토한다.
+```
+
 ### 운영 계획
 
 기본 원칙:
@@ -1170,7 +1252,7 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.B1
+- TRAIN_VERSION = V55.B1.1
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -1187,13 +1269,15 @@ for N updates
 - A5.6: A5.5 유지 + min_height termination threshold 0.10 완화
 - A6: A5.6 유지 + posture/usage correction(B1 진입용 baseline quality gate)
 - B1: A6 baseline 계승 + weak phase probe 실행
+- B1.1: B1 유지 + posture gate만 소폭 강화
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
 - A5는 iter 500 이전까지 baseline recovery에 성공했지만
   gait_gate release 직후 min_height collapse가 발생했다
-- 현재 기본 실행 버전은 B1이며,
-  다음 검증 우선순위는 phase probe가 baseline(A6)을 유지하는지 확인하는 것이다
+- 현재 기본 실행 버전은 B1.1이며,
+  다음 검증 우선순위는 weak phase probe를 유지한 채 shoulder_splay와
+  front-heavy drift를 줄일 수 있는지 확인하는 것이다
 ```
 
 ### 11.1 A5에서 실제로 막은 경로
@@ -1477,8 +1561,8 @@ A6 실패
 
 ## 12. 최종 추천
 
-바로 실행할 다음 1순위는 `B1` 검증이다.
+바로 실행할 다음 1순위는 `B1.1` 검증이다.
 
 한 줄 요약:
 
-`A6 baseline quality gate는 확보됐고, 지금은 B1에서 약한 phase probe가 baseline을 유지하는지 먼저 확인하는 것이 맞다.`
+`A6 baseline quality gate는 확보됐고, 지금은 B1의 weak phase probe를 유지한 채 posture gate만 소폭 강화한 B1.1로 후반 quality drift를 줄일 수 있는지 확인하는 것이 맞다.`
