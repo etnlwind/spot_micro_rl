@@ -920,14 +920,21 @@ def normalize_command(text: str) -> str:
 def get_latest_run_dir() -> str | None:
     if not os.path.isdir(LOG_BASE):
         return None
-    runs = sorted(d for d in os.listdir(LOG_BASE) if os.path.isdir(os.path.join(LOG_BASE, d)))
+    runs = sorted(
+        d for d in os.listdir(LOG_BASE)
+        if os.path.isdir(os.path.join(LOG_BASE, d)) and not d.startswith("IGNORED_")
+    )
     return os.path.join(LOG_BASE, runs[-1]) if runs else None
 
 
 def _list_run_dirs() -> list[str]:
     if not os.path.isdir(LOG_BASE):
         return []
-    run_dirs = [os.path.join(LOG_BASE, name) for name in os.listdir(LOG_BASE) if os.path.isdir(os.path.join(LOG_BASE, name))]
+    run_dirs = [
+        os.path.join(LOG_BASE, name)
+        for name in os.listdir(LOG_BASE)
+        if os.path.isdir(os.path.join(LOG_BASE, name)) and not name.startswith("IGNORED_")
+    ]
     run_dirs.sort(key=lambda path: (os.path.getmtime(path), path), reverse=True)
     return run_dirs
 
@@ -1240,6 +1247,8 @@ def resolve_run_dir_for_version(version: str) -> str | None:
     version_norm = version.strip().upper()
     matched: list[str] = []
     for run_name in sorted(os.listdir(LOG_BASE)):
+        if run_name.startswith("IGNORED_"):
+            continue
         run_dir = os.path.join(LOG_BASE, run_name)
         if not os.path.isdir(run_dir):
             continue

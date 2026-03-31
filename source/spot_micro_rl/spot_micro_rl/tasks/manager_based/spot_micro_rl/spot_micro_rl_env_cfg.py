@@ -1266,6 +1266,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.curriculum.reward_weights.params["v55_release_front_usage_diff_post"] = -8.0
                 self.curriculum.reward_weights.params["v55_release_per_leg_contact_floor_pre"] = -1.0
                 self.curriculum.reward_weights.params["v55_release_per_leg_contact_floor_post"] = -12.0
+                if _V55_TRACK == "B2":
+                    self.curriculum.reward_weights.params["v55_trot_gait_weight"] = 2.0
+                    self.curriculum.reward_weights.params["v55_diagonal_coupling_weight"] = 2.0
+                    self.curriculum.reward_weights.params["v55_stance_propulsion_weight"] = 6.0
 
             if _V55_TRACK in {"A6", "B1", "B1.1", "B2", "B3"}:
                 # A6: posture-first correction before B1 entry.

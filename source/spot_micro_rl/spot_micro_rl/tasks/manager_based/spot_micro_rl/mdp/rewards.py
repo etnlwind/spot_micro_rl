@@ -3783,6 +3783,9 @@ def _apply_v55_runtime_overrides(
     forward_velocity_bootstrap_weight: float | None,
     standing_height_weight: float | None = None,
     height_bonus_weight: float | None = None,
+    trot_gait_weight: float | None = None,
+    diagonal_coupling_weight: float | None = None,
+    stance_propulsion_weight: float | None = None,
 ) -> None:
     overrides = {
         "action_rate_l2": action_rate_weight,
@@ -3792,6 +3795,9 @@ def _apply_v55_runtime_overrides(
         "forward_velocity_bootstrap": forward_velocity_bootstrap_weight,
         "standing_height": standing_height_weight,
         "height_bonus": height_bonus_weight,
+        "trot_gait": trot_gait_weight,
+        "diagonal_coupling": diagonal_coupling_weight,
+        "stance_propulsion": stance_propulsion_weight,
     }
     for term_name, weight in overrides.items():
         if weight is None:
@@ -4129,6 +4135,9 @@ def reward_weight_curriculum(
     v55_forward_velocity_bootstrap_weight: float | None = None,
     v55_standing_height_weight: float | None = None,
     v55_height_bonus_weight: float | None = None,
+    v55_trot_gait_weight: float | None = None,
+    v55_diagonal_coupling_weight: float | None = None,
+    v55_stance_propulsion_weight: float | None = None,
     v55_release_forward_ramp_iters: int = 0,
     v55_release_forward_velocity_pre: float | None = None,
     v55_release_forward_velocity_post: float | None = None,
@@ -4327,6 +4336,9 @@ def reward_weight_curriculum(
                 forward_velocity_bootstrap_weight=v55_forward_velocity_bootstrap_weight,
                 standing_height_weight=v55_standing_height_weight,
                 height_bonus_weight=v55_height_bonus_weight,
+                trot_gait_weight=v55_trot_gait_weight,
+                diagonal_coupling_weight=v55_diagonal_coupling_weight,
+                stance_propulsion_weight=v55_stance_propulsion_weight,
             )
             if v55_release_soft_ramp_iters > 0:
                 _apply_v55_release_soft_ramp(
@@ -4628,6 +4640,9 @@ def reward_weight_curriculum(
             forward_velocity_bootstrap_weight=v55_forward_velocity_bootstrap_weight,
             standing_height_weight=v55_standing_height_weight,
             height_bonus_weight=v55_height_bonus_weight,
+            trot_gait_weight=v55_trot_gait_weight,
+            diagonal_coupling_weight=v55_diagonal_coupling_weight,
+            stance_propulsion_weight=v55_stance_propulsion_weight,
         )
         if v55_release_soft_ramp_iters > 0:
             _apply_v55_release_soft_ramp(
