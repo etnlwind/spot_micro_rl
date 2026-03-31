@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V55.B1.1"
+TRAIN_VERSION = "V55.B2"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1246,14 +1246,14 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.curriculum.reward_weights.params["v55_release_soft_ramp_iters"] = 500
                 self.curriculum.reward_weights.params["v55_release_shoulder_neutral_pre"] = -1.0
                 self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = (
-                    -9.0 if _V55_TRACK == "B1.1" else
-                    -8.0 if _V55_TRACK in {"A6", "B1", "B2", "B3"} else
+                    -9.0 if _V55_TRACK in {"B1.1", "B2"} else
+                    -8.0 if _V55_TRACK in {"A6", "B1", "B3"} else
                     -6.0
                 )
                 self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
                 self.curriculum.reward_weights.params["v55_release_stance_width_post"] = (
-                    -4.5 if _V55_TRACK == "B1.1" else
-                    -4.0 if _V55_TRACK in {"A6", "B1", "B2", "B3"} else
+                    -4.5 if _V55_TRACK in {"B1.1", "B2"} else
+                    -4.0 if _V55_TRACK in {"A6", "B1", "B3"} else
                     -3.0
                 )
                 self.curriculum.reward_weights.params["v55_release_rear_prop_diff_pre"] = 0.0
@@ -1275,7 +1275,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # B1/B2/B3 inherit the same baseline gate so phase is evaluated
                 # on top of the improved A6-quality baseline.
                 self.rewards.base_height_l2.weight = -23.0
-                self.rewards.front_rear_support_balance_penalty.weight = -10.5 if _V55_TRACK == "B1.1" else -9.6
+                self.rewards.front_rear_support_balance_penalty.weight = -10.5 if _V55_TRACK in {"B1.1", "B2"} else -9.6
 
             if _V55_TRACK in {"B1", "B1.1"}:
                 # B1: additive probe. Baseline structure는 최대한 유지하고 phase를 약하게 추가한다.
