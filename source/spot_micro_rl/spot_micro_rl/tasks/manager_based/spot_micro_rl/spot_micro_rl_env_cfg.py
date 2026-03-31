@@ -1191,7 +1191,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # A5.5: keep A5.4 behavior, but relax min_height termination first
                 # to test whether min_height is a collapse amplifier at gait_gate release.
                 self.terminations.min_height.params["min_height"] = 0.12
-            elif _V55_TRACK in {"A5.6", "A6"}:
+            elif _V55_TRACK in {"A5.6", "A6", "B1", "B2", "B3"}:
                 # A5.6: same as A5.5, but lower the threshold one more step to see
                 # whether release-collapse depth and recovery improve further.
                 self.terminations.min_height.params["min_height"] = 0.10
@@ -1203,7 +1203,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_post"] = 16.0
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_bootstrap_pre"] = 8.0
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_bootstrap_post"] = 12.0
-            elif _V55_TRACK in {"A5.5", "A5.6", "A6"}:
+            elif _V55_TRACK in {"A5.5", "A5.6", "A6", "B1", "B2", "B3"}:
                 self.curriculum.reward_weights.params["v55_release_forward_ramp_iters"] = 500
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_pre"] = 2.0
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_post"] = 16.0
@@ -1230,7 +1230,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
                 self.curriculum.reward_weights.params["v55_release_stance_width_post"] = -3.0
 
-            elif _V55_TRACK in {"A5.2", "A5.4", "A5.5", "A5.6", "A6"}:
+            elif _V55_TRACK in {"A5.2", "A5.4", "A5.5", "A5.6", "A6", "B1", "B2", "B3"}:
                 # A5.2: expand release-shock mitigation to the next most likely
                 # gait-gate jump group while preserving the A5 baseline core.
                 # A5.4: keep the same 7-term release soft-ramp, but combine it with
@@ -1240,11 +1240,14 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # A5.6: keep A5.5 and lower min_height one more step (0.12 -> 0.10).
                 # A6: keep A5.6, but make the posture/usage gate slightly stricter
                 # before B1 so RL floor-lock and shoulder_splay can be reduced first.
+                # B1/B2/B3: inherit the same release soft-ramp baseline so phase
+                # effects are tested on top of the A6-quality baseline rather than
+                # a reverted A5-era baseline.
                 self.curriculum.reward_weights.params["v55_release_soft_ramp_iters"] = 500
                 self.curriculum.reward_weights.params["v55_release_shoulder_neutral_pre"] = -1.0
-                self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = -8.0 if _V55_TRACK == "A6" else -6.0
+                self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = -8.0 if _V55_TRACK in {"A6", "B1", "B2", "B3"} else -6.0
                 self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
-                self.curriculum.reward_weights.params["v55_release_stance_width_post"] = -4.0 if _V55_TRACK == "A6" else -3.0
+                self.curriculum.reward_weights.params["v55_release_stance_width_post"] = -4.0 if _V55_TRACK in {"A6", "B1", "B2", "B3"} else -3.0
                 self.curriculum.reward_weights.params["v55_release_rear_prop_diff_pre"] = 0.0
                 self.curriculum.reward_weights.params["v55_release_rear_prop_diff_post"] = -20.0
                 self.curriculum.reward_weights.params["v55_release_front_prop_diff_pre"] = 0.0
@@ -1256,11 +1259,13 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.curriculum.reward_weights.params["v55_release_per_leg_contact_floor_pre"] = -1.0
                 self.curriculum.reward_weights.params["v55_release_per_leg_contact_floor_post"] = -12.0
 
-            if _V55_TRACK == "A6":
+            if _V55_TRACK in {"A6", "B1", "B2", "B3"}:
                 # A6: posture-first correction before B1 entry.
                 # Keep the A5.6 release behavior, but slightly strengthen
                 # height/support pressure so RL floor-lock and shoulder_splay
                 # can improve without directly forcing extra limb-usage penalties.
+                # B1/B2/B3 inherit the same baseline gate so phase is evaluated
+                # on top of the improved A6-quality baseline.
                 self.rewards.base_height_l2.weight = -23.0
                 self.rewards.front_rear_support_balance_penalty.weight = -9.6
 

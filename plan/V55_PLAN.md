@@ -973,7 +973,7 @@ A5 checkpoint에서 resume하지 않는다.
 설정:
 
 ```text
-base          = A1 성공 설정
+base          = A6 baseline quality gate 통과 설정
 phase_obs     = ON
 phase_contact = 1.5
 phase_clear   = 0.5
@@ -981,6 +981,17 @@ handoff       = 없음
 fallback      = 없음
 phase agg     = mean_min
 timing reward = additive probe 수준
+
+구체적으로는 아래를 그대로 계승한다
+- min_height threshold 0.10
+- STAND forward 2 / 8
+- post-release forward ramp 2->16, 8->12
+- 7개 release shock soft-ramp
+- A6 posture gate
+  - shoulder_neutral post -8
+  - stance_width_penalty post -4
+  - base_height_l2 -23.0
+  - front_rear_support_balance_penalty -9.6
 ```
 
 성공 기준:
@@ -1002,7 +1013,7 @@ iter 100
 - phase cluster가 완전히 묻히지 않았는지 확인
 - rear bias 또는 front 사용 악화가 생겼는지 확인
 - feet_air_time과 phase_contact의 timing 충돌 여부 확인
-- A5 대비 ep_len 급락이 없는지 확인
+- A6 대비 ep_len 급락이 없는지 확인
 - trot_gait / diagonal_coupling이 유지되는지 확인
 ```
 
@@ -1017,6 +1028,13 @@ B1 추가 모니터링:
 ```text
 front/rear ratio가 A1 대비 나빠지면
 rear-side timing reward 감쇠가 역효과일 수 있음
+```
+
+지금 기준으로는 더 정확히:
+
+```text
+front/rear ratio가 A6 대비 나빠지면
+phase probe가 baseline quality를 해치고 있을 가능성이 높다
 ```
 
 ### 운영 계획
