@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: B1.1A phase 2.0 공존성 검증 설계/구현 완료, fresh start 검증 대기
+> 상태: B1.1B phase 2.0 공존성 검증 + 후반 splay drift 억제 설계/구현 완료
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -1205,6 +1205,70 @@ B1.1A는 "phase가 gait를 주도하는가"를 보는 실험이 아니다.
 를 본 뒤, phase 강도를 한 단계 낮춘 공존성 실험이다.
 ```
 
+### Experiment B1.1B: Phase 2.0 Coexistence + Late Splay Drift Suppression
+
+전제:
+
+- B1.1A는 완전 실패는 아니었지만,
+  후반으로 갈수록 shoulder_splay drift가 다시 커졌다
+
+설정:
+
+```text
+base                        = B1.1A baseline 계승
+forward_velocity            = STAND 2.0 / post-release 2->16 ramp 유지
+forward_velocity_bootstrap  = STAND 8.0 / post-release 8->12 ramp 유지
+min_height threshold        = 0.10 유지
+
+phase_contact               = 2.0
+phase_clearance             = 0.75
+trot_gait                   = 5.0
+diagonal_coupling           = 5.0
+feet_air_time               = 20.0
+leg_lift                    = 20.0
+rear_alternation            = 15.0
+rear_joint_velocity         = 12.0
+stance_propulsion           = 8.0
+rear_swing                  = 6.0
+
+posture gate 추가 강화:
+- shoulder_neutral post     = -10.0
+- stance_width post         = -5.0
+- front_rear_support        = -11.5
+- base_height_l2            = -23.0 유지
+```
+
+성공 기준:
+
+- time_out > 0.75
+- diagonal_coupling_raw > 0.45
+- stride > 4.0
+- phase_contact가 B1.1A 수준 유지
+- shoulder_splay < 0.25
+- RL contact_ratio > 0.20 유지
+
+실패 기준:
+
+- time_out < 0.60
+- diagonal_coupling_raw < 0.40
+- shoulder_splay > 0.30
+- RL contact_ratio < 0.15
+- phase는 유지되는데 baseline 품질만 나빠짐
+
+해석:
+
+```text
+B1.1B는 phase 파라미터를 더 바꾸는 실험이 아니다.
+
+목표는 하나다:
+"phase 2.0 공존성은 유지한 채,
+ 후반 shoulder_splay drift만 posture gate로 더 누를 수 있는가?"
+
+즉 B1.1A의 부분 성공을 유지하면서,
+후반 품질 저하를 만든 splay drift를 직접 겨냥하는
+가장 작은 다음 실험이다.
+```
+
 ### Experiment B1.2: Phase 3.0 Coexistence Test
 
 결과:
@@ -1296,7 +1360,7 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.B1.1A
+- TRAIN_VERSION = V55.B1.1B
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -1314,16 +1378,17 @@ for N updates
 - A6: A5.6 유지 + posture/usage correction(B1 진입용 baseline quality gate)
 - B1: A6 baseline 계승 + weak phase probe 실행
 - B1.1: B1 유지 + posture gate만 소폭 강화
-- B1.1A: B1.1 baseline 유지 + phase 2.0 공존성 검증
+- B1.1A: B1.1 baseline 유지 + phase 2.0 공존성 검증(부분 성공, 후반 splay drift 남음)
+- B1.1B: B1.1A 유지 + posture gate만 한 단계 더 강화
 - B1.2: B1.1 baseline 유지 + phase 3.0 공존성 검증(실패)
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
 - A5는 iter 500 이전까지 baseline recovery에 성공했지만
   gait_gate release 직후 min_height collapse가 발생했다
-- 현재 기본 실행 버전은 B1.1A이며,
-  다음 검증 우선순위는 B1.1 baseline을 유지한 채 phase 2.0이
-  baseline 품질과 공존 가능한지 확인하는 것이다
+- 현재 기본 실행 버전은 B1.1B이며,
+  다음 검증 우선순위는 B1.1A에서 확인된 phase 2.0 공존성을 유지한 채
+  후반 shoulder_splay drift를 posture gate 강화로 줄일 수 있는지 확인하는 것이다
 ```
 
 ### 11.1 A5에서 실제로 막은 경로
@@ -1607,8 +1672,8 @@ A6 실패
 
 ## 12. 최종 추천
 
-바로 실행할 다음 1순위는 `B1.1A` 검증이다.
+바로 실행할 다음 1순위는 `B1.1B` 검증이다.
 
 한 줄 요약:
 
-`A6 baseline quality gate와 B1.1 posture 보정은 확보됐고, B1.2에서 phase 3.0이 과하다는 신호를 봤으므로, 지금은 그 baseline 위에서 phase 2.0이 공존 가능한지 확인하는 B1.1A가 맞다.`
+`A6 baseline quality gate와 B1.1 posture 보정은 확보됐고, B1.2에서 phase 3.0이 과하다는 신호를 봤다. B1.1A로 phase 2.0 공존성은 어느 정도 확인했으므로, 지금은 그 baseline 위에서 후반 shoulder_splay drift를 더 누르는 B1.1B가 맞다.`
