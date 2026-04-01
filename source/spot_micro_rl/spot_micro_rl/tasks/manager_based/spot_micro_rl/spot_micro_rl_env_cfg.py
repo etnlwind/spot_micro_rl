@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V55.B2"
+TRAIN_VERSION = "V55.B1.2"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -25,7 +25,7 @@ _USE_BOOT_STANDING = True
 _IS_V54 = TRAIN_VERSION.startswith("V54")
 _IS_V55 = TRAIN_VERSION.startswith("V55")
 _V55_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V55 and "." in TRAIN_VERSION else ("A1" if _IS_V55 else "")
-_V55_PHASE_TRACKS = {"B1", "B1.1", "B2", "B3"}
+_V55_PHASE_TRACKS = {"B1", "B1.1", "B1.2", "B2", "B3"}
 
 # V54: clean phase-centric handoff
 # V55.A*: baseline recovery / release-shock ablations (phase OFF)
@@ -1191,7 +1191,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # A5.5: keep A5.4 behavior, but relax min_height termination first
                 # to test whether min_height is a collapse amplifier at gait_gate release.
                 self.terminations.min_height.params["min_height"] = 0.12
-            elif _V55_TRACK in {"A5.6", "A6", "B1", "B1.1", "B2", "B3"}:
+            elif _V55_TRACK in {"A5.6", "A6", "B1", "B1.1", "B1.2", "B2", "B3"}:
                 # A5.6: same as A5.5, but lower the threshold one more step to see
                 # whether release-collapse depth and recovery improve further.
                 self.terminations.min_height.params["min_height"] = 0.10
@@ -1203,7 +1203,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_post"] = 16.0
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_bootstrap_pre"] = 8.0
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_bootstrap_post"] = 12.0
-            elif _V55_TRACK in {"A5.5", "A5.6", "A6", "B1", "B1.1", "B2", "B3"}:
+            elif _V55_TRACK in {"A5.5", "A5.6", "A6", "B1", "B1.1", "B1.2", "B2", "B3"}:
                 self.curriculum.reward_weights.params["v55_release_forward_ramp_iters"] = 500
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_pre"] = 2.0
                 self.curriculum.reward_weights.params["v55_release_forward_velocity_post"] = 16.0
@@ -1246,13 +1246,13 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.curriculum.reward_weights.params["v55_release_soft_ramp_iters"] = 500
                 self.curriculum.reward_weights.params["v55_release_shoulder_neutral_pre"] = -1.0
                 self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = (
-                    -9.0 if _V55_TRACK in {"B1.1", "B2"} else
+                    -9.0 if _V55_TRACK in {"B1.1", "B1.2", "B2"} else
                     -8.0 if _V55_TRACK in {"A6", "B1", "B3"} else
                     -6.0
                 )
                 self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
                 self.curriculum.reward_weights.params["v55_release_stance_width_post"] = (
-                    -4.5 if _V55_TRACK in {"B1.1", "B2"} else
+                    -4.5 if _V55_TRACK in {"B1.1", "B1.2", "B2"} else
                     -4.0 if _V55_TRACK in {"A6", "B1", "B3"} else
                     -3.0
                 )
@@ -1271,7 +1271,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     self.curriculum.reward_weights.params["v55_diagonal_coupling_weight"] = 2.0
                     self.curriculum.reward_weights.params["v55_stance_propulsion_weight"] = 6.0
 
-            if _V55_TRACK in {"A6", "B1", "B1.1", "B2", "B3"}:
+            if _V55_TRACK in {"A6", "B1", "B1.1", "B1.2", "B2", "B3"}:
                 # A6: posture-first correction before B1 entry.
                 # Keep the A5.6 release behavior, but slightly strengthen
                 # height/support pressure so RL floor-lock and shoulder_splay
@@ -1279,7 +1279,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # B1/B2/B3 inherit the same baseline gate so phase is evaluated
                 # on top of the improved A6-quality baseline.
                 self.rewards.base_height_l2.weight = -23.0
-                self.rewards.front_rear_support_balance_penalty.weight = -10.5 if _V55_TRACK in {"B1.1", "B2"} else -9.6
+                self.rewards.front_rear_support_balance_penalty.weight = -10.5 if _V55_TRACK in {"B1.1", "B1.2", "B2"} else -9.6
 
             if _V55_TRACK in {"B1", "B1.1"}:
                 # B1: additive probe. Baseline structure는 최대한 유지하고 phase를 약하게 추가한다.
@@ -1309,6 +1309,21 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.rewards.stance_propulsion.weight = 6.0
                 self.rewards.foot_clearance.weight = 2.0
                 self.rewards.rear_swing.weight = 4.0
+                phase_contact_weight = 3.0
+                phase_clearance_weight = 1.0
+            elif _V55_TRACK == "B1.2":
+                # B1.2: phase 3.0 coexistence test. Keep B1.1 heuristic strength
+                # and posture gate, and only raise phase to the B2 level.
+                self.rewards.trot_gait.weight = 5.0
+                self.rewards.diagonal_coupling.weight = 5.0
+                self.rewards.gait_cycle_period.weight = 0.0
+                self.rewards.feet_air_time.weight = 20.0
+                self.rewards.leg_lift.weight = 20.0
+                self.rewards.rear_alternation.weight = 15.0
+                self.rewards.rear_joint_velocity.weight = 12.0
+                self.rewards.stance_propulsion.weight = 8.0
+                self.rewards.foot_clearance.weight = 2.0
+                self.rewards.rear_swing.weight = 6.0
                 phase_contact_weight = 3.0
                 phase_clearance_weight = 1.0
             elif _V55_TRACK == "B3":
