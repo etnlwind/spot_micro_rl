@@ -1,7 +1,7 @@
 # V55 Plan: Baseline Recovery First, Phase Probe Second
 
 > 작성: 2026-03-30
-> 상태: B1.2 phase 3.0 공존성 검증 설계/구현 완료, fresh start 검증 대기
+> 상태: B1.1A phase 2.0 공존성 검증 설계/구현 완료, fresh start 검증 대기
 > 목적: `V54`에서 드러난 handoff collapse를 피하고, 검증된 baseline locomotion을 먼저 복구한 뒤, 분리된 실험군에서 phase 신호의 실제 기여를 검증한다.
 
 ---
@@ -1142,7 +1142,7 @@ A1 -> B1 -> B2는 순차 실행이 기본
 - 비교 기준이 혼동되지 않음
 ```
 
-### Experiment B1.2: Phase 3.0 Coexistence Test
+### Experiment B1.1A: Phase 2.0 Coexistence Test
 
 전제:
 
@@ -1162,8 +1162,8 @@ posture gate 유지:
 - front_rear_support        = -10.5
 - base_height_l2            = -23.0
 
-phase_contact               = 3.0
-phase_clearance             = 1.0
+phase_contact               = 2.0
+phase_clearance             = 0.75
 trot_gait                   = 5.0
 diagonal_coupling           = 5.0
 feet_air_time               = 20.0
@@ -1194,15 +1194,25 @@ rear_swing                  = 6.0
 해석:
 
 ```text
-B1.2는 "phase가 gait를 주도하는가"를 보는 실험이 아니다.
+B1.1A는 "phase가 gait를 주도하는가"를 보는 실험이 아니다.
 
 목표는 하나다:
-"phase 3.0이 B1.1 baseline과 공존 가능한가?"
+"phase 2.0이 B1.1 baseline과 공존 가능한가?"
 
-즉 B2 실패 원인이
+즉 B1.2 실패 원인이
 - phase 3.0 자체인지
 - heuristic 감쇠가 너무 급했던 것인지
-를 분리하는 공존성 실험이다.
+를 본 뒤, phase 강도를 한 단계 낮춘 공존성 실험이다.
+```
+
+### Experiment B1.2: Phase 3.0 Coexistence Test
+
+결과:
+
+```text
+- shoulder_splay는 낮게 유지됐지만
+- min_height / time_out / diagonal_raw가 무너졌다
+- 즉 phase 3.0은 현재 baseline에 과한 쪽으로 판정됐다
 ```
 
 ### Experiment B3: Delayed Handoff Reintroduction
@@ -1286,7 +1296,7 @@ for N updates
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V55.B1.2
+- TRAIN_VERSION = V55.B1.1A
 
 구현 완료
 - Track A / Track B / B2 / B3 분기
@@ -1304,14 +1314,15 @@ for N updates
 - A6: A5.6 유지 + posture/usage correction(B1 진입용 baseline quality gate)
 - B1: A6 baseline 계승 + weak phase probe 실행
 - B1.1: B1 유지 + posture gate만 소폭 강화
-- B1.2: B1.1 baseline 유지 + phase 3.0 공존성 검증
+- B1.1A: B1.1 baseline 유지 + phase 2.0 공존성 검증
+- B1.2: B1.1 baseline 유지 + phase 3.0 공존성 검증(실패)
 - iter 0 / 100 / 500 V55 audit 로그
 
 주의
 - A5는 iter 500 이전까지 baseline recovery에 성공했지만
   gait_gate release 직후 min_height collapse가 발생했다
-- 현재 기본 실행 버전은 B1.2이며,
-  다음 검증 우선순위는 B1.1 baseline을 유지한 채 phase 3.0이
+- 현재 기본 실행 버전은 B1.1A이며,
+  다음 검증 우선순위는 B1.1 baseline을 유지한 채 phase 2.0이
   baseline 품질과 공존 가능한지 확인하는 것이다
 ```
 
@@ -1596,8 +1607,8 @@ A6 실패
 
 ## 12. 최종 추천
 
-바로 실행할 다음 1순위는 `B1.2` 검증이다.
+바로 실행할 다음 1순위는 `B1.1A` 검증이다.
 
 한 줄 요약:
 
-`A6 baseline quality gate와 B1.1 posture 보정은 확보됐고, 지금은 그 baseline 위에서 phase를 3.0까지 올려도 baseline 품질과 공존 가능한지 확인하는 B1.2가 맞다.`
+`A6 baseline quality gate와 B1.1 posture 보정은 확보됐고, B1.2에서 phase 3.0이 과하다는 신호를 봤으므로, 지금은 그 baseline 위에서 phase 2.0이 공존 가능한지 확인하는 B1.1A가 맞다.`
