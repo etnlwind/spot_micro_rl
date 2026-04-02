@@ -1,7 +1,7 @@
 # V57 Plan: Clean Phase-Centric Reboot
 
 > 작성: 2026-04-02
-> 상태: B1 설계/구현 완료, stand-first bootstrap으로 전환
+> 상태: B1.1 설계/구현 완료, planted-stand 행동 제약 추가
 > 목적: `V55/V56`에서 확인한 baseline recovery, phase coexistence, mechanics failure를 바탕으로, 77개 heuristic 생태계에서 벗어난 clean reward stack으로 사족보행을 다시 정의한다.
 
 ---
@@ -305,16 +305,81 @@ Positive
 2. standing_height    +5.0
 3. feet_on_ground     +2.0
 4. stationary_reward  +1.0
+5. contact_switch_penalty      -2.0
+6. contact_foot_velocity_penalty -1.0
 
 Negative
-5. lin_vel_z_l2       -2.0
-6. ang_vel_xy_l2      -0.5
-7. flat_orientation   -2.0
-8. base_height_l2     -1.5
-9. action_rate_l2     -0.01
-10. dof_acc_l2        -2.5e-7
-11. undesired_contacts -1.0
+7. lin_vel_z_l2       -2.0
+8. ang_vel_xy_l2      -0.5
+9. flat_orientation   -2.0
+10. base_height_l2     -1.5
+11. action_rate_l2     -0.5
+12. dof_acc_l2        -2.5e-7
+13. undesired_contacts -1.0
 ```
+
+### 7.3.0 B1.1 3관문 리뷰
+
+#### 본질 리뷰
+
+`B1.1`의 본질은 다음 한 줄이다.
+
+```text
+서기 = 발을 붙인 채 관절과 몸통으로 무게중심을 지지다각형 안에 유지하는 것
+```
+
+즉 `B1.1`은:
+
+```text
+- 걸음을 배우는 단계가 아니다
+- 발을 떼기 전 planted support를 먼저 배우는 단계다
+- 발 재배치는 마지막 수단이어야 한다
+```
+
+#### 실패모드 리뷰
+
+`B1` 첫안에서 실제로 드러난 값과 영상은 다음 실패모드를 보여줬다.
+
+```text
+1. 발을 계속 떼고 다시 디디며 느린 걷기처럼 버팀
+2. 붙인 발을 미끄러뜨리거나 끌고 가며 버팀
+3. stationary_reward가 있어도 stepping이 더 쉬운 해로 남음
+4. 결국 bad_orientation으로 계속 죽음
+```
+
+핵심은:
+
+```text
+결과 지표(height, orientation, feet_on_ground)는 있었지만,
+행동 제약(발을 떼지 말라 / 붙인 발을 미끄러뜨리지 말라)이 없었다.
+```
+
+#### 구현 리뷰
+
+그래서 `B1.1`에서는 reward를 많이 늘리지 않고,
+행동 제약 2개만 추가한다.
+
+```text
+1. contact_switch_penalty
+2. contact_foot_velocity_penalty
+```
+
+이 둘은 각각:
+
+```text
+contact_switch_penalty
+- 접지 상태 변화 자체를 비용화
+- "불필요한 liftoff / touchdown"을 직접 억제
+
+contact_foot_velocity_penalty
+- 접지 중인 발의 XY 속도를 비용화
+- "붙인 발로 버티지 않고 끌고 가는 전략"을 직접 억제
+```
+
+즉 `B1.1`은
+`높고 수평하게 서라`를 넘어서,
+`붙인 발은 유지하고, 필요할 때만 떼며, 붙인 발은 미끄러뜨리지 말라`
+를 실제 행동 수준으로 정의한 버전이다.
 
 핵심 의미:
 
@@ -329,13 +394,123 @@ stationary_reward
 - 앞으로 밀리거나 발을 재배치하지 말고
   제자리에서 버텨라
 
+contact_switch_penalty
+- 발 접촉 상태가 매 step 바뀌는 것을 직접 불리하게 만듦
+- 불필요한 stepping / re-stepping을 막는 행동 제약
+
+contact_foot_velocity_penalty
+- 접지 중인 발의 XY 속도를 직접 불리하게 만듦
+- 붙인 발을 끌고 가거나 미끄러뜨리는 전략을 막음
+
 action_rate_l2
 - 발을 마구 흔드는 전략이 standing reward와 경쟁할 만큼 비용을 가져야 한다
 - B1에서는 -0.01이 너무 약해, stand-only 과제 기준으로 -0.5까지 강화한다
+```
+
+### 7.3.1 B1.1 근본 보정
+
+`B1` 첫안의 핵심 문제는 결과 지표 중심이었다.
+
+```text
+- standing_height / feet_on_ground / stationary는 "결과"를 본다
+- 하지만 "발을 떼지 말라", "붙인 발을 미끄러뜨리지 말라"는 행동 제약이 없었다
+- 그래서 policy는 발 재배치로 버티는 느린 걷기 해를 계속 찾았다
+```
+
+그래서 `B1.1`에서는 reward를 많이 늘리지 않고, 행동 제약 2개만 추가한다.
+
+```text
+1. contact_switch_penalty
+2. contact_foot_velocity_penalty
+```
+
+즉 `서기`를 이제 이렇게 정의한다.
+
+```text
+높고 수평하고 4발이 닿아 있을 뿐 아니라,
+붙인 발은 가능하면 유지하고,
+정말 필요할 때만 발을 떼며,
+붙인 발은 미끄러뜨리지 않는다.
+```
+
+### 7.3.2 각 reward의 역할 구분
+
+`B1.1`에서는 reward를 세 층으로 본다.
+
+```text
+Primary
+- standing_height
+- feet_on_ground
+- stationary_reward
+- contact_switch_penalty
+- contact_foot_velocity_penalty
+
+Secondary
+- flat_orientation_l2
+- base_height_l2
+- ang_vel_xy_l2
+- lin_vel_z_l2
+
+Regularizer
+- action_rate_l2
+- dof_acc_l2
+- undesired_contacts
+- alive_bonus
+```
+
+의미:
+
+```text
+Primary는 "서기의 본질"을 직접 정의한다.
+Secondary는 몸 상태를 정리한다.
+Regularizer는 과격한 해를 줄이되 주연이 되지 않는다.
+```
+
+### 7.3.3 기대되는 로그 변화
+
+`B1.1`이 맞다면 TensorBoard에서 먼저 보여야 하는 건 다음이다.
+
+```text
+1. contact_switch_penalty magnitude 감소
+   -> 발 접촉 상태 변화가 줄어듦
+
+2. contact_foot_velocity_penalty magnitude 감소
+   -> 접지 중 발 끌기/미끄럼이 줄어듦
+
+3. stationary_reward 증가
+   -> 몸이 제자리에서 더 오래 머묾
+
+4. feet_on_ground 유지 또는 증가
+   -> 4발 지지 유지
+
+5. bad_orientation 감소
+   -> planted support가 실제로 안정성을 만듦
+```
+
+즉 `B1.1`의 첫 성공 신호는
+`standing_height`가 아니라
+`발 재배치와 접지 중 foot motion이 줄어드는 것`
+이어야 한다.
+
+### 7.3.4 기대되는 영상 변화
+
+영상에서는 다음 차이가 보여야 한다.
+
+```text
+이전 B1:
+- 발을 자주 떼고 다시 디딤
+- 제자리에서 작은 느린 걷기처럼 버팀
+- 붙인 발을 끌고 가는 느낌
+
+B1.1 기대:
+- 발을 먼저 붙인 채 버티려 함
+- 필요 없는 stepping이 줄어듦
+- 접지 중 발이 덜 미끄러짐
+- 몸통 흔들림을 관절로 더 흡수하려고 함
+```
 
 lin_vel_z / ang_vel_xy / flat_orientation
 - 튀거나 기울지 말고 정적으로 버텨라
-```
 
 ### 7.4 일부러 넣지 않은 것
 
@@ -372,6 +547,8 @@ iter 100~300:
 - bad_orientation 1.0 고착 아님
 - ep_len 증가 추세
 - standing_height / feet_on_ground / stationary가 0에 고착되지 않음
+- contact_switch_penalty가 초기보다 줄어듦
+- contact_foot_velocity_penalty가 초기보다 줄어듦
 ```
 
 ### 8.2 Stand quality
@@ -384,6 +561,7 @@ iter 300~800:
 - 수평 유지
 - 4발 접지 유지
 - 발을 계속 떼지 않음
+- 접지 중 발을 끌지 않음
 ```
 
 ### 8.3 영상 기준

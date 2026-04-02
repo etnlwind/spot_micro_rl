@@ -1950,6 +1950,46 @@ def all_feet_on_ground(
     return contacts.float().mean(dim=1)
 
 
+def contact_switch_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    threshold: float = 1.0,
+) -> torch.Tensor:
+    """Penalize unnecessary contact state changes between consecutive steps."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, threshold).float()
+
+    if not hasattr(env, "_prev_contact_state_b1"):
+        env._prev_contact_state_b1 = contacts.clone()
+        return torch.zeros(env.num_envs, device=env.device)
+
+    reset_mask = (env.episode_length_buf <= 1).unsqueeze(1)
+    previous = torch.where(reset_mask, contacts, env._prev_contact_state_b1)
+    switches = torch.abs(contacts - previous)
+    env._prev_contact_state_b1 = contacts.clone()
+    return switches.mean(dim=1)
+
+
+def contact_foot_velocity_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    threshold: float = 1.0,
+) -> torch.Tensor:
+    """Penalize XY toe speed while the toe is in contact."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, threshold).float()
+
+    asset = env.scene[foot_cfg.name]
+    foot_vel_xy = asset.data.body_vel_w[:, foot_cfg.body_ids, :2]
+    foot_speed_xy = torch.norm(foot_vel_xy, dim=-1)
+
+    active_contacts = contacts.sum(dim=1)
+    contact_count = active_contacts.clamp(min=1.0)
+    mean_contact_speed = (foot_speed_xy * contacts).sum(dim=1) / contact_count
+    return torch.where(active_contacts > 0.0, mean_contact_speed, torch.zeros_like(mean_contact_speed))
+
+
 def forward_velocity_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),

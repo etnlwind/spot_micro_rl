@@ -2039,6 +2039,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "alive_bonus",
                 "standing_height",
                 "feet_on_ground",
+                "contact_switch_penalty",
+                "contact_foot_velocity_penalty",
                 "lin_vel_z_l2",
                 "ang_vel_xy_l2",
                 "flat_orientation_l2",
@@ -2073,6 +2075,23 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 weight=2.0,
                 params={
                     "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*toe_link"),
+                    "threshold": 1.0,
+                },
+            )
+            self.rewards.contact_switch_penalty = RewTerm(
+                func=custom_mdp.contact_switch_penalty,
+                weight=-2.0,
+                params={
+                    "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*toe_link"),
+                    "threshold": 1.0,
+                },
+            )
+            self.rewards.contact_foot_velocity_penalty = RewTerm(
+                func=custom_mdp.contact_foot_velocity_penalty,
+                weight=-1.0,
+                params={
+                    "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*toe_link"),
+                    "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),
                     "threshold": 1.0,
                 },
             )
