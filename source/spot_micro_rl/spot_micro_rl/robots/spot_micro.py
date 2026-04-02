@@ -43,25 +43,27 @@ SPOT_MICRO_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.22),  # V48: leg=-0.97에 맞춘 높이 (V47 0.192보다 약간 높게)
+        pos=(0.0, 0.0, 0.19),  # V57.B1.2: symmetric stand fit based on FK-calibrated planted support
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
-            # V47-B: 발끝이 hip 수직선에 오도록 보정 (leg -0.71→-0.68)
-            # 이전(leg=-0.71): toe가 hip보다 5.7mm 앞으로 말려있음 → 뒤로 기울어짐 유발
-            # 보정(leg=-0.68): toe가 hip 수직선에 정확히 위치 → 자연스러운 neutral stand
-            # foot=1.31 유지 (toe z=-192.5mm, 거의 동일)
+            # V57.B1.2: FK-calibrated symmetric stand.
+            # Goals:
+            # - left/right mirrored toe placement
+            # - support-center x close to 0
+            # - negligible toe height spread
+            # - planted stand before locomotion
             "front_left_shoulder": -0.04,
-            "front_left_leg": -0.97,   # 실측 보정 2차: -0.89에서 toe +10mm → -0.97
-            "front_left_foot": 1.31,
-            "front_right_shoulder": -0.04,
-            "front_right_leg": -0.97,
-            "front_right_foot": 1.31,
+            "front_left_leg": -0.74,
+            "front_left_foot": 1.38,
+            "front_right_shoulder": 0.04,
+            "front_right_leg": -0.74,
+            "front_right_foot": 1.38,
             "rear_left_shoulder": -0.04,
-            "rear_left_leg": -0.97,
-            "rear_left_foot": 1.31,
-            "rear_right_shoulder": -0.04,
-            "rear_right_leg": -0.97,
-            "rear_right_foot": 1.31,
+            "rear_left_leg": -0.72,
+            "rear_left_foot": 1.38,
+            "rear_right_shoulder": 0.04,
+            "rear_right_leg": -0.72,
+            "rear_right_foot": 1.38,
         },
         joint_vel={".*": 0.0},
     ),

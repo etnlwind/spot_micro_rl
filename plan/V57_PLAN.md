@@ -1,7 +1,7 @@
 # V57 Plan: Clean Phase-Centric Reboot
 
 > 작성: 2026-04-02
-> 상태: B1.1 설계/구현 완료, planted-stand 행동 제약 추가
+> 상태: B1.3 설계/구현 완료, planted-stand + FK 기반 초기 자세 교정 + reset warmup 적용
 > 목적: `V55/V56`에서 확인한 baseline recovery, phase coexistence, mechanics failure를 바탕으로, 77개 heuristic 생태계에서 벗어난 clean reward stack으로 사족보행을 다시 정의한다.
 
 ---
@@ -295,6 +295,90 @@ rough terrain / command variation / robustness 확장
 - "우선 서라"는 과제만 남김
 ```
 
+### 7.2.1 FK 기반 초기 자세 교정
+
+`B1.2`에서 가장 중요한 환경 교정은 초기 자세였다.
+
+기존 init pose는 joint 값만 보면 대칭처럼 보였지만, 실제 URDF 축/원점을 반영한
+toe FK로 보면 완전 대칭이 아니었다.
+
+기존 값:
+
+```text
+FL/FR/RL/RR shoulder = -0.04
+FL/FR/RL/RR leg      = -0.97
+FL/FR/RL/RR foot     = 1.31
+```
+
+실측 FK 결과:
+
+```text
+current
+FL toe = [-0.0380, -0.0953, -0.1823]
+FR toe = [-0.0380,  0.0806, -0.1864]
+RL toe = [ 0.1480, -0.0953, -0.1823]
+RR toe = [ 0.1480,  0.0806, -0.1864]
+
+support center xyz = [ 0.054982, -0.007378, -0.184354]
+front pair y sum   = -0.014756
+rear pair y sum    = -0.014756
+z spread           = 0.004159
+```
+
+즉:
+
+```text
+- 좌우 toe y 위치가 완전 대칭이 아님
+- 좌우 toe 높이도 4mm 정도 차이남
+- support center x가 +5.5cm 뒤로 밀려 있음
+```
+
+그래서 `B1.2`에서는 분석팀 실측 교정값을 채택한다.
+
+```text
+front_left_shoulder   = -0.04
+front_right_shoulder  = +0.04
+rear_left_shoulder    = -0.04
+rear_right_shoulder   = +0.04
+
+front_left_leg        = -0.74
+front_right_leg       = -0.74
+rear_left_leg         = -0.72
+rear_right_leg        = -0.72
+
+front_left_foot       = 1.38
+front_right_foot      = 1.38
+rear_left_foot        = 1.38
+rear_right_foot       = 1.38
+
+base init z           = 0.19
+```
+
+교정 후 FK:
+
+```text
+analysis-team full fix
+FL toe = [-0.0881, -0.0955, -0.1854]
+FR toe = [-0.0881,  0.0955, -0.1854]
+RL toe = [ 0.0941, -0.0955, -0.1854]
+RR toe = [ 0.0941,  0.0955, -0.1854]
+
+support center xyz = [0.002976, 0.000000, -0.185400]
+front pair y sum   = 0.0
+rear pair y sum    = 0.0
+z spread           = 0.000059
+front width        = 0.190921
+rear width         = 0.190926
+```
+
+핵심 의미:
+
+```text
+- init pose가 실제 공간에서도 좌우 대칭이 됨
+- support center가 body 중심에 거의 맞음
+- planted stand 학습 전에 이미 한쪽으로 기우는 bias를 줄임
+```
+
 ### 7.3 reward 설계
 
 `B1` reward는 "걷기 구조"가 아니라 "정적 지지"를 가르친다.
@@ -314,8 +398,9 @@ Negative
 9. flat_orientation   -2.0
 10. base_height_l2     -1.5
 11. action_rate_l2     -0.5
-12. dof_acc_l2        -2.5e-7
-13. undesired_contacts -1.0
+12. joint_vel_l2      -0.1
+13. dof_acc_l2        -2.5e-7
+14. undesired_contacts -1.0
 ```
 
 ### 7.3.0 B1.1 3관문 리뷰
@@ -433,7 +518,89 @@ action_rate_l2
 붙인 발은 미끄러뜨리지 않는다.
 ```
 
-### 7.3.2 각 reward의 역할 구분
+### 7.3.2 B1.2 FK 기반 초기 자세 보정
+
+`B1.1` 이후에도 남은 핵심 문제는 초기 자세 그 자체였다.
+
+```text
+- joint 값은 숫자상 대칭처럼 보였지만
+- 실제 URDF 축/원점을 반영한 toe FK는 좌우/높이/지지중심이 비대칭이었다
+- policy는 학습 전에 이미 한쪽으로 기우는 planted-stand bias를 안고 시작했다
+```
+
+그래서 `B1.2`에서는 두 가지만 바꾼다.
+
+```text
+1. init pose를 분석팀 FK 교정값으로 변경
+   -> support center를 body 중심에 가깝게 맞춤
+   -> toe 좌우/높이 대칭 확보
+
+2. joint_vel_l2 완화 (-0.5 -> -0.1)
+   -> planted-stand regularizer는 유지하되
+      탐색 자체를 질식시키지는 않게 함
+```
+
+주의:
+
+```text
+기존 stance_width_penalty는 "너무 넓음"만 벌하는 max-width penalty다.
+현재 문제인 "너무 좁음"을 해결하지 못하므로 B1에서는 제거했다.
+minimum support width가 필요하면 별도 min-width penalty를 새로 설계해야 한다.
+```
+
+### 7.3.3 B1.3 reset warmup
+
+`B1.2` 이후에도 실제 런에서는 이런 패턴이 남았다.
+
+```text
+- reward와 init pose는 정리됐지만
+- reset 직후 policy action이 바로 크게 들어간다
+- planted stand를 시도하기 전에 관절/몸통이 크게 흔들리며 무너진다
+```
+
+실측 근거:
+
+```text
+2026-04-02_21-15-40 step 29
+mean_episode_length            54.89
+bad_orientation                1.000000
+action_rate_l2                -1.352670
+joint_vel_l2                  -5.494754
+ang_vel_xy_l2                 -1.054588
+stationary_reward              0.002715
+```
+
+즉 현재 병목은 "가만히 서는 reward가 부족하다" 이전에
+`reset 직후 planted stand를 물리적으로 정착시킬 시간 없이 바로 크게 움직인다`는 점이다.
+
+그래서 `B1.3`에서는 reward를 더 늘리지 않고,
+reset 직후 짧은 action warmup만 넣는다.
+
+```text
+action_warmup_steps = 8
+step_dt = 0.02s
+warmup duration ≈ 0.16s
+```
+
+구현 의미:
+
+```text
+- reset 후 첫 8 step 동안 policy action을 0으로 clamp
+- planted stand/contact settle 상태를 먼저 경험하게 함
+- reward는 그대로 포함
+  -> "가만히 서 있는 상태" 자체가 positive example이 되게 함
+```
+
+왜 8 step인가:
+
+```text
+- 너무 길면 학습이 비게 됨
+- 너무 짧으면 contact settle 효과가 약함
+- 현재 mean_episode_length ~55 step 수준에서
+  8 step(0.16s)은 초기 planted settle에는 충분하고 과하지 않은 길이
+```
+
+### 7.3.4 각 reward의 역할 구분
 
 `B1.1`에서는 reward를 세 층으로 본다.
 
@@ -453,6 +620,7 @@ Secondary
 
 Regularizer
 - action_rate_l2
+- joint_vel_l2
 - dof_acc_l2
 - undesired_contacts
 - alive_bonus
@@ -466,9 +634,9 @@ Secondary는 몸 상태를 정리한다.
 Regularizer는 과격한 해를 줄이되 주연이 되지 않는다.
 ```
 
-### 7.3.3 기대되는 로그 변화
+### 7.3.5 기대되는 로그 변화
 
-`B1.1`이 맞다면 TensorBoard에서 먼저 보여야 하는 건 다음이다.
+`B1.2`가 맞다면 TensorBoard에서 먼저 보여야 하는 건 다음이다.
 
 ```text
 1. contact_switch_penalty magnitude 감소
@@ -485,14 +653,17 @@ Regularizer는 과격한 해를 줄이되 주연이 되지 않는다.
 
 5. bad_orientation 감소
    -> planted support가 실제로 안정성을 만듦
+
+6. joint_vel_l2 magnitude 감소
+   -> 실제 관절 움직임 자체가 줄어듦
 ```
 
-즉 `B1.1`의 첫 성공 신호는
+즉 `B1.2`의 첫 성공 신호는
 `standing_height`가 아니라
 `발 재배치와 접지 중 foot motion이 줄어드는 것`
 이어야 한다.
 
-### 7.3.4 기대되는 영상 변화
+### 7.3.6 기대되는 영상 변화
 
 영상에서는 다음 차이가 보여야 한다.
 
@@ -507,6 +678,11 @@ B1.1 기대:
 - 필요 없는 stepping이 줄어듦
 - 접지 중 발이 덜 미끄러짐
 - 몸통 흔들림을 관절로 더 흡수하려고 함
+
+B1.2 추가 기대:
+- reset 직후 이미 한쪽으로 말려 있는 bias가 줄어듦
+- planted stand 시도 전에 좌우 비대칭으로 튀는 현상이 줄어듦
+- 앞/뒤 발끝 위치가 실제 공간에서 더 대칭적으로 시작됨
 ```
 
 lin_vel_z / ang_vel_xy / flat_orientation

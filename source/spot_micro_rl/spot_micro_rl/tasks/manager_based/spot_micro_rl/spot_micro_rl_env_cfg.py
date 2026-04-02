@@ -2022,6 +2022,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # - first learn to stand high, level, and on four feet
         # ══════════════════════════════════════════════════════════
         if _IS_V57 and _V57_TRACK == "B1":
+            self.action_warmup_steps = 8
             self.decimation = 4
             self.commands.base_velocity.rel_standing_envs = 1.0
             self.commands.base_velocity.rel_heading_envs = 0.0
@@ -2046,6 +2047,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "flat_orientation_l2",
                 "base_height_l2",
                 "action_rate_l2",
+                "joint_vel_l2",
                 "dof_acc_l2",
                 "undesired_contacts",
             }
@@ -2110,6 +2112,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.rewards.base_height_l2.weight = -1.5
             self.rewards.base_height_l2.params["target_height"] = 0.22
             self.rewards.action_rate_l2.weight = -0.5
+            self.rewards.joint_vel_l2.weight = -0.1
             self.rewards.dof_acc_l2.weight = -2.5e-7
             self.rewards.undesired_contacts.weight = -1.0
 

@@ -9,7 +9,14 @@ from .mdp.rewards import accumulate_v23_raw_metrics, reset_v23_raw_metric_extras
 
 class SpotMicroManagerBasedRLEnv(ManagerBasedRLEnv):
     def step(self, action: torch.Tensor):
-        self.action_manager.process_action(action.to(self.device))
+        action = action.to(self.device)
+        warmup_steps = int(getattr(self.cfg, "action_warmup_steps", 0))
+        if warmup_steps > 0:
+            warmup_mask = (self.episode_length_buf < warmup_steps).unsqueeze(1)
+            if torch.any(warmup_mask):
+                action = torch.where(warmup_mask, torch.zeros_like(action), action)
+
+        self.action_manager.process_action(action)
 
         self.recorder_manager.record_pre_step()
         is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
