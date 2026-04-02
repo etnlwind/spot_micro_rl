@@ -1561,6 +1561,25 @@ def front_pair_contact_cap_penalty(
     return gap * _heading_velocity_gate(env, asset_cfg, min_vel)
 
 
+def pitch_ang_vel_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """V56.M1: body-frame pitch angular velocity 직접 억제.
+
+    step마다 앞으로 고꾸라지는 nose-down oscillation을 직접 겨냥한다.
+    ang_vel_xy_l2는 roll/pitch를 함께 벌하지만, M1에서는 pitch 축을 별도로
+    더 강하게 눌러 front-heavy landing strategy를 줄이는 것이 목적이다.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    ang_vel_b = getattr(asset.data, "root_ang_vel_b", None)
+    if ang_vel_b is None:
+        ang_vel_b = asset.data.root_ang_vel_w
+    pitch_vel = ang_vel_b[:, 1]
+    return torch.square(pitch_vel) * _heading_velocity_gate(env, asset_cfg, min_vel)
+
+
 def front_rear_support_balance_penalty(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),

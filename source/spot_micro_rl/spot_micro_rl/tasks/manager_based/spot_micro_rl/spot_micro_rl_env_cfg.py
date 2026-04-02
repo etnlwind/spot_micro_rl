@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V55.B1.1B"
+TRAIN_VERSION = "V56.M1"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -24,14 +24,18 @@ _USE_BOOT_STANDING = True
 
 _IS_V54 = TRAIN_VERSION.startswith("V54")
 _IS_V55 = TRAIN_VERSION.startswith("V55")
+_IS_V56 = TRAIN_VERSION.startswith("V56")
 _V55_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V55 and "." in TRAIN_VERSION else ("A1" if _IS_V55 else "")
+_V56_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V56 and "." in TRAIN_VERSION else ("M1" if _IS_V56 else "")
 _V55_PHASE_TRACKS = {"B1", "B1.1", "B1.1A", "B1.1B", "B1.2", "B2", "B3"}
+_V56_PHASE_TRACKS = {"M1"}
 
 # V54: clean phase-centric handoff
 # V55.A*: baseline recovery / release-shock ablations (phase OFF)
 # V55.B*: baseline + phase auxiliary
-_PHASE_CLOCK = _IS_V54 or (_IS_V55 and _V55_TRACK in _V55_PHASE_TRACKS)
-_PHASE_AUXILIARY = _IS_V55 and _V55_TRACK in _V55_PHASE_TRACKS
+# V56.M*: mechanics-first correction on top of validated phase coexistence baseline
+_PHASE_CLOCK = _IS_V54 or (_IS_V55 and _V55_TRACK in _V55_PHASE_TRACKS) or (_IS_V56 and _V56_TRACK in _V56_PHASE_TRACKS)
+_PHASE_AUXILIARY = (_IS_V55 and _V55_TRACK in _V55_PHASE_TRACKS) or (_IS_V56 and _V56_TRACK in _V56_PHASE_TRACKS)
 
 from isaaclab.utils import configclass
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -405,6 +409,11 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # 안정성 페널티
         self.rewards.lin_vel_z_l2.weight = -2.0   # V29: -0.7 → -2.0 (수직 진동 억제 강화)
         self.rewards.ang_vel_xy_l2.weight = -1.0   # V29: -0.2 → -1.0 (몸통 흔들림 억제 강화)
+        self.rewards.pitch_ang_vel_l2 = RewTerm(
+            func=custom_mdp.pitch_ang_vel_l2,
+            weight=0.0,
+            params={"asset_cfg": SceneEntityCfg("robot"), "min_vel": 0.05},
+        )
         self.rewards.dof_torques_l2.weight = -3e-5
         self.rewards.dof_acc_l2.weight = -5e-6  # V17: -8e-8→-5e-6 (가속도 페널티 강화)
         # V17: 액션 변화율 페널티 대폭 강화 (빠른 떨림 물리적 차단)
@@ -1379,6 +1388,55 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             else:
                 phase_contact_weight = 0.0
                 phase_clearance_weight = 0.0
+        elif _IS_V56:
+            # V56.M1: keep the validated B1.1B coexistence baseline fixed,
+            # and add only a direct pitch angular-velocity penalty.
+            self.curriculum.reward_weights.params["v55_track"] = _V56_TRACK
+            self.terminations.min_height.params["min_height"] = 0.10
+
+            self.curriculum.reward_weights.params["v55_release_forward_ramp_iters"] = 500
+            self.curriculum.reward_weights.params["v55_release_forward_velocity_pre"] = 2.0
+            self.curriculum.reward_weights.params["v55_release_forward_velocity_post"] = 16.0
+            self.curriculum.reward_weights.params["v55_release_forward_velocity_bootstrap_pre"] = 8.0
+            self.curriculum.reward_weights.params["v55_release_forward_velocity_bootstrap_post"] = 12.0
+
+            self.curriculum.reward_weights.params["phase_contact_target"] = 0.0
+            self.curriculum.reward_weights.params["phase_clearance_target"] = 0.0
+            self.curriculum.reward_weights.params["phase_ramp_in_iters"] = 0
+            self.curriculum.reward_weights.params["phase_table_enabled"] = True
+
+            self.curriculum.reward_weights.params["v55_release_soft_ramp_iters"] = 500
+            self.curriculum.reward_weights.params["v55_release_shoulder_neutral_pre"] = -1.0
+            self.curriculum.reward_weights.params["v55_release_shoulder_neutral_post"] = -10.0
+            self.curriculum.reward_weights.params["v55_release_stance_width_pre"] = 0.0
+            self.curriculum.reward_weights.params["v55_release_stance_width_post"] = -5.0
+            self.curriculum.reward_weights.params["v55_release_rear_prop_diff_pre"] = 0.0
+            self.curriculum.reward_weights.params["v55_release_rear_prop_diff_post"] = -20.0
+            self.curriculum.reward_weights.params["v55_release_front_prop_diff_pre"] = 0.0
+            self.curriculum.reward_weights.params["v55_release_front_prop_diff_post"] = -20.0
+            self.curriculum.reward_weights.params["v55_release_rear_usage_diff_pre"] = 0.0
+            self.curriculum.reward_weights.params["v55_release_rear_usage_diff_post"] = -10.0
+            self.curriculum.reward_weights.params["v55_release_front_usage_diff_pre"] = 0.0
+            self.curriculum.reward_weights.params["v55_release_front_usage_diff_post"] = -8.0
+            self.curriculum.reward_weights.params["v55_release_per_leg_contact_floor_pre"] = -1.0
+            self.curriculum.reward_weights.params["v55_release_per_leg_contact_floor_post"] = -12.0
+
+            self.rewards.base_height_l2.weight = -23.0
+            self.rewards.front_rear_support_balance_penalty.weight = -11.5
+            self.rewards.pitch_ang_vel_l2.weight = -2.0
+
+            self.rewards.trot_gait.weight = 5.0
+            self.rewards.diagonal_coupling.weight = 5.0
+            self.rewards.gait_cycle_period.weight = 0.0
+            self.rewards.feet_air_time.weight = 20.0
+            self.rewards.leg_lift.weight = 20.0
+            self.rewards.rear_alternation.weight = 15.0
+            self.rewards.rear_joint_velocity.weight = 12.0
+            self.rewards.stance_propulsion.weight = 8.0
+            self.rewards.foot_clearance.weight = 2.0
+            self.rewards.rear_swing.weight = 6.0
+            phase_contact_weight = 2.0
+            phase_clearance_weight = 0.75
         else:
             phase_contact_weight = 0.0
             phase_clearance_weight = 0.0
