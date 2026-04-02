@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V57.A1"
+TRAIN_VERSION = "V57.B1"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -1924,7 +1924,16 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # - phase reward is primary timing signal
         # - no only_positive_rewards in the first pass
         # ══════════════════════════════════════════════════════════
-        if _IS_V57 and _V57_TRACK == "A1":
+        if _IS_V57 and _V57_TRACK in {"A1", "A1B"}:
+            # V57.A1 reset: keep the clean reward stack fixed, but make the
+            # control/command setup less aggressive for boot viability.
+            self.decimation = 4
+            self.commands.base_velocity.rel_standing_envs = 0.5 if _V57_TRACK == "A1B" else 0.25
+            self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.5)
+            # Clean bootstrap should start from a symmetric stand instead of a
+            # heavily randomized asymmetric landing.
+            self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
+            self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
             self.curriculum.reward_weights = None
             self.terminations.min_height.params["min_height"] = 0.10
             self.terminations.shoulder_splay = None
@@ -1942,6 +1951,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "ang_vel_xy_l2",
                 "flat_orientation_l2",
                 "base_height_l2",
+                "standing_height",
                 "action_rate_l2",
                 "dof_acc_l2",
                 "undesired_contacts",
@@ -1965,7 +1975,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.rewards.flat_orientation_l2.weight = -1.0
             self.rewards.base_height_l2.weight = -1.0
             self.rewards.base_height_l2.params["target_height"] = 0.22
-            self.rewards.action_rate_l2.weight = -0.01
+            self.rewards.standing_height.weight = 2.0 if _V57_TRACK == "A1B" else 0.0
+            self.rewards.standing_height.params["target_height"] = 0.22
+            self.rewards.action_rate_l2.weight = -0.5
             self.rewards.dof_acc_l2.weight = -2.5e-7
             self.rewards.undesired_contacts.weight = -1.0
 
@@ -1999,9 +2011,88 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             )
             self.rewards.joint_deviation = RewTerm(
                 func=isaaclab_mdp.joint_deviation_l1,
-                weight=-0.1,
+                weight=-0.01,
                 params={"asset_cfg": SceneEntityCfg("robot")},
             )
+
+        # ══════════════════════════════════════════════════════════
+        # V57.B1: Stand-first bootstrap
+        # - no locomotion command
+        # - no phase reward
+        # - first learn to stand high, level, and on four feet
+        # ══════════════════════════════════════════════════════════
+        if _IS_V57 and _V57_TRACK == "B1":
+            self.decimation = 4
+            self.commands.base_velocity.rel_standing_envs = 1.0
+            self.commands.base_velocity.rel_heading_envs = 0.0
+            self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.0)
+            self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+            self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+            self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
+            self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
+            self.curriculum.reward_weights = None
+            self.terminations.min_height.params["min_height"] = 0.10
+            self.terminations.shoulder_splay = None
+            self.observations.policy.phase_clock = None
+
+            keep_reward_names = {
+                "alive_bonus",
+                "standing_height",
+                "feet_on_ground",
+                "lin_vel_z_l2",
+                "ang_vel_xy_l2",
+                "flat_orientation_l2",
+                "base_height_l2",
+                "action_rate_l2",
+                "dof_acc_l2",
+                "undesired_contacts",
+            }
+            for attr in list(vars(self.rewards).keys()):
+                if attr.startswith("_") or attr in keep_reward_names:
+                    continue
+                try:
+                    setattr(self.rewards, attr, None)
+                except Exception:
+                    pass
+
+            self.rewards.alive_bonus = RewTerm(
+                func=custom_mdp.alive_bonus,
+                weight=1.0,
+            )
+            self.rewards.standing_height = RewTerm(
+                func=custom_mdp.standing_height_exp,
+                weight=5.0,
+                params={
+                    "target_height": 0.22,
+                    "sigma": 0.03,
+                    "asset_cfg": SceneEntityCfg("robot"),
+                },
+            )
+            self.rewards.feet_on_ground = RewTerm(
+                func=custom_mdp.all_feet_on_ground,
+                weight=2.0,
+                params={
+                    "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*toe_link"),
+                    "threshold": 1.0,
+                },
+            )
+            self.rewards.stationary_penalty = None
+            self.rewards.stationary_reward = RewTerm(
+                func=custom_mdp.stationary_reward,
+                weight=1.0,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "threshold": 0.05,
+                },
+            )
+            self.rewards.lin_vel_z_l2.weight = -2.0
+            self.rewards.ang_vel_xy_l2.weight = -0.5
+            self.rewards.flat_orientation_l2.weight = -2.0
+            self.rewards.base_height_l2.weight = -1.5
+            self.rewards.base_height_l2.params["target_height"] = 0.22
+            self.rewards.action_rate_l2.weight = -0.5
+            self.rewards.dof_acc_l2.weight = -2.5e-7
+            self.rewards.undesired_contacts.weight = -1.0
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

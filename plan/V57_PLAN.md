@@ -1,7 +1,7 @@
 # V57 Plan: Clean Phase-Centric Reboot
 
 > 작성: 2026-04-02
-> 상태: A1 설계/구현 완료, fresh start 검증 대기
+> 상태: B1 설계/구현 완료, stand-first bootstrap으로 전환
 > 목적: `V55/V56`에서 확인한 baseline recovery, phase coexistence, mechanics failure를 바탕으로, 77개 heuristic 생태계에서 벗어난 clean reward stack으로 사족보행을 다시 정의한다.
 
 ---
@@ -164,21 +164,52 @@ deployable trot에 가까운 구조다.
 
 ## 5. V57 전체 흐름
 
-### A1: Clean Flat-Trot Bootstrap
+### B1: Stand-first bootstrap
 
 목표:
 
 ```text
-flat terrain에서
-clean phase-centric stack으로
-자연스럽고 반복 가능한 trot bootstrap을 만든다
+먼저 4발로 높고 수평하게 선다.
+걷기는 그 다음 단계다.
 ```
 
-이름을 `A1`로 둔 이유:
+이 단계의 정의:
 
 ```text
-V57 안에서도
-먼저 "clean baseline bootstrap"을 확인해야 하기 때문이다.
+서기 = zero-speed gait 가 아니다.
+서기 = planted support control 이다.
+```
+
+즉 `B1`에서 policy가 배워야 하는 것은:
+
+```text
+1. 발을 붙인 상태에서
+2. 몸통과 관절로 무게중심을 지지다각형 안에 유지하고
+3. 정말 못 버틸 때만 발을 떼는 것
+```
+
+이건 `V55/V56`에서 반복된 다음 실패와 반대다.
+
+```text
+- 발을 계속 움직이며 버티기
+- 앞발을 몸 안쪽으로 모으기
+- 앞으로 밀리거나 비틀리며 쓰러지기
+- phase대로 발만 흔드는 open-loop
+```
+
+### A1: Clean flat-trot bootstrap
+
+전제:
+
+```text
+B1 성공
+```
+
+목표:
+
+```text
+정적 지지 제어가 안정된 뒤에
+phase/CPG를 주연으로 둔 clean trot bootstrap으로 넘어간다.
 ```
 
 ### A2: Rough / robustness extension
@@ -195,318 +226,263 @@ A1 성공
 rough terrain / command variation / robustness 확장
 ```
 
-### B-track (필요 시)
+---
 
-`V57`에서는 `phase`가 이미 주연이므로,
-`V55`식 B-track이 그대로 오지는 않는다.
+## 6. 왜 B1이 먼저인가
 
-필요하면:
+사용자 영상 관찰과 최근 실패 모드에서 확인된 핵심은:
 
 ```text
-구조 파라미터(freq, duty, aggregation, stance width 등)
-ablation track
+우리는 너무 빨리 "걷기"를 요구했다.
+하지만 SpotMicro는 먼저 "서기"를 배워야 한다.
 ```
 
-으로 따로 분리한다.
+어린 송아지/망아지 관점에서 보면 첫 서기는 대략 이 순서다.
+
+```text
+1. 다리를 넓게 벌려 지지다각형을 확보
+2. 발은 가능하면 붙인 채 유지
+3. 몸통을 높이고 수평을 맞춤
+4. 작은 흔들림은 관절로 흡수
+5. 정말 못 버틸 때만 발을 옮겨 지지폭을 다시 만든다
+```
+
+즉 발을 계속 떼고 놓는 것은:
+
+```text
+기본 전략이 아니라
+넘어짐을 늦추기 위한 마지막 보정 수단
+```
+
+이어야 한다.
+
+`B1`은 이 순서를 학습 과제로 분리한 단계다.
 
 ---
 
-## 6. Experiment V57.A1
+## 7. Experiment V57.B1
 
-### 6.1 질문
+### 7.1 질문
 
-`V57.A1`이 답할 질문은 하나다.
+`B1`이 답할 질문은 하나다.
 
 ```text
-"77개 heuristic 없이,
- clean phase-centric reward stack만으로
- flat terrain에서 자연스럽고 내구성 있는 trot을 만들 수 있는가?"
+"SpotMicro가 symmetric reset에서
+ 발을 붙인 채 높고 수평하게 버티는 법을
+ 먼저 배울 수 있는가?"
 ```
 
-### 6.2 reward 설계 원칙
+### 7.2 환경 설계
 
-`A1`은 아래 수준으로 제한한다.
-
-#### primary
+`B1`은 locomotion task가 아니다.
 
 ```text
-1. track_lin_vel_xy_exp
-2. track_ang_vel_z_exp
-3. phase_contact
-4. phase_clearance
+- standing envs         = 100%
+- lin_vel_x             = 0
+- lin_vel_y             = 0
+- ang_vel_z             = 0
+- decimation            = 4 (50Hz)
+- reset joint randomization OFF
+- phase observation OFF
+- phase reward OFF
 ```
 
-#### stability / mechanics
+의도:
 
 ```text
-5. lin_vel_z_l2
-6. ang_vel_xy_l2
-7. flat_orientation_l2
-8. base_height_l2
+- command가 policy를 걷기로 유도하지 않게 함
+- reset 직후 비대칭 착지/튐을 최대한 줄임
+- "우선 서라"는 과제만 남김
 ```
 
-#### smoothness / safety
+### 7.3 reward 설계
+
+`B1` reward는 "걷기 구조"가 아니라 "정적 지지"를 가르친다.
 
 ```text
-9. action_rate_l2
-10. dof_acc_l2 or joint_vel_l2
-11. undesired_contacts or contact force/impact penalty
-12. feet_air_time (phase-linked 또는 표준형)
+Positive
+1. alive_bonus        +1.0
+2. standing_height    +5.0
+3. feet_on_ground     +2.0
+4. stationary_reward  +1.0
+
+Negative
+5. lin_vel_z_l2       -2.0
+6. ang_vel_xy_l2      -0.5
+7. flat_orientation   -2.0
+8. base_height_l2     -1.5
+9. action_rate_l2     -0.01
+10. dof_acc_l2        -2.5e-7
+11. undesired_contacts -1.0
 ```
 
-즉:
+핵심 의미:
 
 ```text
-다리별 heuristic 군
-- rear_alternation
-- rear_joint_velocity
-- stance_propulsion
-- usage_diff 다수
-- floor/band/cooperation ecology
+standing_height
+- 몸을 적정 높이까지 펴고 수평에 가깝게 유지하라
+
+feet_on_ground
+- 4발 지지를 유지하라
+
+stationary_reward
+- 앞으로 밀리거나 발을 재배치하지 말고
+  제자리에서 버텨라
+
+action_rate_l2
+- 발을 마구 흔드는 전략이 standing reward와 경쟁할 만큼 비용을 가져야 한다
+- B1에서는 -0.01이 너무 약해, stand-only 과제 기준으로 -0.5까지 강화한다
+
+lin_vel_z / ang_vel_xy / flat_orientation
+- 튀거나 기울지 말고 정적으로 버텨라
 ```
 
-은 `A1`에서 기본적으로 넣지 않는다.
+### 7.4 일부러 넣지 않은 것
 
-### 6.3 최종 구현 inventory
-
-`V57.A1`은 아래 13개로 고정한다.
+`B1`에서 일부러 안 넣는 것:
 
 ```text
-Primary
-1. track_lin_vel_xy_exp      +1.0
-2. track_ang_vel_z_exp       +0.5
-3. phase_contact             +1.0
-4. phase_clearance           +0.5
-
-Stability / mechanics
-5. lin_vel_z_l2              -2.0
-6. ang_vel_xy_l2             -0.1
-7. flat_orientation_l2       -1.0
-8. base_height_l2            -1.0   (target_height=0.22)
-
-Smoothness / safety
-9. action_rate_l2            -0.01
-10. dof_acc_l2               -2.5e-7
-11. undesired_contacts       -1.0
-12. joint_deviation          -0.1   (temporary weak bootstrap prior)
-13. alive_bonus              +1.0   (die-fast 방지용 최소 survival prior)
+- phase_contact / phase_clearance
+- track_lin_vel_xy_exp / track_ang_vel_z_exp
+- foot_clearance / leg_lift / trot_gait
+- gait_gate / phase_table / release ramp
+- 다리별 heuristic ecology
 ```
 
-설계 의도:
+즉 `B1`은:
 
 ```text
-- phase_contact / phase_clearance가 gait timing의 주연
-- velocity / orientation / smoothness는 표준 quadruped RL 축만 유지
-- joint_deviation은 SpotMicro boot viability를 위한 약한 safety prior로만 둔다
-- alive_bonus는 clean stack 예외 1개로, die-fast 방지 목적의 최소 survival prior다
-- feet_air_time는 A1 첫 버전에서 넣지 않는다
-  (phase_clearance와 timing overlap을 피하기 위함)
-```
-
-### 6.4 legacy 처리
-
-`A1`은 clean reboot이므로 아래를 명시적으로 끈다.
-
-```text
-- legacy gait_gate          OFF
-- legacy phase_table        OFF
-- reward_weight_curriculum  OFF
-- only_positive_rewards     OFF
-- alive_bonus              ON (+1.0)
-```
-
-즉 `A1`은:
-
-```text
-- iter 500 release shock를 전제로 하지 않는다
-- staged handoff를 전제로 하지 않는다
-- clean stack 자체로 부팅/학습 가능한지 본다
-- 단, die-fast 방지를 위해 alive_bonus 1개는 허용한다
-```
-
-### 6.5 phase가 주연이라는 뜻
-
-`A1`에서는:
-
-```text
-phase_contact / phase_clearance가 gait timing의 핵심 신호
+걷기 구조를 배우는 단계가 아니라
+정적 지지 제어를 배우는 단계
 ```
 
 이다.
 
-이건 `V55`와 다르다.
-
-```text
-V55:
-phase = probe
-
-V57.A1:
-phase = primary gait driver
-```
-
-추가 결정:
-
-```text
-phase aggregation = mean
-```
-
-이유:
-
-```text
-- 첫 실험의 질문은 "phase 구조를 policy가 배우는가?"다
-- mean_min은 weakest leg에 과도하게 끌려가므로 A1엔 보수적이다
-- 4발 균등화는 A2 이후 필요 시 다시 검토한다
-```
-
-### 6.6 우리가 일부러 버릴 것
-
-`A1`에서 일부러 안 넣는 것:
-
-```text
-- 77개 legacy ecology 대부분
-- iter 500 gait-gate release
-- handoff / bridge / staged shock
-- direct RL-only patch history
-- barrier / CaT style reward 통합
-```
-
-즉 `A1`은 “기존 것을 고친 버전”이 아니라
-“새 clean stack”이다.
-
 ---
 
-## 7. 성공 기준
+## 8. 성공 기준
 
-`A1`의 첫 성공 기준은 두 단계다.
+`B1`의 첫 성공 기준은 "안넘어진다"보다 더 구체적이어야 한다.
 
-### 7.1 Boot viability
+### 8.1 Boot viability
 
-iter 200~400:
+iter 100~300:
 
 ```text
-- die-fast 아님
-- ep_len > 80
 - bad_orientation 1.0 고착 아님
-- phase_contact 0 고착 아님
+- ep_len 증가 추세
+- standing_height / feet_on_ground / stationary가 0에 고착되지 않음
 ```
 
-즉 첫 질문은:
+### 8.2 Stand quality
+
+iter 300~800:
 
 ```text
-SpotMicro에서 clean stack만으로
-서는가 / 움직이는가 / 학습 신호가 생기는가
+- time_out 유의미하게 발생
+- 몸 높이를 유지
+- 수평 유지
+- 4발 접지 유지
+- 발을 계속 떼지 않음
 ```
 
-이다.
-
-### 7.2 Gait quality
-
-iter 400:
-
-```text
-- ep_len > 150
-- time_out > 0.60
-- diagonal_raw > 0.35
-- stride > 2.5
-```
-
-iter 1000:
-
-```text
-- time_out > 0.80
-- diagonal_raw > 0.45
-- stride > 4.0
-- front/rear contact gap 과도하지 않음
-```
-
-### 영상 기준
+### 8.3 영상 기준
 
 필수:
 
 ```text
-- 매 스텝 nose-down 과도하지 않음
-- 앞발/뒷발이 서로 비틀린 torsion gait 아님
-- 앞다리가 충격 흡수용 버팀목처럼 과사용되지 않음
-- 보행이 "기괴한 타협해"로 보이지 않음
+- 발을 붙인 상태로 먼저 버티려 함
+- 발을 계속 재배치하며 버티지 않음
+- 앞발을 몸 안쪽으로 과하게 모으지 않음
+- 앞으로 밀리거나 옆으로 비틀리며 쓰러지지 않음
 ```
 
 기각:
 
 ```text
-수치가 좋아도
-영상상 front-heavy / torsion / nose-down이 심하면 실패
+수치가 조금 좋아도
+영상상 "서기"가 아니라 "느린 걷기/헛디딤"처럼 보이면 실패
 ```
 
 ---
 
-## 8. 실패 해석
+## 9. 실패 해석
 
-`A1` 실패의 의미:
+`B1` 실패의 의미는 명확하다.
 
 ```text
-clean phase-centric stack만으로는
-현재 SpotMicro morphologies / controls에서
-flat trot bootstrap이 충분하지 않았다.
+clean stack + symmetric reset + stand-only command만으로는
+SpotMicro가 planted stand를 배우기에 아직 부족하다.
 ```
 
-하지만 그 실패도 가치가 있다.
-
-왜냐하면:
+하지만 이것도 가치가 있다.
 
 ```text
-그때 비로소
-어떤 최소 heuristic / safety prior가 필요한지
-깨끗하게 추가할 수 있기 때문이다.
+걷기 이전에
+무엇이 정말 부족한지
+stance / support 관점에서 분리해서 볼 수 있기 때문이다.
 ```
 
 즉 실패해도:
 
 ```text
-V55/V56처럼 77개 ecology 안에서 길을 잃지 않는다.
+다시 77개 ecology로 회귀하지 않고
+"정적 지지 제어에 무엇이 필요한가"만 좁혀서 볼 수 있다.
 ```
 
 ---
 
-## 9. 구현 상태
+## 10. 구현 상태
 
 현재 구현 상태:
 
 ```text
-TRAIN_VERSION            = V57.A1
-legacy gait_gate         = OFF
-legacy phase_table       = OFF
-reward curriculum        = OFF
-phase observation        = ON
-phase aggregation        = mean
-only_positive_rewards    = OFF
-alive_bonus              = ON (+1.0)
+TRAIN_VERSION              = V57.B1
+decimation                 = 4 (50Hz)
+standing envs              = 100%
+lin_vel_x range            = (0.0, 0.0)
+lin_vel_y range            = (0.0, 0.0)
+ang_vel_z range            = (0.0, 0.0)
+legacy gait_gate           = OFF
+legacy phase_table         = OFF
+reward curriculum          = OFF
+phase observation          = OFF
+only_positive_rewards      = OFF
+alive_bonus                = ON (+1.0)
+standing_height            = ON (+5.0)
+feet_on_ground             = ON (+2.0)
+stationary_reward          = ON (+1.0)
+action_rate_l2             = -0.5
+reset joint randomization  = OFF
 ```
 
 따라서 다음 검증은:
 
 ```text
-1. curriculum_0.pt가 아니라 reward snapshot/runtime이 clean stack 기준인지 확인
-2. boot viability (iter 200~400) 먼저 확인
-3. 그 다음 수치 + 영상 mechanics로 A1 성공/실패 판정
+1. symmetric reset + stand-only command에서 planted stand가 가능한지 확인
+2. boot viability (iter 100~300) 먼저 확인
+3. 발을 붙인 정적 지지가 나오면 그 다음에 locomotion으로 넘어감
 ```
 
-## 10. 바로 다음 작업
+---
 
-`V57.A1` 구현 후 바로 해야 할 것:
+## 11. 바로 다음 작업
+
+`V57.B1` 실행 후 바로 해야 할 것:
 
 ```text
 1. fresh start
 2. boot viability 검증
 3. episode scalar + 영상 mechanics 함께 확인
-4. die-fast 징후가 있으면 only_positive_rewards A1b 검토
+4. "발을 붙인 채 버티는가"를 최우선 기준으로 판정
 ```
 
 ---
 
-## 11. 최종 추천
+## 12. 최종 추천
 
-바로 실행할 다음 1순위는 `V57.A1` fresh start 검증이다.
+바로 실행할 다음 1순위는 `V57.B1` fresh start 검증이다.
 
 한 줄 요약:
 
-`V55/V56은 문제 지도를 만드는 데는 성공했지만, 최종 해법은 아니었다. V57.A1은 phase가 주연이고 reward가 13개뿐인 clean quadruped RL stack으로 다시 시작하는 메이저 전환이다.`
+`V57의 다음 단계는 걷기보다 먼저 서기다. V57.B1은 symmetric reset과 stand-only command 위에서, 발을 붙인 채 높고 수평하게 버티는 planted stand control을 먼저 학습시키는 단계다.`

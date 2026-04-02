@@ -2001,12 +2001,12 @@ def foot_clearance_reward(
     return base_reward * vel_gate
 
 
-def stationary_penalty(
+def stationary_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     threshold: float = 0.05,
 ) -> torch.Tensor:
-    """로봇이 멈춰있을 때 페널티. XY 속도가 threshold 미만이면 1.0 반환."""
+    """로봇이 제자리에 머물 때 보상. XY 속도가 threshold 미만이면 1.0 반환."""
     asset = env.scene[asset_cfg.name]
     vel_xy = asset.data.root_lin_vel_b[:, :2]
     vel_magnitude = torch.norm(vel_xy, dim=1)
@@ -2015,6 +2015,15 @@ def stationary_penalty(
         torch.ones_like(vel_magnitude),
         torch.zeros_like(vel_magnitude),
     )
+
+
+def stationary_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    threshold: float = 0.05,
+) -> torch.Tensor:
+    """Backward-compatible alias for historical configs."""
+    return stationary_reward(env, asset_cfg=asset_cfg, threshold=threshold)
 
 
 def trot_gait_reward(
