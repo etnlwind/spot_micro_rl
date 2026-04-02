@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V56.M1"
+TRAIN_VERSION = "V57.A1"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -25,8 +25,10 @@ _USE_BOOT_STANDING = True
 _IS_V54 = TRAIN_VERSION.startswith("V54")
 _IS_V55 = TRAIN_VERSION.startswith("V55")
 _IS_V56 = TRAIN_VERSION.startswith("V56")
+_IS_V57 = TRAIN_VERSION.startswith("V57")
 _V55_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V55 and "." in TRAIN_VERSION else ("A1" if _IS_V55 else "")
 _V56_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V56 and "." in TRAIN_VERSION else ("M1" if _IS_V56 else "")
+_V57_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V57 and "." in TRAIN_VERSION else ("A1" if _IS_V57 else "")
 _V55_PHASE_TRACKS = {"B1", "B1.1", "B1.1A", "B1.1B", "B1.2", "B2", "B3"}
 _V56_PHASE_TRACKS = {"M1"}
 
@@ -1914,6 +1916,92 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                         "contact_threshold": 1.0,
                     },
                 )
+
+        # ══════════════════════════════════════════════════════════
+        # V57.A1: Clean phase-centric reboot
+        # - legacy gait-gate / phase-table OFF
+        # - small reward stack only
+        # - phase reward is primary timing signal
+        # - no only_positive_rewards in the first pass
+        # ══════════════════════════════════════════════════════════
+        if _IS_V57 and _V57_TRACK == "A1":
+            self.curriculum.reward_weights = None
+            self.terminations.min_height.params["min_height"] = 0.10
+            self.terminations.shoulder_splay = None
+
+            self.observations.policy.phase_clock = ObsTerm(
+                func=custom_mdp.phase_clock_obs,
+                params={"frequency": 2.0},
+            )
+
+            keep_reward_names = {
+                "alive_bonus",
+                "track_lin_vel_xy_exp",
+                "track_ang_vel_z_exp",
+                "lin_vel_z_l2",
+                "ang_vel_xy_l2",
+                "flat_orientation_l2",
+                "base_height_l2",
+                "action_rate_l2",
+                "dof_acc_l2",
+                "undesired_contacts",
+            }
+            for attr in list(vars(self.rewards).keys()):
+                if attr.startswith("_") or attr in keep_reward_names:
+                    continue
+                try:
+                    setattr(self.rewards, attr, None)
+                except Exception:
+                    pass
+
+            self.rewards.alive_bonus = RewTerm(
+                func=custom_mdp.alive_bonus,
+                weight=1.0,
+            )
+            self.rewards.track_lin_vel_xy_exp.weight = 1.0
+            self.rewards.track_ang_vel_z_exp.weight = 0.5
+            self.rewards.lin_vel_z_l2.weight = -2.0
+            self.rewards.ang_vel_xy_l2.weight = -0.1
+            self.rewards.flat_orientation_l2.weight = -1.0
+            self.rewards.base_height_l2.weight = -1.0
+            self.rewards.base_height_l2.params["target_height"] = 0.22
+            self.rewards.action_rate_l2.weight = -0.01
+            self.rewards.dof_acc_l2.weight = -2.5e-7
+            self.rewards.undesired_contacts.weight = -1.0
+
+            toe_cfg_phase = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            foot_body_cfg_phase = SceneEntityCfg("robot", body_names=".*toe_link")
+            self.rewards.phase_contact = RewTerm(
+                func=custom_mdp.phase_contact_reward,
+                weight=1.0,
+                params={
+                    "sensor_cfg": toe_cfg_phase,
+                    "frequency": 2.0,
+                    "duty_factor": 0.55,
+                    "contact_threshold": 1.0,
+                    "standing_vel_threshold": 0.08,
+                    "aggregation_mode": "mean",
+                    "ema_alpha": 0.0,
+                    "min_target": 0.60,
+                },
+            )
+            self.rewards.phase_clearance = RewTerm(
+                func=custom_mdp.phase_foot_clearance,
+                weight=0.5,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "foot_cfg": foot_body_cfg_phase,
+                    "frequency": 2.0,
+                    "duty_factor": 0.55,
+                    "target_clearance": 0.04,
+                    "standing_vel_threshold": 0.08,
+                },
+            )
+            self.rewards.joint_deviation = RewTerm(
+                func=isaaclab_mdp.joint_deviation_l1,
+                weight=-0.1,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)
