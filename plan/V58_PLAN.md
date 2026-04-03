@@ -110,14 +110,14 @@ standing_height:      0.097
 
 ```text
 1. V57/V58 실패 구간은 벗어남
-   - die-fast 아님
+   - die-fast 해소됨
    - 대부분 timeout까지 생존
-   - velocity tracking이 실제로 붙음
+   - velocity tracking 정상 작동
 
 2. 현재 남은 주된 리스크는 base_contact
    - orientation 문제는 사실상 해결
    - min_height도 거의 발생 안 함
-   - 일부 env가 몸통/다리 접촉을 아직 사용 중일 가능성
+   - 일부 env에서 몸통/다리 접촉이 잔존할 가능성 있음
 
 3. 현재 단계 판단
    - 지금은 런을 건드리지 않고 계속 가는 게 맞음
@@ -383,12 +383,12 @@ V58.4: rel_standing_envs 0.5→0.8    (if standing 불안정)
 ep_len:              954 steps (95% 생존!)
 bad_orientation:     5.4%
 time_out:            94.6%
-per-step reward:     +0.009 (양수 → die-fast 아님!)
+per-step reward:     +0.009 (양수, die-fast 해소 확인)
 track_lin_vel_xy:    +0.792 (초기값)
 track_ang_vel_z:     +0.223
 
 관찰: "제자리에 서있음" — iter 43에서는 정상
-      50% standing 명령 + policy가 아직 velocity tracking 미학습
+      50% standing 명령 + velocity tracking 미학습 단계
 
 V57.B1 대비: ep_len 1→954, die-fast→양수reward — 완전히 다른 세계
 ```
@@ -418,14 +418,14 @@ V58.B4:  flat 안정화 후 rough terrain / robustness
 
 ### iter 800+ 심층 분석: drag propulsion 진단
 
-현재 B1은 생존과 tracking은 성공했지만, gait quality는 아직 미완성이다.
+현재 B1은 생존 및 tracking에 성공했으나, gait quality는 미완성 상태이다.
 
 관찰/진단:
 
 ```text
 - track_lin_vel_xy는 높음 (~0.9)
 - 하지만 feet_air_time은 거의 0
-- diagonal/trot pattern은 아직 없음
+- diagonal/trot pattern 미출현
 - 일부 env는 rear-heavy contact 편향과 drag propulsion 징후
 ```
 
@@ -438,7 +438,7 @@ V58.B4:  flat 안정화 후 rough terrain / robustness
 - velocity tracking을 실제로 붙이기
 
 현재 B1의 한계:
-- "제대로 걷기"보다 "끌면서 전진"하는 해가 아직 일부 남음
+- 정상 보행 대신 drag propulsion 해가 잔존
 ```
 
 따라서 B2의 우선순위는:
