@@ -2151,10 +2151,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
             # push_robot은 SpotMicro가 가벼워서 일단 비활성 유지 (V58.1에서 검토)
 
-            # ── Terminations: IdealPD에 맞춘 strict ──
-            # IdealPD는 effort_limit=15로 약해서 ImplicitActuator보다 더 쉽게 기울어짐
+            # ── Terminations: 실제 엎드림/base contact 중심 ──
             self.terminations.min_height.params["min_height"] = 0.12  # IdealPD eq ≈ 0.124
-            self.terminations.bad_orientation.params["limit_angle"] = 0.7  # strict 유지: 나쁜 자세 survival 대신 복원 토크 여유로 해결
+            self.terminations.bad_orientation.params["limit_angle"] = 1.1  # orientation은 보조, 실제 실패는 min_height/base_contact로 처리
             self.terminations.shoulder_splay = None
             # body/다리 접촉 즉시 사망: 주저앉음, 눕기, 다리 바닥 닿기 모두 terminate
             self.terminations.base_contact = DoneTerm(

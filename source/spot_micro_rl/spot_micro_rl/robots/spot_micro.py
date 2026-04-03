@@ -67,15 +67,13 @@ SPOT_MICRO_CFG = ArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.7,  # foot 관절 최대 접힘 제한 (2.59×0.7=1.81rad)
     actuators={
-        "legs": IdealPDActuatorCfg(
-            # V58: IdealPDActuator — 실제 effort_limit 적용
-            # ImplicitActuator는 effort_limit이 안 먹혀서 비현실적 자세 유지
-            # IdealPD: torque = clip(Kp*(target-pos) + Kd*(0-vel), -15, +15)
-            # V58의 양수 reward 구조에서 die-fast 없음
+        "legs": ImplicitActuatorCfg(
+            # V58.B1 locomotion bootstrap: ImplicitActuator로 안정적 rollout 확보
+            # bad_orientation 즉사 대신 실제 엎드림(min_height/base_contact) 기준으로 학습
             joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
-            effort_limit=25.0,
-            stiffness={".*shoulder": 10.0, ".*leg": 20.0, ".*foot": 6.0},
-            damping={".*shoulder": 3.0, ".*leg": 4.0, ".*foot": 2.0},
+            effort_limit=15.0,
+            stiffness={".*shoulder": 12.0, ".*leg": 28.0, ".*foot": 8.0},
+            damping={".*shoulder": 4.0, ".*leg": 5.0, ".*foot": 2.0},
         ),
     },
 )

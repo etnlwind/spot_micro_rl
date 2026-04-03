@@ -1,7 +1,7 @@
 # V58 Plan: Isaac Lab 표준 Locomotion 복귀
 
 > 작성: 2026-04-03
-> 상태: V58.B1 구현 완료, fresh run 재검증 단계
+> 상태: V58.B1 actuator/termination 재조정 완료, fresh run 재검증 단계
 > 목적: V57.B1 stand-first 실패 후, Isaac Lab 표준 locomotion 구조로 전환. 77개 heuristic을 10개 표준 reward로 교체.
 
 ---
@@ -16,10 +16,10 @@
 TRAIN_VERSION:        V58.B1
 
 [Actuator]
-type:                 IdealPDActuatorCfg
-effort_limit:         25.0
-stiffness:            shoulder=10, leg=20, foot=6
-damping:              shoulder=3, leg=4, foot=2
+type:                 ImplicitActuatorCfg
+effort_limit:         15.0
+stiffness:            shoulder=12, leg=28, foot=8
+damping:              shoulder=4, leg=5, foot=2
 
 [Init pose]
 init_z:               0.185
@@ -40,7 +40,7 @@ ang_vel_z:            (-0.2, 0.2)
 joint position range: (0.8, 1.2)
 joint velocity range: (0.0, 0.0)
 min_height:           0.12
-bad_orientation:      0.7 rad
+bad_orientation:      1.1 rad
 base_contact:         ON (base_link|.*shoulder_link|.*leg_link)
 
 [Rewards]
@@ -61,32 +61,33 @@ standing_height:      +0.5, target=0.18, sigma=0.05
 ### 0.2 왜 이렇게 바뀌었나
 
 ```text
-1. ImplicitActuator:
-   - 학습은 잘 살았지만 GUI에서 물리적으로 과하게 버티는 자세가 관찰됨
-   - "잘못된 자세 survival" 리스크 때문에 제외
+1. 초기 V58 (Implicit):
+   - 학습 rollout은 잘 살았지만 GUI에서 물리적으로 과하게 버티는 자세가 관찰됨
 
-2. IdealPDActuator + effort_limit=15:
+2. V58.B1 1차 (IdealPD):
    - 더 honest하지만 bad_orientation으로 거의 즉사
-   - min_height/base_contact보다 orientation collapse가 먼저 발생
+   - effort_limit 15→25로 올려도 ep_len/track reward가 오히려 악화
+   - 즉 문제는 "토크 절대량 부족" 하나로 설명되지 않음
 
 3. 따라서 현재 V58.B1:
-   - IdealPD 유지
-   - effort_limit을 25로 올려 복원 토크 여유 확보
-   - termination은 다시 strict(0.7) 유지
-   - 대신 action/command를 보수적으로 줄여 bootstrap 안정성 확보
+   - locomotion bootstrap용 actuator를 다시 Implicit로 복귀
+   - 대신 bad_orientation을 보조로 완화(1.1)하고
+   - 실제 실패는 min_height/base_contact로 자르도록 재정렬
+   - action/command는 계속 보수적으로 유지
 ```
 
 ### 0.3 현재 해석
 
 ```text
-현재 V58.B1의 핵심 병목은 "낮아서 죽음"이 아니라
-"복원 전에 기울어져 bad_orientation으로 잘리는 것"이다.
+현재 V58.B1의 핵심 병목은 "낮아서 죽음"보다
+"orientation gate가 실제 엎드림보다 먼저 잘라 rollout이 죽는 것"에 더 가깝다.
 
-따라서 bootstrap 단계의 해법은
-- termination을 계속 느슨하게 푸는 것보다
-- IdealPD에 토크 여유를 더 주고
+따라서 현재 bootstrap 해법은
+- IdealPD를 더 미는 것보다
+- Implicit로 살아 있는 rollout을 확보하고
+- 나쁜 자세는 min_height/base_contact로 자르며
 - action/command disturbance를 줄이는 것
-으로 본다.
+으로 정리한다.
 ```
 
 ### 0.4 문서 읽는 법
