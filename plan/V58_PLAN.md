@@ -1,7 +1,7 @@
 # V58 Plan: Isaac Lab 표준 Locomotion 복귀
 
 > 작성: 2026-04-03
-> 상태: V58.B1 actuator/termination 재조정 완료, fresh run 재검증 단계
+> 상태: V58.B1 학습 진행 중, rollout/velocity tracking 성공
 > 목적: V57.B1 stand-first 실패 후, Isaac Lab 표준 locomotion 구조로 전환. 77개 heuristic을 10개 표준 reward로 교체.
 
 ---
@@ -90,7 +90,63 @@ standing_height:      +0.5, target=0.18, sigma=0.05
 으로 정리한다.
 ```
 
-### 0.4 문서 읽는 법
+### 0.4 현재 런 상태 (2026-04-03 15:07:44)
+
+최신 fresh run 기준:
+
+```text
+ep_len:               964.7
+mean_reward:          +27.0
+time_out:             96.9%
+bad_orientation:      0.48%
+min_height:           0.0%
+base_contact:         2.98%
+track_lin_vel_xy:     0.903
+track_ang_vel_z:      0.444
+standing_height:      0.097
+```
+
+해석:
+
+```text
+1. V57/V58 실패 구간은 벗어남
+   - die-fast 아님
+   - 대부분 timeout까지 생존
+   - velocity tracking이 실제로 붙음
+
+2. 현재 남은 주된 리스크는 base_contact
+   - orientation 문제는 사실상 해결
+   - min_height도 거의 발생 안 함
+   - 일부 env가 몸통/다리 접촉을 아직 사용 중일 가능성
+
+3. 현재 단계 판단
+   - 지금은 런을 건드리지 않고 계속 가는 게 맞음
+   - 체크 포인트는 bad_orientation이 아니라 base_contact와 gait quality
+```
+
+### 0.5 다음 단계 후보 (V58.B2)
+
+현재 런은 살아 있지만, GUI/추가 분석상 일부 env가
+`발을 거의 안 들고 뒤다리로 끄는 drag propulsion`일 가능성이 있다.
+
+따라서 **현재 런은 iter 1000까지 유지**하고,
+다음 실험 트랙 V58.B2 후보는 아래 우선순위로 본다.
+
+```text
+1. feet_air_time 강화
+   - weight:    0.05 → 0.15~0.20
+   - threshold: 0.5  → 0.2
+
+2. standing_height 소폭 강화
+   - weight: 0.5 → 1.0
+   - 단, standing_vel_threshold command gate는 유지
+
+3. diagonal_coupling / gait-shaping은 마지막
+   - 발을 들기 시작한 뒤에도 drag가 남을 때만 검토
+   - 현재 단계에서 바로 넣으면 reward 구조가 다시 복잡해질 수 있음
+```
+
+### 0.6 문서 읽는 법
 
 이 문서의 이하 섹션 중
 - ImplicitActuator
@@ -134,7 +190,7 @@ standing_height:      +0.5, target=0.18, sigma=0.05
 
 ---
 
-## 2. V57.B1 대비 핵심 변경
+## 2. V57.B1 대비 핵심 변경 (초기 V58 초안 기록)
 
 | 항목 | V57.B1 | V58 | 이유 |
 |------|--------|-----|------|
@@ -149,7 +205,7 @@ standing_height:      +0.5, target=0.18, sigma=0.05
 
 ---
 
-## 3. Reward 구조 (10개)
+## 3. Reward 구조 (초기 V58 초안 vs 현재 B1)
 
 ### Per-step Net Reward 검증
 
@@ -159,7 +215,7 @@ standing_height:      +0.5, target=0.18, sigma=0.05
 | 보행 (중기) | +0.86 | -0.27 | **+0.60** | PASS |
 | 넘어짐 | +0.30 | -1.75 | **-1.45** | 올바른 gradient |
 
-### Reward Table
+### Reward Table (초기 V58 초안 기록)
 
 ```text
 [양수 — 주연]
@@ -177,6 +233,23 @@ undesired_contacts:    -1.0    (base_link|shoulder|leg)
 
 [SpotMicro 전용]
 flat_orientation_l2:   -0.5    (표준은 0.0, SpotMicro는 가벼워서 필요)
+```
+
+### 현재 V58.B1 reward 실제값
+
+```text
+track_lin_vel_xy_exp:  +1.0
+track_ang_vel_z_exp:   +0.5
+feet_air_time:         +0.05   (sensor: .*foot_link, threshold=0.5)
+lin_vel_z_l2:          -2.0
+ang_vel_xy_l2:         -0.05
+action_rate_l2:        -0.01
+dof_acc_l2:            -2.5e-7
+dof_torques_l2:        -1e-5
+undesired_contacts:    -1.0
+flat_orientation_l2:   -0.5
+standing_height:       +0.5, target=0.18, sigma=0.05
+                      standing_vel_threshold=0.05
 ```
 
 ---
@@ -197,7 +270,7 @@ soft_joint_pos_limit:  0.7
 
 ---
 
-## 5. 환경 설정
+## 5. 환경 설정 (초기 V58 초안 기록)
 
 ```text
 decimation:            4 (50Hz)
@@ -242,7 +315,7 @@ undesired_contacts.sensor_cfg = SceneEntityCfg("contact_forces", body_names="bas
 
 ---
 
-## 7. Isaac Lab 표준과의 차이점 (3개만)
+## 7. Isaac Lab 표준과의 차이점 (초기 V58 초안 기록)
 
 | # | 항목 | Isaac Lab 표준 | V58 | 이유 |
 |---|------|---------------|-----|------|
@@ -278,6 +351,15 @@ undesired_contacts.sensor_cfg = SceneEntityCfg("contact_forces", body_names="bas
 - 영상: 자연스러운 4족 보행
 ```
 
+현재 상태:
+
+```text
+track_lin_vel_xy ≈ 0.90  → PASS
+time_out ≈ 0.97          → PASS
+bad_orientation < 1%     → PASS
+남은 과제: base_contact / drag propulsion 여부
+```
+
 ---
 
 ## 9. 실패 시 대응 (V58.1)
@@ -295,7 +377,7 @@ V58.4: rel_standing_envs 0.5→0.8    (if standing 불안정)
 
 ---
 
-## 10. 첫 런 결과 (iter 43, 2026-04-03 12:51)
+## 10. 첫 런 결과 (초기 V58, iter 43, 2026-04-03 12:51)
 
 ```text
 ep_len:              954 steps (95% 생존!)
@@ -318,18 +400,53 @@ V57.B1 대비: ep_len 1→954, die-fast→양수reward — 완전히 다른 세�
 ### 현재 위치
 
 ```text
-[V58] sim에서 걷기 성공시키기 (이상적 환경)  ← 지금 여기
+[V58.B1] 살아 있는 locomotion rollout 확보 + tracking 성공
+[V58.B2] drag propulsion 제거 / gait quality 개선  ← 다음 후보
 ```
 
 ### Phase 1: Sim 내 Locomotion 확립 (V58.x)
 
 ```text
-V58:     표준 reward 11개 + IdealPDActuator + strict termination
-         → 서기 + 걷기 자연 발현
-V58.1:   shoulder_neutral 추가 (if splay 확인)
-V58.2:   base_height_l2 추가 (if 높이 부족)
-V58.3:   phase_clock 도입 (if trot 자연 발현 안 됨)
-V58.4:   rough terrain 도입 (if flat에서 안정적)
+V58.B1:  locomotion bootstrap 확보
+         → timeout 90%+, track_lin_vel ~0.9
+V58.B2:  feet_air_time / standing_height 미세조정
+         → drag propulsion 제거, 발 들기 유도
+V58.B3:  필요시 diagonal_coupling/phase 계열 최소 도입
+         → trot quality 향상
+V58.B4:  flat 안정화 후 rough terrain / robustness
+```
+
+### iter 800+ 심층 분석: drag propulsion 진단
+
+현재 B1은 생존과 tracking은 성공했지만, gait quality는 아직 미완성이다.
+
+관찰/진단:
+
+```text
+- track_lin_vel_xy는 높음 (~0.9)
+- 하지만 feet_air_time은 거의 0
+- diagonal/trot pattern은 아직 없음
+- 일부 env는 rear-heavy contact 편향과 drag propulsion 징후
+```
+
+해석:
+
+```text
+현재 B1의 역할:
+- die-fast 제거
+- 살아 있는 locomotion rollout 확보
+- velocity tracking을 실제로 붙이기
+
+현재 B1의 한계:
+- "제대로 걷기"보다 "끌면서 전진"하는 해가 아직 일부 남음
+```
+
+따라서 B2의 우선순위는:
+
+```text
+1. feet_air_time 강화
+2. standing_height 소폭 강화
+3. 그래도 drag가 남으면 diagonal_coupling/gait shaping 검토
 ```
 
 ### Phase 2: Sim2Real 준비 (V59)
@@ -393,13 +510,19 @@ V60.3: Fine-tuning
   → bang-bang 진동 (velocity saturation)
 
 2차: ImplicitActuatorCfg (zero-action standing 달성)
-  → effort_limit 미적용 → 비현실적 자세 유지 문제
-  → 주저앉아도 사망 안 함
+  → rollout/standing은 잘 살았지만 GUI에서 과하게 버티는 자세 관찰
 
-3차: IdealPDActuatorCfg (최종) ★
-  → effort_limit=15 실제 적용 (비현실적 자세 자연 붕괴)
-  → velocity saturation 없음 (bang-bang 방지)
-  → V58의 양수 reward 구조에서 die-fast 안 함
+3차: IdealPDActuatorCfg
+  → 더 honest한 actuator를 기대했으나
+  → bad_orientation 즉사 (effort_limit=15)
+
+4차: IdealPDActuatorCfg + effort_limit=25
+  → 토크 여유를 늘려도 ep_len/track reward가 오히려 악화
+  → "토크 절대량 부족" 가설 기각
+
+5차: ImplicitActuatorCfg 복귀 (현재) ★
+  → locomotion bootstrap에서 다시 살아 있는 rollout 확보
+  → 잘못된 자세는 actuator가 아니라 termination/reward 쪽에서 제어
 ```
 
 ---
@@ -408,14 +531,14 @@ V60.3: Fine-tuning
 
 ```text
 1차: min_height=None, bad_orientation=1.5 → 넘어져도 생존
-2차: min_height=0.10, bad_orientation=0.7 → 여전히 웅크림 생존
-3차: min_height=0.12, bad_orientation=0.5 → 아직 주저앉음 생존
-4차: min_height=0.13 + base_contact 복원 → 부분 개선
-5차: min_height=0.14, base_contact(base+shoulder+leg), bad_orientation=0.5 (최종) ★
-  → 주저앉으면 height<0.14 → 사망
-  → body/어깨/윗다리 접촉 → 사망
-  → 30° 기울어짐 → 사망
-  → per-step 양수 reward라 strict해도 die-fast 안 함
+2차: min_height=0.10, bad_orientation=0.7 → orientation 즉사 여전
+3차: min_height=0.12 + base_contact 복원 → 실제 엎드림/몸통 접촉 terminate
+4차: bad_orientation=0.7 strict 유지 + IdealPD 테스트
+  → 거의 전부 bad_orientation으로 조기 종료
+5차: bad_orientation=1.1 완화 + base_contact/min_height 중심 (현재) ★
+  → orientation은 보조
+  → 실제 실패는 height/contact로 자름
+  → timeout 90%+의 살아 있는 rollout 확보
 ```
 
 ---
