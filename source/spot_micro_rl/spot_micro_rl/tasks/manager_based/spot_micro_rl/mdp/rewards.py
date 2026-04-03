@@ -1707,6 +1707,7 @@ def standing_height_exp(
     target_height: float,
     sigma: float = 0.05,
     start_time: float = 0.0,
+    standing_vel_threshold: float | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """높이 + 수평 결합 보상. 목표 높이에 가깝고 수평일수록 높은 보상.
@@ -1725,6 +1726,11 @@ def standing_height_exp(
     if start_time > 0.0:
         elapsed = env.episode_length_buf * env.step_dt
         result = result * (elapsed >= start_time).float()
+    # Optional command gate: only reward standing height when the commanded planar speed is near zero.
+    if standing_vel_threshold is not None:
+        command = env.command_manager.get_command("base_velocity")
+        command_speed = torch.linalg.norm(command[:, :2], dim=1)
+        result = result * (command_speed <= standing_vel_threshold).float()
     return result
 
 

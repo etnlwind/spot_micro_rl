@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V57.B1"
+TRAIN_VERSION = "V58.B1"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -26,9 +26,11 @@ _IS_V54 = TRAIN_VERSION.startswith("V54")
 _IS_V55 = TRAIN_VERSION.startswith("V55")
 _IS_V56 = TRAIN_VERSION.startswith("V56")
 _IS_V57 = TRAIN_VERSION.startswith("V57")
+_IS_V58 = TRAIN_VERSION.startswith("V58")
 _V55_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V55 and "." in TRAIN_VERSION else ("A1" if _IS_V55 else "")
 _V56_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V56 and "." in TRAIN_VERSION else ("M1" if _IS_V56 else "")
 _V57_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V57 and "." in TRAIN_VERSION else ("A1" if _IS_V57 else "")
+_V58_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V58 and "." in TRAIN_VERSION else ("A1" if _IS_V58 else "")
 _V55_PHASE_TRACKS = {"B1", "B1.1", "B1.1A", "B1.1B", "B1.2", "B2", "B3"}
 _V56_PHASE_TRACKS = {"M1"}
 
@@ -2022,6 +2024,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # - first learn to stand high, level, and on four feet
         # ══════════════════════════════════════════════════════════
         if _IS_V57 and _V57_TRACK == "B1":
+            self.actions.joint_pos.scale = 0.25  # standing: 초기 random action ±0.25 rad (1.0은 즉시 넘어짐)
             self.action_warmup_steps = 8
             self.decimation = 4
             self.commands.base_velocity.rel_standing_envs = 1.0
@@ -2040,7 +2043,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
             self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
             self.curriculum.reward_weights = None
-            self.terminations.min_height.params["min_height"] = 0.10
+            self.terminations.min_height.params["min_height"] = 0.12  # IdealPD zero-action eq=0.124, 아래는 넘어진 것
+            self.terminations.bad_orientation.params["limit_angle"] = 0.7  # standing: 40°
             self.terminations.shoulder_splay = None
             self.observations.policy.phase_clock = None
 
@@ -2048,6 +2052,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "alive_bonus",
                 "standing_height",
                 "feet_on_ground",
+                "stationary_reward",
                 "contact_switch_penalty",
                 "contact_foot_velocity_penalty",
                 "lin_vel_z_l2",
@@ -2123,6 +2128,112 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.rewards.joint_vel_l2.weight = -0.1
             self.rewards.dof_acc_l2.weight = -2.5e-7
             self.rewards.undesired_contacts.weight = -1.0
+
+        # ══════════════════════════════════════════════════════════
+        # V58: Isaac Lab 표준 locomotion — 77개 heuristic 탈피
+        # 표준 10개 reward, ImplicitActuator, velocity tracking
+        # ══════════════════════════════════════════════════════════
+        if _IS_V58 and _V58_TRACK == "B1":
+            # ── Control ──
+            self.actions.joint_pos.scale = 0.30  # 초기 posture disturbance를 더 줄여 orientation-first collapse 완화
+            self.decimation = 4
+            self.episode_length_s = 20.0  # 표준값 (10s→20s)
+
+            # ── Commands: 보수적 locomotion bootstrap ──
+            self.commands.base_velocity.rel_standing_envs = 0.2
+            self.commands.base_velocity.rel_heading_envs = 0.5
+            self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.3)
+            self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+            self.commands.base_velocity.ranges.ang_vel_z = (-0.2, 0.2)
+
+            # ── Events: 표준 구조를 유지하되 bootstrap-friendly로 보수화 ──
+            self.events.reset_robot_joints.params["position_range"] = (0.8, 1.2)
+            self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
+            # push_robot은 SpotMicro가 가벼워서 일단 비활성 유지 (V58.1에서 검토)
+
+            # ── Terminations: IdealPD에 맞춘 strict ──
+            # IdealPD는 effort_limit=15로 약해서 ImplicitActuator보다 더 쉽게 기울어짐
+            self.terminations.min_height.params["min_height"] = 0.12  # IdealPD eq ≈ 0.124
+            self.terminations.bad_orientation.params["limit_angle"] = 0.7  # strict 유지: 나쁜 자세 survival 대신 복원 토크 여유로 해결
+            self.terminations.shoulder_splay = None
+            # body/다리 접촉 즉시 사망: 주저앉음, 눕기, 다리 바닥 닿기 모두 terminate
+            self.terminations.base_contact = DoneTerm(
+                func=isaaclab_mdp.illegal_contact,
+                params={
+                    "sensor_cfg": SceneEntityCfg("contact_forces", body_names="base_link|.*shoulder_link|.*leg_link"),
+                    "threshold": 1.0,
+                },
+            )
+
+            # ── Curriculum: 없음 ──
+            self.curriculum.reward_weights = None
+
+            # ── Observations: phase clock OFF ──
+            self.observations.policy.phase_clock = None
+
+            # ── Rewards: 표준 10개만 유지 ──
+            keep_reward_names = {
+                "track_lin_vel_xy_exp",
+                "track_ang_vel_z_exp",
+                "lin_vel_z_l2",
+                "ang_vel_xy_l2",
+                "dof_acc_l2",
+                "action_rate_l2",
+                "feet_air_time",
+                "undesired_contacts",
+                "flat_orientation_l2",
+                "dof_torques_l2",
+                "standing_height",
+            }
+            for attr in list(vars(self.rewards).keys()):
+                if attr.startswith("_") or attr in keep_reward_names:
+                    continue
+                try:
+                    setattr(self.rewards, attr, None)
+                except Exception:
+                    pass
+
+            # [fix #4] merge_fixed_joints=True → toe_link가 foot_link에 병합
+            # Isaac Lab SpotMicro 공식 예제도 .*foot_link 사용
+            foot_sensor = SceneEntityCfg("contact_forces", body_names=".*foot_link")
+
+            # [주연] velocity tracking
+            self.rewards.track_lin_vel_xy_exp.weight = 1.0
+            self.rewards.track_lin_vel_xy_exp.params["std"] = 0.5
+            self.rewards.track_ang_vel_z_exp.weight = 0.5
+            self.rewards.track_ang_vel_z_exp.params["std"] = 0.5
+
+            # [조연] feet air time — 초반 swing 유도는 약하게
+            self.rewards.feet_air_time.weight = 0.05
+            self.rewards.feet_air_time.params["sensor_cfg"] = foot_sensor  # [fix #4] toe→foot
+            self.rewards.feet_air_time.params["threshold"] = 0.5
+
+            # [penalty — Isaac Lab 표준 수준]
+            self.rewards.lin_vel_z_l2.weight = -2.0
+            self.rewards.ang_vel_xy_l2.weight = -0.05   # 표준 (V57.B1은 -0.5로 10배 과다였음)
+            self.rewards.dof_acc_l2.weight = -2.5e-7     # 표준
+            self.rewards.action_rate_l2.weight = -0.01   # 표준 (V57.B1은 -0.5로 50배 과다였음)
+            self.rewards.undesired_contacts.weight = -1.0
+            self.rewards.undesired_contacts.params["sensor_cfg"] = SceneEntityCfg(
+                "contact_forces", body_names="base_link|.*shoulder_link|.*leg_link"
+            )
+
+            # [SpotMicro 전용] torques + flat orientation + standing height
+            self.rewards.dof_torques_l2 = RewTerm(
+                func=velocity_mdp.joint_torques_l2,
+                weight=-1.0e-5,
+            )
+            self.rewards.flat_orientation_l2.weight = -0.5  # 표준은 0.0, SpotMicro는 가벼워서 필요
+            self.rewards.standing_height = RewTerm(
+                func=custom_mdp.standing_height_exp,
+                weight=0.5,  # standing env에서만 약하게 anti-crouch
+                params={
+                    "target_height": 0.18,
+                    "sigma": 0.05,
+                    "standing_vel_threshold": 0.05,
+                    "asset_cfg": SceneEntityCfg("robot"),
+                },
+            )
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

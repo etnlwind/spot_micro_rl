@@ -1223,3 +1223,49 @@ base_height_l2 target_height:  0.22 → 0.18
 한 줄 요약:
 
 `V57.B1은 ImplicitActuator 전환으로 zero-action standing을 달성했다. 이제 이 안정적 물리 기반 위에서 planted stand RL 학습을 시작한다.`
+
+---
+
+## 14. V57.B1 RL 학습 결과 및 V58 전환 (2026-04-03)
+
+### 14.1 V57.B1 RL 학습 실패
+
+zero-action standing은 성공했으나, **RL 학습은 die-fast로 실패.**
+
+```text
+IdealPDActuator + stand-only(14개 reward) → per-step reward 음수 → ep_len=1 고착
+
+die-fast 원인: penalty가 Isaac Lab 표준 대비 10~50배 과다
+- joint_vel_l2(-0.1): die-fast의 61% 지배 (Isaac Lab 표준에 없음)
+- ang_vel_xy_l2(-0.5): 표준(-0.05)의 10배
+- action_rate_l2(-0.5): 표준(-0.01)의 50배
+- flat_orientation_l2(-2.0): 표준은 0.0 (비활성)
+
+추가 시도:
+- bad_orientation 0.5→0.7→1.0 조정
+- action_scale 1.0→0.25 조정
+- min_height 0.10→0.12 조정
+→ 모두 근본 해결 안 됨 (reward 구조 자체가 문제)
+```
+
+### 14.2 핵심 깨달음
+
+```text
+1. 물리가 정상이면 표준 구조가 작동한다
+2. 77개 heuristic보다 Isaac Lab 표준 10개 reward가 낫다
+3. stand-first보다 velocity tracking이 더 자연스러운 학습 경로
+4. penalty는 Isaac Lab 표준 수준으로 유지해야 die-fast 방지
+```
+
+### 14.3 V58 전환 결정
+
+```text
+V57의 성과: 물리 디버깅 (actuator, init_z, velocity_limit, depenetration)
+V57의 한계: stand-only reward 구조로는 RL 학습 불가
+
+→ V58: Isaac Lab 표준 locomotion으로 전환
+   - ImplicitActuator + 표준 10개 reward
+   - velocity tracking 주연
+   - standing 50% + locomotion 50%
+   - 상세: plan/V58_PLAN.md
+```

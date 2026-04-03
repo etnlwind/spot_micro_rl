@@ -5,7 +5,7 @@
 
 import os
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
+from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg, IdealPDActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 ##
@@ -46,33 +46,36 @@ SPOT_MICRO_CFG = ArticulationCfg(
         pos=(0.0, 0.0, 0.185),  # Phase 2 equilibrium 근처 시작 (낙하 에너지 최소화)
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
-            # FK-calibrated symmetric stand (Z자형):
-            # - leg=-0.70, foot=1.32: θ=0까지 0.70rad 버퍼 (기둥형은 0.35밖에 없어 flip 위험)
-            # - toe x=0.000 (COM centered), z=-0.192
+            # FK-calibrated: toe directly below shoulder (foot=1.35)
+            # foot=1.32 → toe 2.8mm behind shoulder → 뒤로 주저앉음 경향
+            # foot=1.35 → toe 0.1mm behind shoulder → 거의 정확히 아래
+            # height = 0.210m, init_z = 0.185 (loaded eq 근처)
             "front_left_shoulder": -0.04,
             "front_left_leg": -0.70,
-            "front_left_foot": 1.32,
+            "front_left_foot": 1.35,
             "front_right_shoulder": 0.04,
             "front_right_leg": -0.70,
-            "front_right_foot": 1.32,
+            "front_right_foot": 1.35,
             "rear_left_shoulder": -0.04,
             "rear_left_leg": -0.70,
-            "rear_left_foot": 1.32,
+            "rear_left_foot": 1.35,
             "rear_right_shoulder": 0.04,
             "rear_right_leg": -0.70,
-            "rear_right_foot": 1.32,
+            "rear_right_foot": 1.35,
         },
         joint_vel={".*": 0.0},
     ),
     soft_joint_pos_limit_factor=0.7,  # foot 관절 최대 접힘 제한 (2.59×0.7=1.81rad)
     actuators={
-        "legs": ImplicitActuatorCfg(
-            # ImplicitActuator + effort_limit=15: PhysX 연속시간 PD + 토크 제한
-            # DCMotor와 동일한 토크 제한, velocity saturation만 제거
+        "legs": IdealPDActuatorCfg(
+            # V58: IdealPDActuator — 실제 effort_limit 적용
+            # ImplicitActuator는 effort_limit이 안 먹혀서 비현실적 자세 유지
+            # IdealPD: torque = clip(Kp*(target-pos) + Kd*(0-vel), -15, +15)
+            # V58의 양수 reward 구조에서 die-fast 없음
             joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
-            effort_limit=15.0,
-            stiffness={".*shoulder": 12.0, ".*leg": 28.0, ".*foot": 8.0},
-            damping={".*shoulder": 4.0, ".*leg": 5.0, ".*foot": 2.0},
+            effort_limit=25.0,
+            stiffness={".*shoulder": 10.0, ".*leg": 20.0, ".*foot": 6.0},
+            damping={".*shoulder": 3.0, ".*leg": 4.0, ".*foot": 2.0},
         ),
     },
 )
