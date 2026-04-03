@@ -1,7 +1,7 @@
 # V57 Zero-Action Stand Debug Log
 
 ## 날짜: 2026-04-03
-## 작업자: Claude (분석/수정) + 주인님 (GUI 확인, 방향 지시)
+
 
 ## 목표
 SpotMicro가 zero-action(action=0)으로 서 있을 수 있는지 확인.
@@ -476,7 +476,7 @@ step=550: height=0.1441 (다시 안정!)
 - Episode reset 후에도 **동일한 0.1441 평형으로 복귀**
 - **무한히 안정적**
 
-### GUI 확인 (주인님 직접)
+### GUI 확인
 "잘 서있다가 잠시 후 뒤로 살짝 내려앉은 상태에서 주욱 끝나"
 = Phase 1 (init height 0.185) → Phase 2 (loaded eq 0.144) → Phase 3 (영구 안정)
 **이것이 정상 동작!** 중력 하에서 관절이 약간 압축되는 것은 자동차 서스펜션과 동일.
@@ -488,7 +488,7 @@ step=550: height=0.1441 (다시 안정!)
 ### Codex 초기 의견: "DCMotor 유지, ImplicitActuator 반대"
 이유: 실험 연속성, 원인 분리 필요, DCMotor 설정 미세조정 여지
 
-### Claude 반박: "같은 gain/pose에서 actuator만 바꿨는데 결과가 다르다"
+### 반박: "같은 gain/pose에서 actuator만 바꿨는데 결과가 다르다"
 근거: Test 17(DCMotor)=height 0.12 vs Test 18(Implicit)=height 0.144, 동일 설정
 → 병목은 standing equilibrium이 아니라 **actuator realization**
 

@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V58.B1"
+TRAIN_VERSION = "V58.B2"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -2133,7 +2133,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V58: Isaac Lab 표준 locomotion — 77개 heuristic 탈피
         # 표준 10개 reward, ImplicitActuator, velocity tracking
         # ══════════════════════════════════════════════════════════
-        if _IS_V58 and _V58_TRACK == "B1":
+        if _IS_V58 and _V58_TRACK in {"B1", "B2"}:
             # ── Control ──
             self.actions.joint_pos.scale = 0.30  # 초기 posture disturbance를 더 줄여 orientation-first collapse 완화
             self.decimation = 4
@@ -2202,7 +2202,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.rewards.track_ang_vel_z_exp.weight = 0.5
             self.rewards.track_ang_vel_z_exp.params["std"] = 0.5
 
-            # [조연] feet air time — 초반 swing 유도는 약하게
+            # [조연] feet air time
             self.rewards.feet_air_time.weight = 0.05
             self.rewards.feet_air_time.params["sensor_cfg"] = foot_sensor  # [fix #4] toe→foot
             self.rewards.feet_air_time.params["threshold"] = 0.5
@@ -2233,6 +2233,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "asset_cfg": SceneEntityCfg("robot"),
                 },
             )
+
+            if _V58_TRACK == "B2":
+                # V58.B2: drag propulsion 제거, 발 들기와 upright gait 품질 강화
+                self.rewards.feet_air_time.weight = 0.20
+                self.rewards.feet_air_time.params["threshold"] = 0.2
+                self.rewards.standing_height.weight = 1.0
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

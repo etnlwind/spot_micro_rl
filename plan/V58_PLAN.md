@@ -449,6 +449,29 @@ V58.B4:  flat 안정화 후 rough terrain / robustness
 3. 그래도 drag가 남으면 diagonal_coupling/gait shaping 검토
 ```
 
+### 역대 문제 vs V58 대응 전략
+
+V1~V57에서 반복된 핵심 문제들과 V58의 대응:
+
+```text
+[V58.B2가 해결하는 것]
+✅ Die-fast (V57.B1)        → per-step 양수 reward
+✅ 77개 heuristic 충돌      → 11개로 축소
+✅ Drag propulsion (V58.B1) → feet_air_time 4배 강화 + threshold 절반
+
+[V58.B2 이후 데이터 확인 후 대응할 것]
+❓ Splay (V37.2, dev=0.53)  → B3에서 shoulder_neutral 추가 (재발 확인 시)
+❓ Front lock-in (V23~V31)  → B4에서 per-leg reward 검토 (재발 확인 시)
+❓ Rear collapse (V57+)     → 필요시 rear-specific 보상
+
+[V58 원칙]
+한 번에 다 해결하려면 다시 77개로 돌아간다.
+한 문제씩, 데이터 기반으로.
+
+순서: 발 들기(B2) → splay(B3) → front/rear 비대칭(B4) → gait quality(B5)
+발을 안 드는데 splay를 걱정하는 건 순서가 맞지 않다.
+```
+
 ### Phase 2: Sim2Real 준비 (V59)
 
 ```text
