@@ -17,6 +17,16 @@ class SpotMicroManagerBasedRLEnv(ManagerBasedRLEnv):
                 action = torch.where(warmup_mask, torch.zeros_like(action), action)
 
         self.action_manager.process_action(action)
+        if warmup_steps > 0 and hasattr(self, "_action_ramp_joint_pos0"):
+            ramp_mask = self.episode_length_buf < warmup_steps
+            if torch.any(ramp_mask):
+                joint_term = self.action_manager.get_term("joint_pos")
+                target = joint_term.processed_actions
+                alpha = (self.episode_length_buf.float() / float(warmup_steps)).unsqueeze(1)
+                alpha = torch.clamp(alpha, 0.0, 1.0)
+                start = self._action_ramp_joint_pos0
+                ramped = start + alpha * (target - start)
+                joint_term._processed_actions = torch.where(ramp_mask.unsqueeze(1), ramped, target)
 
         self.recorder_manager.record_pre_step()
         is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
@@ -64,5 +74,13 @@ class SpotMicroManagerBasedRLEnv(ManagerBasedRLEnv):
     def _reset_idx(self, env_ids):
         raw_metric_extras = reset_v23_raw_metric_extras(self, env_ids)
         super()._reset_idx(env_ids)
+        warmup_steps = int(getattr(self.cfg, "action_warmup_steps", 0))
+        if warmup_steps > 0 and "joint_pos" in self.action_manager.active_terms:
+            joint_term = self.action_manager.get_term("joint_pos")
+            if not hasattr(self, "_action_ramp_joint_pos0"):
+                self._action_ramp_joint_pos0 = torch.zeros(
+                    self.num_envs, joint_term.action_dim, device=self.device, dtype=self.scene["robot"].data.joint_pos.dtype
+                )
+            self._action_ramp_joint_pos0[env_ids] = self.scene["robot"].data.joint_pos[env_ids][:, joint_term._joint_ids]
         if raw_metric_extras:
             self.extras.setdefault("log", {}).update(raw_metric_extras)

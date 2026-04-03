@@ -1,7 +1,7 @@
 # V56 Plan: Durability-Friendly Mechanics First
 
 > 작성: 2026-04-02
-> 상태: M1 pitch / nose-down 직접 억제 설계/구현 완료
+> 상태: M1.1 pitch / nose-down 직접 억제 강화 설계/구현 완료
 > 목적: `V55`에서 확보한 baseline recovery와 phase coexistence를 유지하되, 앞다리 과부하와 step-by-step nose-down이 큰 비자연 보행을 직접 교정한다.
 
 ---
@@ -165,6 +165,30 @@ M1 (pitch 직접 교정)
 -> P1 (필요 시 phase 구조 재강화)
 ```
 
+### M1.1
+
+전제:
+
+```text
+M1에서 pitch 직접 억제로
+- front/rear contact gap 완화
+- front_lift 증가
+- stride 회복
+은 일부 보였다.
+
+하지만
+- time_out은 아직 부족했고
+- diagonal_raw도 약간 낮았고
+- shoulder_splay도 완전히 해소되지는 않았다.
+```
+
+질문:
+
+```text
+"같은 mechanics 축을 소폭 더 강화하면
+ nose-down / front-heavy gait가 한 단계 더 줄어드는가?"
+```
+
 ---
 
 ## 5. Experiment M1
@@ -244,6 +268,38 @@ M1은 그 회피 여지를 줄이기 위해
 "pitch motion 자체"를 직접 벌하는 첫 실험이다.
 ```
 
+### 5.4 Experiment M1.1
+
+`M1.1`은:
+
+```text
+M1 + 같은 mechanics penalty 3개만 소폭 강화
+```
+
+설정:
+
+```text
+base                        = M1 baseline 계승
+phase_contact               = 2.0
+phase_clearance             = 0.75
+heuristic                   = B1.1B/M1 유지
+
+front_rear_support_balance_penalty = -12.5
+base_height_l2                     = -24.0
+pitch_ang_vel_l2                   = -2.5
+```
+
+해석:
+
+```text
+M1.1은 새 구조를 시험하는 실험이 아니다.
+
+목표는 하나다:
+"M1의 부분 개선 방향이 맞다면,
+ 같은 축을 10~20% 더 강화했을 때
+ mechanics가 추가로 좋아지는가?"
+```
+
 ---
 
 ## 6. 성공 기준
@@ -269,6 +325,15 @@ iter 900:
 - shoulder_splay <= B1.1B 수준 유지
 ```
 
+M1.1 추가 기대:
+
+```text
+- time_out이 M1보다 소폭 상승
+- diagonal_raw가 M1보다 소폭 상승
+- shoulder_splay가 M1보다 더 낮게 유지
+- 영상상 nose-down amplitude가 M1보다 더 감소
+```
+
 ### 영상 기준
 
 필수:
@@ -290,7 +355,7 @@ iter 900:
 
 ## 7. 실패 해석
 
-M1 실패의 의미:
+M1 / M1.1 실패의 의미:
 
 ```text
 pitch angular velocity 직접 억제 1개만으로는
@@ -328,10 +393,10 @@ phase 파라미터보다 mechanics 쪽이기 때문이다.
 
 ```text
 기본 실행 버전
-- TRAIN_VERSION = V56.M1
+- TRAIN_VERSION = V56.M1.1
 
 구현 완료
-- V56.M1 분기 추가
+- V56.M1 / M1.1 분기 추가
 - B1.1B baseline 계승
 - pitch_ang_vel_l2 reward term 추가
 - V56에서도 V55 release-ramp / soft-ramp 경로 재사용
@@ -341,8 +406,8 @@ phase 파라미터보다 mechanics 쪽이기 때문이다.
 
 ## 9. 최종 추천
 
-바로 실행할 다음 1순위는 `V56.M1`이다.
+바로 실행할 다음 1순위는 `V56.M1.1`이다.
 
 한 줄 요약:
 
-`V55는 release collapse와 phase coexistence까지는 확인했다. V56의 첫 목표는 phase를 더 세게 하는 것이 아니라, 앞다리 과부하를 만드는 nose-down mechanics를 pitch 직접 억제로 줄이는 것이다.`
+`V55는 release collapse와 phase coexistence까지는 확인했다. V56의 현재 목표는 phase를 더 세게 하는 것이 아니라, 앞다리 과부하를 만드는 nose-down mechanics를 같은 축의 소폭 강화(M1.1)로 더 줄일 수 있는지 확인하는 것이다.`

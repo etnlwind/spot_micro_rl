@@ -2029,6 +2029,14 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.0)
             self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
             self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+            self.commands.base_velocity.debug_vis = False
+            # Stand-first validation must start from a fixed planted pose, not
+            # the parent locomotion domain-randomized root state.
+            self.events.physics_material = None
+            self.events.add_base_mass = None
+            self.events.base_com = None
+            self.events.reset_base = None
+            self.events.base_external_force_torque = None
             self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
             self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
             self.curriculum.reward_weights = None
@@ -2067,7 +2075,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 func=custom_mdp.standing_height_exp,
                 weight=5.0,
                 params={
-                    "target_height": 0.22,
+                    "target_height": 0.18,  # ImplicitActuator loaded eq=0.144, 목표는 그 위
                     "sigma": 0.03,
                     "asset_cfg": SceneEntityCfg("robot"),
                 },
@@ -2110,7 +2118,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.rewards.ang_vel_xy_l2.weight = -0.5
             self.rewards.flat_orientation_l2.weight = -2.0
             self.rewards.base_height_l2.weight = -1.5
-            self.rewards.base_height_l2.params["target_height"] = 0.22
+            self.rewards.base_height_l2.params["target_height"] = 0.18  # standing_height와 동일
             self.rewards.action_rate_l2.weight = -0.5
             self.rewards.joint_vel_l2.weight = -0.1
             self.rewards.dof_acc_l2.weight = -2.5e-7

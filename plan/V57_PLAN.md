@@ -788,7 +788,7 @@ stance / support 관점에서 분리해서 볼 수 있기 때문이다.
 
 ## 10. 구현 상태
 
-현재 구현 상태:
+현재 구현 상태 (2026-04-03 업데이트):
 
 ```text
 TRAIN_VERSION              = V57.B1
@@ -802,10 +802,25 @@ legacy phase_table         = OFF
 reward curriculum          = OFF
 phase observation          = OFF
 only_positive_rewards      = OFF
+
+[Actuator — 2026-04-03 전환]
+actuator type              = ImplicitActuatorCfg (DCMotorCfg에서 전환)
+effort_limit               = 15.0
+stiffness                  = shoulder=12, leg=28, foot=8
+damping                    = shoulder=4, leg=5, foot=2
+
+[Physical Setup — 2026-04-03 디버깅 결과]
+init_z                     = 0.185
+init_pose                  = leg=-0.70, foot=1.32 (Z자형)
+URDF velocity              = 20.0
+max_depenetration_velocity = 0.2
+
+[Rewards]
 alive_bonus                = ON (+1.0)
-standing_height            = ON (+5.0)
+standing_height            = ON (+5.0, target=0.18)
 feet_on_ground             = ON (+2.0)
 stationary_reward          = ON (+1.0)
+base_height_l2             = ON (-1.5, target=0.18)
 action_rate_l2             = -0.5
 reset joint randomization  = OFF
 ```
@@ -831,12 +846,380 @@ reset joint randomization  = OFF
 4. "발을 붙인 채 버티는가"를 최우선 기준으로 판정
 ```
 
+### 11.1 Zero-Action Stand 검증
+
+`B1.3` 이후의 최우선 분기 질문은 이것이다.
+
+```text
+FK 교정된 기본 자세가 action 없이도 물리적으로 서 있는가?
+```
+
+이 질문에 답하기 위해 전용 진단 스크립트를 추가했다.
+
+파일:
+
+```text
+scripts/utils/zero_stand_probe.py
+```
+
+목적:
+
+```text
+1. policy action 없이(default pose 유지)
+2. zero action만 계속 보내며
+3. drift / orientation / contact를 직접 측정
+```
+
+기본 실행 예:
+
+```text
+C:\IsaacLab\isaaclab.bat -p scripts/utils/zero_stand_probe.py --task Isaac-Velocity-Flat-SpotMicro-v0 --num_envs 64 --steps 300
+```
+
+로그 파일까지 남기려면:
+
+```text
+C:\IsaacLab\isaaclab.bat -p scripts/utils/zero_stand_probe.py --task Isaac-Velocity-Flat-SpotMicro-v0 --num_envs 64 --steps 300 --log_file logs/diagnostics/zero_probe_latest.log
+```
+
+`--log_file`를 주지 않으면 기본으로 아래 경로에 저장된다.
+
+```text
+logs/diagnostics/zero_stand_probe_<timestamp>.log
+```
+
+### 11.3 Standing Pose Sweep
+
+zero-action probe에서 `step 1 toe_contact_mean = 0.0000`이 나오면,
+다음 1순위는 reward 수정이 아니라 `init z` 스윕이다.
+
+추가 스크립트:
+
+```text
+scripts/utils/standing_pose_sweep.py
+```
+
+목적:
+
+```text
+1. base init z 후보를 여러 개 시도
+2. 각 후보에서 zero-action step 1 / step N의
+   - toe_contact
+   - height
+   - drift
+   - termination
+   를 바로 비교
+3. 실제로 발이 닿는 planted pose 후보를 먼저 찾음
+```
+
+실행 예:
+
+```text
+C:\IsaacLab\isaaclab.bat -p scripts/utils/standing_pose_sweep.py --task Isaac-Velocity-Flat-SpotMicro-v0 --steps 20 --log_file logs/diagnostics/standing_pose_sweep_latest.log
+```
+
+편의 실행:
+
+```text
+scripts\standing_pose_sweep.cmd
+```
+
+기본값:
+
+```text
+--task Isaac-Velocity-Flat-SpotMicro-v0
+--steps 20
+--log_file logs/diagnostics/standing_pose_sweep_latest.log
+```
+
+추가 인자를 직접 넘길 수도 있다.
+
+```text
+scripts\standing_pose_sweep.cmd --task Isaac-Velocity-Flat-SpotMicro-v0 --steps 40 --z_values 0.15 0.155 0.16 0.165
+```
+
+판정:
+
+```text
+좋은 후보:
+- step 1 toe_contact_mean이 높음
+- drift_xy_mean이 낮음
+- step 20까지 terminated_frac가 낮음
+
+나쁜 후보:
+- step 1 toe_contact_mean이 거의 0
+- 바로 drift/vel이 커짐
+- step 20 이전부터 termination이 빠르게 증가
+```
+
+실측 결과 (`standing_pose_sweep_latest.log`):
+
+```text
+z=0.150
+- drift_xy_mean   0.2216
+- vel_xy_mean     0.7922
+- ang_xy_mean     1.0434
+- height_mean     0.1572
+- toe_contact     0.1344
+- terminated      0.0000
+```
+
+비교 결론:
+
+```text
+- 현재 후보 중 z=0.150이 최선
+- step 20 기준 toe_contact가 가장 높고
+- height가 가장 높고
+- ang_xy가 가장 낮다
+```
+
+따라서 `SPOT_MICRO_CFG.init_state.pos.z`는
+
+```text
+0.19 -> 0.15
+```
+
+로 조정한다.
+
+주의:
+
+```text
+z=0.150도 아직 완전한 정적 서기는 아니다.
+하지만 현 후보군에서는 가장 좋은 planted-stand 시작점이다.
+다음 판정은 이 값으로 zero-action probe를 다시 돌려서 한다.
+```
+
+### 11.4 Standing Joint Sweep
+
+`z=0.150`으로 zero-action 생존 시간은 크게 개선됐다.
+하지만 여전히:
+
+```text
+- toe_contact_mean이 낮다
+- drift_xy가 계속 커진다
+- semi-stable pose에 가깝다
+```
+
+그래서 다음 단계는 `z`가 아니라 `leg / foot` 미세 조정이다.
+
+추가 스크립트:
+
+```text
+scripts/utils/standing_joint_sweep.py
+scripts/standing_joint_sweep.cmd
+```
+
+목적:
+
+```text
+1. base_z=0.150 고정
+2. front_leg / rear_leg / foot 후보를 좁은 범위로 스윕
+3. step 1 / step N에서
+   - toe_contact
+   - drift
+   - vel
+   - ang_xy
+   - height
+   를 비교
+4. 가장 planted-stand에 가까운 각도 조합을 고른다
+```
+
+기본 실행:
+
+```text
+scripts\standing_joint_sweep.cmd
+```
+
+기본 로그:
+
+```text
+logs/diagnostics/standing_joint_sweep_latest.log
+```
+
+현재 기본 스윕 범위는 "더 펴는 쪽"까지 포함한다.
+
+```text
+front_leg: -0.74, -0.70, -0.66, -0.62
+rear_leg:  -0.72, -0.68, -0.64, -0.60
+foot:       1.38,  1.44,  1.50,  1.56
+```
+
+또한 로그 끝에 상위 후보를 자동 정렬해서 출력한다.
+
+정렬 기준:
+
+```text
+1. toe_contact_mean 높을수록 우선
+2. terminated_frac 낮을수록 우선
+3. drift_xy_mean 낮을수록 우선
+4. ang_xy_mean 낮을수록 우선
+5. height_mean 높을수록 우선
+```
+
+이 스크립트가 출력하는 핵심 값:
+
+```text
+- drift_xy_mean / max
+- vel_xy_mean / max
+- ang_xy_mean / max
+- grav_xy_mean / max
+- height_mean / min
+- toe_contact_mean / min
+- terminated_frac / time_out_frac
+```
+
+해석:
+
+```text
+zero-action에서도 drift_xy, ang_xy, terminated_frac가 빠르게 커지면
+-> reward 문제가 아니라 default pose / contact physics / plant model 문제
+
+zero-action에서는 안정인데 policy를 넣자마자 무너지면
+-> reward / action / command 설계 문제
+```
+
+### 11.2 Zero-Action Probe 오염 원인과 수정
+
+첫 zero-action probe는 그대로 해석하면 안 된다.
+
+실제 확인 결과, `V57.B1`에도 parent locomotion cfg의 아래 이벤트가 남아 있었다.
+
+```text
+- physics_material (startup)
+- add_base_mass (startup)
+- base_com (startup)
+- reset_base (reset)
+- base_external_force_torque (reset)
+```
+
+특히 `reset_base` 기본값은 아래 범위다.
+
+```text
+pose_range:
+- x:   (-0.5, 0.5)
+- y:   (-0.5, 0.5)
+- yaw: (-3.14, 3.14)
+
+velocity_range:
+- x/y/z:         (-0.5, 0.5)
+- roll/pitch/yaw:(-0.5, 0.5)
+```
+
+즉 이 상태의 probe는
+`정지 자세가 서는가`가 아니라
+`랜덤 root pose + 랜덤 root velocity에서 action=0으로 버티는가`
+를 보고 있었다.
+
+drift 계산도 잘못되어 있었다.
+
+기존 probe:
+
+```python
+drift_xy = root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+```
+
+이 값은 reset 직후 root의 초기 offset까지 포함한다.
+그래서 `step 1 drift_xy_mean≈0.386`은 실제 이동이 아니라
+reset_base가 준 초기 위치 오프셋이 섞인 값일 가능성이 크다.
+
+수정 내용:
+
+```text
+1. V57.B1에서는 아래 이벤트를 끈다.
+   - physics_material
+   - add_base_mass
+   - base_com
+   - reset_base
+   - base_external_force_torque
+
+2. zero_stand_probe는 drift를
+   "reset 직후 root pose" 기준으로 계산한다.
+```
+
+따라서 이제부터의 zero-action probe만
+`기본 planted pose가 정말 정적으로 서는가`
+에 대한 정식 판정으로 사용한다.
+
 ---
 
-## 12. 최종 추천
+## 12. Zero-Action Stand 디버깅 결과 (2026-04-03)
+
+> 상세 로그: `plan/V57_ZERO_STAND_DEBUG.md` (20개 테스트, 시간순)
+
+### 12.1 발견된 근본 원인 3개
+
+```text
+원인 1: init_z에 toe collision sphere radius(0.02m) 미포함
+- FK는 toe link center까지만 계산 (0.1937m)
+- sphere 바닥이 지면 아래 20mm → PhysX depenetration impulse
+- 수정: init_z = 0.185 (loaded eq 근처, 4mm 관통 + 느린 depenetration)
+
+원인 2: URDF velocity(10) = DCMotor velocity_limit(10) → bang-bang 진동
+- PhysX가 관절속도를 10 rad/s에서 하드 클램프
+- DCMotor: vel=vel_limit일 때 한쪽 방향 토크만 가능
+- 저관성 foot 관절이 1 substep(5ms)에 velocity_limit 도달
+- 수정: URDF velocity=20, DCMotor velocity_limit=20
+
+원인 3: DCMotor velocity-dependent saturation이 standing의 구조적 병목 ★★★
+- DCMotor의 torque = saturation × (1 - vel/vel_limit)이
+  관절이 움직일 때 가용 토크를 줄여서 정적 평형으로 수렴 불가
+- 증거: 동일 gain/pose에서 actuator만 교체
+  DCMotor → height 0.10 (귀뚜라미)
+  ImplicitActuator → height 0.144 (완벽 정지!)
+- effort_limit=15를 걸어도 결과 동일 (정적 토크 최대 5.9 Nm < 15)
+- 수정: ImplicitActuatorCfg 전환 (PhysX 연속시간 PD)
+```
+
+### 12.2 최종 물리 설정
+
+```text
+actuator          = ImplicitActuatorCfg (DCMotorCfg에서 전환)
+effort_limit      = 15.0 (토크 제한 유지, 현실성 보존)
+stiffness         = shoulder=12, leg=28, foot=8 (관절별 차등)
+damping           = shoulder=4, leg=5, foot=2 (관절별 차등)
+init_z            = 0.185 (loaded eq 근처 시작)
+URDF velocity     = 20.0 (PhysX vel clamp 여유)
+max_depenetration = 0.2 (부드러운 착지)
+init pose         = leg=-0.70, foot=1.32 (Z자형 유지)
+```
+
+### 12.3 zero-action standing 결과
+
+```text
+step=50:  height=0.1440, vel_xy=0.0002, ang_xy=0.11, terminated=0%
+step=100: height=0.1441, vel_xy=0.0006, terminated=0%
+step=200: height=0.1441, 소수점 4자리 고정
+step=300: height=0.1441, 완벽 정지
+step=500: episode timeout → reset → step=550: height=0.1441 (복귀!)
+```
+
+GUI 확인: "잘 서있다가 살짝 내려앉은 상태에서 주욱 끝남"
+= init height(0.185) → loaded equilibrium(0.144) → 영구 안정.
+4cm 하강은 중력 하 관절 압축 (자동차 서스펜션과 동일 원리).
+
+### 12.4 env_cfg 수정사항
+
+```text
+standing_height target_height: 0.22 → 0.18
+base_height_l2 target_height:  0.22 → 0.18
+(loaded equilibrium 0.144 위의 도달 가능한 목표)
+```
+
+---
+
+## 13. 최종 추천
 
 바로 실행할 다음 1순위는 `V57.B1` fresh start 검증이다.
 
+현재 상태:
+
+```text
+- zero-action standing 달성 (ImplicitActuator + effort_limit=15)
+- 물리 기반 안정화 완료 (bang-bang 해결, toe 관통 해결, actuator 전환)
+- env_cfg target_height 조정 완료
+- 로봇이 죽지 않는 안정적 기반 확보
+```
+
 한 줄 요약:
 
-`V57의 다음 단계는 걷기보다 먼저 서기다. V57.B1은 symmetric reset과 stand-only command 위에서, 발을 붙인 채 높고 수평하게 버티는 planted stand control을 먼저 학습시키는 단계다.`
+`V57.B1은 ImplicitActuator 전환으로 zero-action standing을 달성했다. 이제 이 안정적 물리 기반 위에서 planted stand RL 학습을 시작한다.`

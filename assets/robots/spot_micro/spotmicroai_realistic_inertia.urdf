@@ -195,7 +195,7 @@
     <child link="front_left_shoulder_link" />
     <axis xyz="1 0 0" />
     <origin rpy="0 0 0" xyz="-0.093 -0.036 0" />
-    <limit effort="1000.0" lower="-0.548" upper="0.548" velocity="10.0" />
+    <limit effort="1000.0" lower="-0.548" upper="0.548" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="front_left_leg" type="revolute">
@@ -203,7 +203,7 @@
     <child link="front_left_leg_link" />
     <axis xyz="0 1 0" />
     <origin rpy="0 0 0" xyz="0 -0.052 0" />
-    <limit effort="1000.0" lower="-2.666" upper="1.548" velocity="10.0" />
+    <limit effort="1000.0" lower="-2.666" upper="1.548" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="front_left_leg_cover_joint" type="fixed">
@@ -216,7 +216,7 @@
     <child link="front_left_foot_link" />
     <axis xyz="0 1 0" />
     <origin rpy="0 0 0" xyz="-0.01 0 -0.12" />
-    <limit effort="1000.0" lower="-0.1" upper="2.59" velocity="10.0" />
+    <limit effort="1000.0" lower="-0.1" upper="2.59" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="front_left_toe" type="fixed">
@@ -316,7 +316,7 @@
     <child link="front_right_shoulder_link" />
     <axis xyz="1 0 0" />
     <origin rpy="0 0 0" xyz="-0.093 0.036 0" />
-    <limit effort="1000.0" lower="-0.548" upper="0.548" velocity="10.0" />
+    <limit effort="1000.0" lower="-0.548" upper="0.548" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="front_right_leg" type="revolute">
@@ -324,7 +324,7 @@
     <child link="front_right_leg_link" />
     <axis xyz="0 1 0" />
     <origin rpy="0 0 0" xyz="0 0.052 0" />
-    <limit effort="1000.0" lower="-2.666" upper="1.548" velocity="10.0" />
+    <limit effort="1000.0" lower="-2.666" upper="1.548" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="front_right_leg_cover_joint" type="fixed">
@@ -337,7 +337,7 @@
     <child link="front_right_foot_link" />
     <axis xyz="0 1 0" />
     <origin rpy="0 0 0" xyz="-0.01 0 -0.12" />
-    <limit effort="1000.0" lower="-0.1" upper="2.59" velocity="10.0" />
+    <limit effort="1000.0" lower="-0.1" upper="2.59" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="front_right_toe" type="fixed">
@@ -437,7 +437,7 @@
     <child link="rear_left_shoulder_link" />
     <axis xyz="1 0 0" />
     <origin rpy="0 0 0" xyz="0.093 -0.036 0" />
-    <limit effort="1000.0" lower="-0.548" upper="0.548" velocity="10.0" />
+    <limit effort="1000.0" lower="-0.548" upper="0.548" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="rear_left_leg" type="revolute">
@@ -445,7 +445,7 @@
     <child link="rear_left_leg_link" />
     <axis xyz="0 1 0" />
     <origin rpy="0 0 0" xyz="0 -0.052 0" />
-    <limit effort="1000.0" lower="-2.666" upper="1.548" velocity="10.0" />
+    <limit effort="1000.0" lower="-2.666" upper="1.548" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="rear_left_leg_cover_joint" type="fixed">
@@ -458,7 +458,7 @@
     <child link="rear_left_foot_link" />
     <axis xyz="0 1 0" />
     <origin rpy="0 0 0" xyz="-0.01 0 -0.12" />
-    <limit effort="1000.0" lower="-0.1" upper="2.59" velocity="10.0" />
+    <limit effort="1000.0" lower="-0.1" upper="2.59" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="rear_left_toe" type="fixed">
@@ -558,7 +558,7 @@
     <child link="rear_right_shoulder_link" />
     <axis xyz="1 0 0" />
     <origin rpy="0 0 0" xyz="0.093 0.036 0" />
-    <limit effort="1000.0" lower="-0.548" upper="0.548" velocity="10.0" />
+    <limit effort="1000.0" lower="-0.548" upper="0.548" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="rear_right_leg" type="revolute">
@@ -566,7 +566,7 @@
     <child link="rear_right_leg_link" />
     <axis xyz="0 1 0" />
     <origin rpy="0 0 0" xyz="0 0.052 0" />
-    <limit effort="1000.0" lower="-2.666" upper="1.548" velocity="10.0" />
+    <limit effort="1000.0" lower="-2.666" upper="1.548" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="rear_right_leg_cover_joint" type="fixed">
@@ -579,7 +579,7 @@
     <child link="rear_right_foot_link" />
     <axis xyz="0 1 0" />
     <origin rpy="0 0 0" xyz="-0.01 0 -0.12" />
-    <limit effort="1000.0" lower="-0.1" upper="2.59" velocity="10.0" />
+    <limit effort="1000.0" lower="-0.1" upper="2.59" velocity="20.0" />
     <dynamics damping="0.0" friction="0.0" />
   </joint>
   <joint name="rear_right_toe" type="fixed">

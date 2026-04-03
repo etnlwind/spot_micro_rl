@@ -5,7 +5,7 @@
 
 import os
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg
+from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 ##
@@ -34,50 +34,45 @@ SPOT_MICRO_CFG = ArticulationCfg(
         ),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
-            max_depenetration_velocity=1.0,
+            max_depenetration_velocity=0.2,  # 부드러운 착지 (1.0→0.2)
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
             solver_position_iteration_count=4,
-            solver_velocity_iteration_count=0,
+            solver_velocity_iteration_count=4,  # V57: 0→4 (접촉 충격 해석 활성화)
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.19),  # V57.B1.2: symmetric stand fit based on FK-calibrated planted support
+        pos=(0.0, 0.0, 0.185),  # Phase 2 equilibrium 근처 시작 (낙하 에너지 최소화)
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
-            # V57.B1.2: FK-calibrated symmetric stand.
-            # Goals:
-            # - left/right mirrored toe placement
-            # - support-center x close to 0
-            # - negligible toe height spread
-            # - planted stand before locomotion
+            # FK-calibrated symmetric stand (Z자형):
+            # - leg=-0.70, foot=1.32: θ=0까지 0.70rad 버퍼 (기둥형은 0.35밖에 없어 flip 위험)
+            # - toe x=0.000 (COM centered), z=-0.192
             "front_left_shoulder": -0.04,
-            "front_left_leg": -0.74,
-            "front_left_foot": 1.38,
+            "front_left_leg": -0.70,
+            "front_left_foot": 1.32,
             "front_right_shoulder": 0.04,
-            "front_right_leg": -0.74,
-            "front_right_foot": 1.38,
+            "front_right_leg": -0.70,
+            "front_right_foot": 1.32,
             "rear_left_shoulder": -0.04,
-            "rear_left_leg": -0.72,
-            "rear_left_foot": 1.38,
+            "rear_left_leg": -0.70,
+            "rear_left_foot": 1.32,
             "rear_right_shoulder": 0.04,
-            "rear_right_leg": -0.72,
-            "rear_right_foot": 1.38,
+            "rear_right_leg": -0.70,
+            "rear_right_foot": 1.32,
         },
         joint_vel={".*": 0.0},
     ),
     soft_joint_pos_limit_factor=0.7,  # foot 관절 최대 접힘 제한 (2.59×0.7=1.81rad)
     actuators={
-        "legs": DCMotorCfg(
-            # 12 leg joints (shoulder, leg, foot × 4)
+        "legs": ImplicitActuatorCfg(
+            # ImplicitActuator + effort_limit=15: PhysX 연속시간 PD + 토크 제한
+            # DCMotor와 동일한 토크 제한, velocity saturation만 제거
             joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
-            # V17.1: 과도한 토크/강성 완화 → 솟구침/곤두박질 방지
-            saturation_effort=15.0,  # V48-B baseline (walking 트랙)
-            effort_limit=15.0,       # realism은 별도 트랙에서
-            velocity_limit=10.0,     # V17.1: 8→10 (원래 값 복원, 느린 동작은 보상으로)
-            stiffness={".*": 15.0},  # V17.1: 25→15 (10과 25의 중간)
-            damping={".*": 1.5},     # V17.1: 2→1.5 (약간의 감쇠 유지)
+            effort_limit=15.0,
+            stiffness={".*shoulder": 12.0, ".*leg": 28.0, ".*foot": 8.0},
+            damping={".*shoulder": 4.0, ".*leg": 5.0, ".*foot": 2.0},
         ),
     },
 )
