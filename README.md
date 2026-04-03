@@ -6,7 +6,7 @@
 
 NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니다. V49+는 4,096개, V42~V48은 8,192개, V41 이하는 20,480개 환경을 사용합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
 
-**현재 상태**: `V55` 계열 실험 진행 중. `V47`의 강한 baseline locomotion을 참고하되, `V54`의 handoff collapse를 피하기 위해 **baseline recovery first, phase probe second** 전략으로 재설계했다. 현재 active track은 `V55.B1`이며, `A6`에서 확보한 baseline quality gate 위에 약한 phase probe를 얹었을 때 baseline을 유지하는지 검증 중이다.
+**현재 상태**: `V58.B2` 실험 진행 중. Isaac Lab 표준 locomotion 구조로 전환. ImplicitActuator + 표준 11개 reward. B1에서 locomotion bootstrap 성공(ep_len 968, timeout 99%), B2에서 drag propulsion 제거를 위한 feet_air_time 강화 적용.
 
 ### 기술 스택
 
@@ -211,16 +211,16 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ### 현재 운영 기준
 
-- 학습 버전: `V55.A5.6` (A5.5 유지 + min_height termination threshold 0.10 완화 실험)
-- active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
-- 접촉 해석 기본값: `toe_link`
-- 기능 플래그: `_CLEAN_REWARDS=False`, `_CONNECTED_TROT=False`, `_USE_BOOT_STANDING=True`
+- 학습 버전: `V58.B2`
+- Actuator: `ImplicitActuatorCfg` (effort_limit=15)
+- Reward: 표준 11개 (track_vel, feet_air_time, standing_height 등)
+- 접촉 해석: `foot_link` (merge_fixed_joints로 toe_link 병합)
+- URDF velocity: 20.0
 - 병렬 환경: 4,096
-- save_interval: 100
-- 현재 핵심 이슈: `iter 500` gait-gate release 이후 발생하는 `min_height` collapse의 근본 원인이 `release shock`인지, 아니면 `STAND`에서 학습한 공격적 forward policy인지 분리 검증
-- 현재 완화 실험: `STAND`에서는 forward를 phase-table 값(2/8)으로 두고, release 이후에만 `2/8 -> 16/12` soft ramp
-- 참고 문서: `plan/V55_PLAN.md` (현재), `plan/V43-V53_HISTORY.md`
-- CLI 명령: start/stop/resume은 Telegram→Listener 경유 (직접 실행 아님), status/hb/selfcheck만 로컬
+- 핵심 이슈: drag propulsion 해결 (feet_air_time weight 0.05->0.20, threshold 0.5->0.2)
+- 참고 문서: `plan/V58_PLAN.md`, `plan/V57_ZERO_STAND_DEBUG.md`
+- active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
+- CLI 명령: start/stop/resume은 Telegram->Listener 경유 (직접 실행 아님), status/hb/selfcheck만 로컬
 - `/start gui` 옵션으로 GUI 모드 훈련 시작 가능
 - **주의**: listen.cmd는 Windows 터미널에서만 직접 실행 (WSL 금지)
 
@@ -228,48 +228,58 @@ python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
 
 ## Reward Design
 
-### V38.3 Soft CaT (현재 최종)
+### V38.3 Soft CaT (V55까지 사용)
 
-V37.2에서 L2 penalty의 구조적 한계 확인 후, **CaT → Soft CaT**로 발전:
+V37.2에서 L2 penalty의 구조적 한계 확인 후, **CaT -> Soft CaT**로 발전:
 - L2 penalty는 reward 채널 — agent가 다른 양의 보상으로 상쇄 가능
 - CaT는 **discount factor 채널** — terminated=True면 미래 보상=0, 상쇄 불가
-- **Soft CaT** (V38.2+): 종료 확률이 dev에 비례 → phase transition 제거
+- **Soft CaT** (V38.2+): 종료 확률이 dev에 비례 -> phase transition 제거
 
 ```
-prob(dev) = base_prob × clamp((max_dev - threshold) / margin, 0, 1)
+prob(dev) = base_prob * clamp((max_dev - threshold) / margin, 0, 1)
 ```
 
 | 구간 | Iteration 범위 | 내용 |
 |------|----------------|------|
-| Boot Phase | 0 ~ 300 | alive_bonus(+10/step), undesired_contacts -20→-100 ramp, 저속 command |
-| Velocity Restore | 0 ~ 500 | lin_vel_x (0.01,0.05) → (0.1,0.5) 선형 복원 |
+| Boot Phase | 0 ~ 300 | alive_bonus(+10/step), undesired_contacts -20->-100 ramp, 저속 command |
+| Velocity Restore | 0 ~ 500 | lin_vel_x (0.01,0.05) -> (0.1,0.5) 선형 복원 |
 | Splay L2 (고정) | 500+ | shoulder -6.0 고정 |
-| **Soft CaT Ramp** | **800 ~ 3000** | **probability 0→0.0015 ramp (threshold 0.3, margin 0.3 고정)** |
-| STAND→WALK Ramp | 1500 ~ 3000 | V32.1 soft-ramp 커리큘럼 |
-| WALK→TROT Ramp | 5500 ~ 8000 | 전체 gait 보상 활성 |
+| **Soft CaT Ramp** | **800 ~ 3000** | **probability 0->0.0015 ramp (threshold 0.3, margin 0.3 고정)** |
+| STAND->WALK Ramp | 1500 ~ 3000 | V32.1 soft-ramp 커리큘럼 |
+| WALK->TROT Ramp | 5500 ~ 8000 | 전체 gait 보상 활성 |
 
-**Soft CaT 결과** (V38.3): shoulder dev 0.54→0.45 (-16%), 0.45에서 local optimum 정체.
+**Soft CaT 결과** (V38.3): shoulder dev 0.54->0.45 (-16%), 0.45에서 local optimum 정체.
 
-### V47~V55 (현재)
+### V47~V55
 
 **V47**: V38.3 순정(77 reward) + boot_standing(+15) + boot_contact(+5)만 추가. "작동하는 시스템을 고치지 말고, 부족한 것만 더하자." 상세: `plan/V47_PLAN.md`
 
 **V48~V53 진화**: V47 성공 후, 귀뚜라미 보행(앞다리 미사용) 해결을 위한 연속 실험:
-- **V48**: standing pose 보정 (leg=-0.97), realism 실험(질량/토크) 실패 → two-track 결정
+- **V48**: standing pose 보정 (leg=-0.97), realism 실험(질량/토크) 실패 -> two-track 결정
 - **V49**: baseline 복원, 귀뚜라미 보행 발견, 인프라 정비 (curriculum save/restore, feature flags, CLI routing)
-- **V50**: boot ramp 연장(300→1500) + height 강화 → walking 활성화 시 높이 유지 실패 (15:1 비율 한계)
-- **V51**: soft height gate hybrid (analysis team 공동 설계) → anti-crouch 성공, anti-cricket 실패
-- **V52**: min_height termination + data-driven weight 재설계 → leg_lift 4발 평균이 앞다리를 penalty화하는 구조 발견
-- **V53**: front_leg_lift_reward (FL/FR only, w=15) additive 추가 → from-scratch 훈련 중
-- **V54**: clean phase-centric handoff 실험 → baseline locomotion 없는 상태에서 handoff collapse 확인
-- **V55**: baseline recovery first, phase probe second 재설계 → A5.x로 release collapse 완화, A6 baseline gate 확보, 현재 B1 probe 검증 중
+- **V50**: boot ramp 연장(300->1500) + height 강화 -> walking 활성화 시 높이 유지 실패 (15:1 비율 한계)
+- **V51**: soft height gate hybrid (analysis team 공동 설계) -> anti-crouch 성공, anti-cricket 실패
+- **V52**: min_height termination + data-driven weight 재설계 -> leg_lift 4발 평균이 앞다리를 penalty화하는 구조 발견
+- **V53**: front_leg_lift_reward (FL/FR only, w=15) additive 추가 -> from-scratch 훈련 중
+- **V54**: clean phase-centric handoff 실험 -> baseline locomotion 없는 상태에서 handoff collapse 확인
+- **V55**: baseline recovery first, phase probe second 재설계 -> A5.x로 release collapse 완화, A6 baseline gate 확보
 
 상세: `plan/V53_PLAN.md`, `plan/V54_PLAN.md`, `plan/V55_PLAN.md`, `plan/V43-V53_HISTORY.md`
 
+### V58 (현재)
+
+Isaac Lab 표준 locomotion 구조로 전환. V55까지 누적된 77개 heuristic reward 체계를 폐기하고, 표준 11개 reward로 재구성.
+
+- 77개 heuristic -> 11개 reward
+- 주연: `track_lin_vel_xy_exp`(+1.0), `track_ang_vel_z_exp`(+0.5)
+- 조연: `feet_air_time`(+0.20), `standing_height`(+1.0, command-gated)
+- Penalty: Isaac Lab 표준 수준 (`ang_vel_xy` -0.05, `action_rate` -0.01 등)
+- 핵심 원칙: "한 문제씩, 데이터 기반으로"
+
 **부팅 안정화** (V35.5 검증 완료):
 - `alive_bonus=10.0`: 매 step 생존 보상
-- `undesired_contacts` 초기 완화: -100→-20 (iter 0~300 ramp)
-- 초기 저속 command: (0.01, 0.05) → 서기 안정화 우선
+- `undesired_contacts` 초기 완화: -100->-20 (iter 0~300 ramp)
+- 초기 저속 command: (0.01, 0.05) -> 서기 안정화 우선
 
 **Anti-Shuffle** (V36 검증 완료):
 - `stride_length` ramp 200~500, max 15.0
@@ -290,7 +300,7 @@ V32.1 보상 구조 기반 + multi-layer 커리큘럼 + Soft CaT:
 
 **전진/보행**: `forward_velocity(+8)`, `stance_propulsion(+8)`, `rear_joint_velocity(+12)`, `stride_length(+15 ramp)`, `swing_stride(+4)`
 
-**Multi-layer 커리큘럼**: boot_ramp → stride_ramp → **Soft CaT ramp** → STAND→WALK → WALK→TROT
+**Multi-layer 커리큘럼**: boot_ramp -> stride_ramp -> **Soft CaT ramp** -> STAND->WALK -> WALK->TROT
 
 ### 리워드 함수 패턴
 
@@ -309,7 +319,7 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 운영 해석 원칙:
 - 운동학 KPI 우선 확인 (joint velocity 기반)
 - flat 환경 contact 기준: `toe_link` 우선
-- limb validity 4단계: observe(~500) → early_warning(500~800) → lock_warning(800~1200) → enforce(1200+)
+- limb validity 4단계: observe(~500) -> early_warning(500~800) -> lock_warning(800~1200) -> enforce(1200+)
 
 ### PPO 하이퍼파라미터
 
@@ -329,112 +339,115 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 
 | 버전 | 기간 | 핵심 내용 | 결과 |
 |------|------|----------|------|
-| V1~V8 | 02-17~02-19 | Flat 기본기 (서기→걷기, decimation 조정) | V8 = Flat 베이스라인 |
+| V1~V8 | 02-17~02-19 | Flat 기본기 (서기->걷기, decimation 조정) | V8 = Flat 베이스라인 |
 | V9~V12 | 02-20~02-23 | Rough 지형 도전, 뒷다리 끌림 문제 | 접촉 센서 리워드 한계 발견 |
-| V13~V14 | 02-24~02-25 | Critic reset 시도 | 3연속 발산 → from-scratch 전환 |
+| V13~V14 | 02-24~02-25 | Critic reset 시도 | 3연속 발산 -> from-scratch 전환 |
 | V15d | 02-26 | gamma=0.97, clip=0.1 PPO 안정화 | reward 559, value_loss 0.53 |
-| V16 | 02-27~03-03 | Diagonal coupling (키네마틱 trot) | 접촉→관절속도 기반 전환 |
-| V17.1 | 03-04~03-05 | Action rate + gait cycle + stride | ❌ 정지 함정 (35개 리워드 과부하) |
-| V18~V18.3 | 03-06~03-07 | 3-Phase 커리큘럼 (hard switch) | Phase 2 데드락 → V19로 개선 |
-| V19 | 03-08 | Phase 가중치 튜닝, hard switch | ❌ critic shock (value_loss 1000) |
-| **V20** | **03-08~** | **Soft-ramp 선형 보간 커리큘럼** | ✅ 완료 |
-| **V21** | **03-10~** | **gait-quality-first 모니터링, iter cadence supervisor, toe contact 진단** | ✅ 완료 |
-| **V22** | **03-11~** | **멀티뷰 비디오 패키지, heartbeat workbook, ZIP artifact, top/front view 정리** | ✅ 완료 |
-| **V23** | **03-12~** | **posture-first refinement, rear joint velocity 강화** | ✅ 완료 |
-| **V24** | **03-13~** | **Limb Validity Gating: rear-left collapse 차단, 좌우 비대칭 페널티, 자동 영상 리포트** | ✅ 완료 |
-| **V25** | **03-14~03-15** | **rear_left_contact_floor_penalty -60 직접 처방 (RL 회복, RR collapse 이동)** | ❌ 실패 (iter 400) |
-| **V26.1** | **03-15** | **Symmetric Existence Floor + Load Sharing: 모든 다리 동일 기준, collapse 이동 차단** | ✅ 완료 |
-| **V27** | **03-16** | **contact residency EMA + prop/usage band: 점진적 접촉 분포 유도** | ❌ 실패 (iter 1000 RL collapse) |
-| **V28** | **03-16** | **V27 재기동 + 하이퍼파라미터 조정** | ❌ 실패 (RR collapse) |
-| **V28.2** | **03-16** | **rear pair 대칭 강제 (rear_pair_contact_diff_penalty)** | ✅ 성공 (iter 1703 rear_usage_diff=0.012) |
-| **V28.3** | **03-17** | **front contact cap(-10.0) 추가** | ❌ 실패 (FL/FR contact 0.83~0.88 고착) |
-| **V29** | **03-17** | **Residency band_high=0.65 + stride_length + swing_gate_velocity** | ✅ 완료 |
-| **V30** | **03-17** | **Symmetric init pose + supervisor reliability** | ✅ 완료 (FL/FR lock-in 미해결) |
-| **V31** | **03-18** | **Front swing enforcement (mirror rear rewards)** | ❌ 실패 (역할 분리 유발) |
-| **V31.1** | **03-18** | **front_both_ground + min_swing_ratio** | ❌ 실패 (역할 분리) |
-| **V31.2** | **03-18** | **Joint-level front activation (front_joint_velocity/frozen)** | ✅ 완료 |
-| **V32** | **03-18~03-19** | **feet_air_time core transition + rear bias reduction** | ✅ 완료 |
-| **V33** | **03-19** | **근본 재설계 (122→28개, anti-splay, 4발 공통)** | ❌ 실패 (붕괴) |
-| **V33.1** | **03-19** | **standing_height 강화** | ❌ 실패 (동일 붕괴) |
-| **V33.2** | **03-19** | **rear 절반 복구 (부팅 신호)** | ❌ 실패 (3발 exploit) |
-| **V33.3** | **03-19** | **per-limb penalty (min_swing, limb_usage, validity)** | ❌ 실패 (학습 억제) |
-| **V34** | **03-19** | **rel_standing_envs 기반 3-Phase Stand→Walk 커리큘럼** | ❌ 실패 (V33 기반) |
-| **V35~V35.2** | **03-19~03-20** | **V32.1 복원 시도, anti-splay/anti-shuffle 수정** | ❌ 실패 (이모지 crash + 재현성 문제 발견) |
-| **V35.3~V35.4** | **03-20** | **alive_bonus 도입 (2.0→10.0)** | ❌ 부분 효과 (부팅 불완전) |
-| **V35.5** | **03-20** | **부팅 안정화 3가지 결합 (alive+contacts완화+저속)** | ✅ 부팅 성공 (iter 400 ep_len=234) |
-| **V36** | **03-20** | **V35.5 + anti-splay(-6,-3,0.23) + anti-shuffle(stride ramp, swing_stride)** | 🟡 anti-shuffle 성공(stride +34%), anti-splay 실패(shoulder 0.54 고착) |
-| **V37** | **03-20** | **Anti-splay 커리큘럼: shoulder -6→-15, stance -3→-8, height 0.23→0.22** | ❌ 실패 (iter 600에서 보행 붕괴, 리스크#1 적중) |
-| **V37.2** | **03-20** | **V37 완화: shoulder만 -6→-10, ramp 500~1500, stance/height 변경 없음** | 🟡 L2 한계 확인 (splay 0.532, 행동 변화 없음) |
-| **V38** | **03-21** | **CaT (Constraints as Terminations): shoulder splay → 확률적 종료** | ❌ 실패 (threshold 0.6 너무 타이트, iter 600 즉시 붕괴) |
-| **V38.1** | **03-21** | **V38 완화: threshold 0.8→0.45, prob 0.03→0.15** | ❌ 실패 (phase transition, splay 57%) |
-| **V38.2** | **03-21~03-22** | **Soft CaT: prob ∝ dev, phase transition 제거** | 🟡 안정적이나 prob 0.0004 너무 약함 (shoulder dev 0.52 정체) |
-| **V38.3** | **03-22~03-23** | **Soft CaT prob 0.0015 (3.75x)** | 🟡 shoulder dev 0.54→0.45 (-16%, 역대 최대), 0.45 local optimum |
-| **V38.3.1** | **03-23** | **CaT + L2 병행 (resume + weight -12)** | ❌ 실패 (critic 무효화 + curriculum 미복원) |
-| **V39** | **03-23~03-24** | **CPG/Phase Clock + reward shape 실험** | 🟡 shape 교훈 획득, stride -39% 악화 |
-| **V40-A** | **03-24** | **CaT prob 0.003 단일 변수 실험** | 🟡 0.45→0.384 달성, ep_len 170 (천장 확인) |
+| V16 | 02-27~03-03 | Diagonal coupling (키네마틱 trot) | 접촉->관절속도 기반 전환 |
+| V17.1 | 03-04~03-05 | Action rate + gait cycle + stride | 정지 함정 (35개 리워드 과부하) |
+| V18~V18.3 | 03-06~03-07 | 3-Phase 커리큘럼 (hard switch) | Phase 2 데드락 -> V19로 개선 |
+| V19 | 03-08 | Phase 가중치 튜닝, hard switch | critic shock (value_loss 1000) |
+| **V20** | **03-08~** | **Soft-ramp 선형 보간 커리큘럼** | 완료 |
+| **V21** | **03-10~** | **gait-quality-first 모니터링, iter cadence supervisor, toe contact 진단** | 완료 |
+| **V22** | **03-11~** | **멀티뷰 비디오 패키지, heartbeat workbook, ZIP artifact, top/front view 정리** | 완료 |
+| **V23** | **03-12~** | **posture-first refinement, rear joint velocity 강화** | 완료 |
+| **V24** | **03-13~** | **Limb Validity Gating: rear-left collapse 차단, 좌우 비대칭 페널티, 자동 영상 리포트** | 완료 |
+| **V25** | **03-14~03-15** | **rear_left_contact_floor_penalty -60 직접 처방 (RL 회복, RR collapse 이동)** | 실패 (iter 400) |
+| **V26.1** | **03-15** | **Symmetric Existence Floor + Load Sharing: 모든 다리 동일 기준, collapse 이동 차단** | 완료 |
+| **V27** | **03-16** | **contact residency EMA + prop/usage band: 점진적 접촉 분포 유도** | 실패 (iter 1000 RL collapse) |
+| **V28** | **03-16** | **V27 재기동 + 하이퍼파라미터 조정** | 실패 (RR collapse) |
+| **V28.2** | **03-16** | **rear pair 대칭 강제 (rear_pair_contact_diff_penalty)** | 성공 (iter 1703 rear_usage_diff=0.012) |
+| **V28.3** | **03-17** | **front contact cap(-10.0) 추가** | 실패 (FL/FR contact 0.83~0.88 고착) |
+| **V29** | **03-17** | **Residency band_high=0.65 + stride_length + swing_gate_velocity** | 완료 |
+| **V30** | **03-17** | **Symmetric init pose + supervisor reliability** | 완료 (FL/FR lock-in 미해결) |
+| **V31** | **03-18** | **Front swing enforcement (mirror rear rewards)** | 실패 (역할 분리 유발) |
+| **V31.1** | **03-18** | **front_both_ground + min_swing_ratio** | 실패 (역할 분리) |
+| **V31.2** | **03-18** | **Joint-level front activation (front_joint_velocity/frozen)** | 완료 |
+| **V32** | **03-18~03-19** | **feet_air_time core transition + rear bias reduction** | 완료 |
+| **V33** | **03-19** | **근본 재설계 (122->28개, anti-splay, 4발 공통)** | 실패 (붕괴) |
+| **V33.1** | **03-19** | **standing_height 강화** | 실패 (동일 붕괴) |
+| **V33.2** | **03-19** | **rear 절반 복구 (부팅 신호)** | 실패 (3발 exploit) |
+| **V33.3** | **03-19** | **per-limb penalty (min_swing, limb_usage, validity)** | 실패 (학습 억제) |
+| **V34** | **03-19** | **rel_standing_envs 기반 3-Phase Stand->Walk 커리큘럼** | 실패 (V33 기반) |
+| **V35~V35.2** | **03-19~03-20** | **V32.1 복원 시도, anti-splay/anti-shuffle 수정** | 실패 (이모지 crash + 재현성 문제 발견) |
+| **V35.3~V35.4** | **03-20** | **alive_bonus 도입 (2.0->10.0)** | 부분 효과 (부팅 불완전) |
+| **V35.5** | **03-20** | **부팅 안정화 3가지 결합 (alive+contacts완화+저속)** | 부팅 성공 (iter 400 ep_len=234) |
+| **V36** | **03-20** | **V35.5 + anti-splay(-6,-3,0.23) + anti-shuffle(stride ramp, swing_stride)** | anti-shuffle 성공(stride +34%), anti-splay 실패(shoulder 0.54 고착) |
+| **V37** | **03-20** | **Anti-splay 커리큘럼: shoulder -6->-15, stance -3->-8, height 0.23->0.22** | 실패 (iter 600에서 보행 붕괴) |
+| **V37.2** | **03-20** | **V37 완화: shoulder만 -6->-10, ramp 500~1500, stance/height 변경 없음** | L2 한계 확인 (splay 0.532) |
+| **V38** | **03-21** | **CaT (Constraints as Terminations): shoulder splay -> 확률적 종료** | 실패 (threshold 0.6 너무 타이트) |
+| **V38.1** | **03-21** | **V38 완화: threshold 0.8->0.45, prob 0.03->0.15** | 실패 (phase transition, splay 57%) |
+| **V38.2** | **03-21~03-22** | **Soft CaT: prob / dev, phase transition 제거** | 안정적이나 prob 0.0004 약함 |
+| **V38.3** | **03-22~03-23** | **Soft CaT prob 0.0015 (3.75x)** | shoulder dev 0.54->0.45 (-16%), local optimum |
+| **V38.3.1** | **03-23** | **CaT + L2 병행 (resume + weight -12)** | 실패 (critic 무효화) |
+| **V39** | **03-23~03-24** | **CPG/Phase Clock + reward shape 실험** | shape 교훈 획득, stride -39% |
+| **V40-A** | **03-24** | **CaT prob 0.003 단일 변수 실험** | 0.45->0.384 달성, ep_len 170 천장 |
 | **V41** | **03-24** | **Narrow-stance bootstrap 설계** | 미구현 (V42로 전환) |
-| **V42** | **03-25** | **Clean Reward Restart: 50→16개, 8192 envs** | 설계 완료, exploit 발견 → V43 |
-| **V43** | **03-25** | **15개 connected reward (per-leg propulsion gating)** | ❌ boot 실패 (ep_len=8, walking reward 충돌) |
-| **V43-B** | **03-25** | **propulsion gate를 boot에서 OFF** | ❌ boot 실패 (gating ≠ 원인) |
-| **V43-C** | **03-25** | **joint_default_pose -2.0→-0.3** | ❌ boot 실패 (pose ≠ 원인) |
-| **V43-D** | **03-25** | **Walking reward boot gating (5-Phase 순차 활성화)** | 🟡 ep_len 10(+20%), fwd_vel 7x↑, positive 부족 |
-| **V43-E** | **03-25** | **boot_standing + boot_foot_contact (V41 bootstrap 적용)** | ✅ **boot 성공 (ep_len 248, shoulder 0.40 역대 최고)**, stride 0.39 |
-| **V44** | **03-26** | **diagonal_coupling 복원 + pose -0.5 + adaptive safety** | 🟡 stride 1.3~2.4↑, shoulder 0.53↑ (trade-off), coupling 0.0 |
-| **V45** | **03-26** | **shoulder-leg 분리 + pair coupling + leg_lift** | 미구현 (V46으로 전략 전환) |
-| **V46-A** | **03-26** | **V43-E + V38.3 gait reward 8개 추가** | 🟡 stride 1.45 (pose penalty 한계) |
-| **V46-B** | **03-26** | **Run A + shoulder-leg 분리 (shoulder_neutral)** | 🟡 shoulder 0.44, stride 1.29 (여전히 부족) |
-| **V47** | **03-26~03-27** | **V38.3 순정(77 reward) + boot_standing + boot_contact** | ✅ **stride 6.29, coupling 0.46, shoulder 0.43 — V38.3 재현 + 개선** |
-| **V48** | **03-27~03-28** | **Standing pose 보정 (leg=-0.97), V48-C/D realism 실험** | 🟡 pose 보정 성공, realism(질량/토크) 실패 → two-track 결정 |
-| **V49** | **03-28** | **Baseline 복원 + 인프라 (curriculum save/restore, feature flags, CLI routing)** | 🟡 stride 6.9 달성, 귀뚜라미 보행(front_lift 0.08) 발견 |
-| **V50** | **03-28** | **Boot ramp 연장(300→1500) + height 강화(standing 15, base_height -20)** | ❌ walking 활성화 시 높이 하락 (reward 비율 15:1 한계) |
-| **V51** | **03-28** | **Soft height gate hybrid (walking reward에 height 조건부 penalty)** | 🟡 anti-crouch 성공(front_lift 0.257), anti-cricket 실패(iter 3300 재하락) |
-| **V52** | **03-29** | **Min height termination(0.15m, boot-gated) + data-driven weight 재설계** | 🟡 height 0.19 안정, leg_lift 4발 평균이 앞다리 penalty화하는 구조 발견 |
-| **V53** | **03-29~** | **front_leg_lift_reward (FL/FR only, w=15) additive 추가** | from-scratch 훈련 중 |
-| **V54** | **03-30** | **Clean phase-centric 전환: phase_contact/clearance + handoff + reward 대폭 축소** | ❌ handoff collapse, baseline locomotion 부재 확인 |
-| **V55** | **03-30~03-31** | **baseline recovery first, phase probe second 재설계** | 🟡 A5.x로 release collapse 완화, A6 baseline gate 확보, 현재 B1 probe 검증 중 |
+| **V42** | **03-25** | **Clean Reward Restart: 50->16개, 8192 envs** | 설계 완료, exploit 발견 |
+| **V43** | **03-25** | **15개 connected reward (per-leg propulsion gating)** | boot 실패 (ep_len=8) |
+| **V43-B** | **03-25** | **propulsion gate를 boot에서 OFF** | boot 실패 |
+| **V43-C** | **03-25** | **joint_default_pose -2.0->-0.3** | boot 실패 |
+| **V43-D** | **03-25** | **Walking reward boot gating (5-Phase 순차 활성화)** | ep_len 10(+20%), positive 부족 |
+| **V43-E** | **03-25** | **boot_standing + boot_foot_contact (V41 bootstrap 적용)** | boot 성공 (ep_len 248, shoulder 0.40) |
+| **V44** | **03-26** | **diagonal_coupling 복원 + pose -0.5 + adaptive safety** | stride 1.3~2.4, shoulder 0.53 (trade-off) |
+| **V45** | **03-26** | **shoulder-leg 분리 + pair coupling + leg_lift** | 미구현 (V46으로 전환) |
+| **V46-A** | **03-26** | **V43-E + V38.3 gait reward 8개 추가** | stride 1.45 (pose penalty 한계) |
+| **V46-B** | **03-26** | **Run A + shoulder-leg 분리 (shoulder_neutral)** | shoulder 0.44, stride 1.29 |
+| **V47** | **03-26~03-27** | **V38.3 순정(77 reward) + boot_standing + boot_contact** | stride 6.29, coupling 0.46, shoulder 0.43 |
+| **V48** | **03-27~03-28** | **Standing pose 보정 (leg=-0.97), realism 실험** | pose 보정 성공, realism 실패 |
+| **V49** | **03-28** | **Baseline 복원 + 인프라 정비** | stride 6.9, 귀뚜라미 보행 발견 |
+| **V50** | **03-28** | **Boot ramp 연장 + height 강화** | walking 활성화 시 높이 하락 |
+| **V51** | **03-28** | **Soft height gate hybrid** | anti-crouch 성공, anti-cricket 실패 |
+| **V52** | **03-29** | **Min height termination + data-driven weight 재설계** | 4발 평균 perverse incentive 발견 |
+| **V53** | **03-29~** | **front_leg_lift_reward (FL/FR only, w=15)** | from-scratch 훈련 |
+| **V54** | **03-30** | **Clean phase-centric handoff** | handoff collapse |
+| **V55** | **03-30~03-31** | **baseline recovery first, phase probe second** | A6 baseline gate 확보 |
+| **V56** | **04-02** | **pitch-first mechanics correction** | twist exploit |
+| **V57** | **04-02~04-03** | **clean phase-centric reboot + zero-action stand 디버깅** | 물리 디버깅 성공, stand-first RL 실패 |
+| **V58** | **04-03~** | **Isaac Lab 표준 locomotion 복귀** | 진행 중 (B2: drag propulsion 해결) |
 
 ### 핵심 교훈
 
-- 접촉 센서 리워드는 미세 진동으로 속일 수 있음 → 키네마틱(joint velocity) 기반 권장
-- 35개 리워드 동시 활성화 → "정지 함정" (페널티 합 > 보상 합)
-- Hard phase switch → critic shock (value_loss 445x spike) → soft ramp 필요
-- PPO 안정성은 `gamma × reward_scale`에 좌우됨 (gamma 0.99→0.97로 해결)
-- Critic reset + fine-tune은 큰 리워드 변경에 부적합 → from-scratch 권장
-- 곱셈 리워드 `(A × B)`로 "둘 다 해야" 조건 표현 가능
-- **다리별 전용 보상(front_*, rear_*)은 역할 분리를 유발** → 4발 공통 보상(feet_air_time)이 더 안전
-- **보상 50개+는 항목 간 상호작용 예측 불가** → 성공한 프레임워크는 15~20개 수준
-- **Gait 패턴은 "발견"보다 "지시"가 안정적** → phase clock 또는 CPG 구조적 강제가 효과적
-- **서기도 못 하는데 보행+전진 동시 요구는 불가** → 단계적 학습(서기→걷기) 필요
-- **reward weight=0으로 Phase 분리하면 관측-보상 불일치** → Isaac Lab `rel_standing_envs` 사용이 정석
+- 접촉 센서 리워드는 미세 진동으로 속일 수 있음 -> 키네마틱(joint velocity) 기반 권장
+- 35개 리워드 동시 활성화 -> "정지 함정" (페널티 합 > 보상 합)
+- Hard phase switch -> critic shock (value_loss 445x spike) -> soft ramp 필요
+- PPO 안정성은 `gamma * reward_scale`에 좌우됨 (gamma 0.99->0.97로 해결)
+- Critic reset + fine-tune은 큰 리워드 변경에 부적합 -> from-scratch 권장
+- 곱셈 리워드 `(A * B)`로 "둘 다 해야" 조건 표현 가능
+- **다리별 전용 보상(front_*, rear_*)은 역할 분리를 유발** -> 4발 공통 보상(feet_air_time)이 더 안전
+- **보상 50개+는 항목 간 상호작용 예측 불가** -> 성공한 프레임워크는 15~20개 수준
+- **Gait 패턴은 "발견"보다 "지시"가 안정적** -> phase clock 또는 CPG 구조적 강제가 효과적
+- **서기도 못 하는데 보행+전진 동시 요구는 불가** -> 단계적 학습(서기->걷기) 필요
+- **reward weight=0으로 Phase 분리하면 관측-보상 불일치** -> Isaac Lab `rel_standing_envs` 사용이 정석
 - **재현성 먼저 확인**: "성공한 버전"이라도 재현성 검증 필수 (V32.1은 25% 성공률)
 - **alive_bonus는 locomotion RL의 기본**: 매 step 생존 보상이 없으면 초기 탐색 실패 시 local minimum에 갇힘
 - **초기 harsh penalty는 탐색을 억제**: undesired_contacts=-100은 "시도하지 않는 게 최선"이라는 잘못된 학습 유도
-- **Windows cp949 인코딩 주의**: print 문의 이모지(⏸🔄✅)가 UnicodeEncodeError로 훈련 crash 유발
-- **penalty가 전체 reward의 1% 미만이면 무시됨**: V36에서 shoulder=-6.0이 reward 180 대비 0.6% → 행동 변경 없음. 5~10% 이상 필요
-- **커리큘럼 적층이 안전**: boot_ramp → splay_ramp → stride_ramp를 순차 적용하면 각 단계가 안정된 후 다음 단계 시작
-- **Barrier 함수, CaT(제약→종료) 등 최신 기법이 weight 커리큘럼보다 깔끔할 수 있음** (QUADRUPED_RL_RESEARCH.md 참조)
+- **Windows cp949 인코딩 주의**: print 문의 이모지가 UnicodeEncodeError로 훈련 crash 유발
+- **penalty가 전체 reward의 1% 미만이면 무시됨**: V36에서 shoulder=-6.0이 reward 180 대비 0.6% -> 행동 변경 없음. 5~10% 이상 필요
+- **커리큘럼 적층이 안전**: boot_ramp -> splay_ramp -> stride_ramp를 순차 적용하면 각 단계가 안정된 후 다음 단계 시작
+- **Barrier 함수, CaT(제약->종료) 등 최신 기법이 weight 커리큘럼보다 깔끔할 수 있음** (QUADRUPED_RL_RESEARCH.md 참조)
 - **CaT threshold는 실측 dev에 충분한 여유 필요**: V38에서 dev 0.54 대비 threshold 0.6으로 즉시 붕괴. 초기 threshold는 실측의 1.5배 이상 권장
 - **CaT probability는 극히 낮게 시작**: 0.1도 과도. 0.03~0.05에서 시작하여 점진 강화
 - **DoneTerm은 매 step 호출**: probability 설계 시 `(1-p)^ep_len`으로 에피소드 생존율 역산 필수
-- **Soft CaT는 phase transition 없이 안정적**: threshold 고정 + prob만 ramp → dev에 비례한 연속 압력
+- **Soft CaT는 phase transition 없이 안정적**: threshold 고정 + prob만 ramp -> dev에 비례한 연속 압력
 - **CaT에도 local optimum 한계**: 벌칙만으로는 0.45 이하 불가, positive incentive + 구조적 gait 유도 필요
 - **resume 중 reward weight 변경 금지**: critic 무효화로 기존 성과 소실 (교훈 #4 재확인)
 - **Isaac Lab resume은 curriculum 미복원**: CaT ramp 등 curriculum은 iter 0부터 재시작됨
-- **walking reward가 boot에서 충돌**: feet_air_time(+20) "발 들어"가 alive_bonus(+10) "서있어"와 50:50 충돌 → boot gating 필수 (V43-D)
+- **walking reward가 boot에서 충돌**: feet_air_time(+20) "발 들어"가 alive_bonus(+10) "서있어"와 50:50 충돌 -> boot gating 필수 (V43-D)
 - **boot에 positive signal 필수**: reward를 끄는 것과 대체하는 것은 다름. penalty만 남으면 "빨리 죽는 게 이득" (V43-E)
 - **net reward 부호가 학습 방향 결정**: net negative면 ep_len 감소가 최적해 (V43-D 분석)
-- **reward 수를 줄이는 것 ≠ 정답**: 15개 clean → splay 해결(0.40) but 보행 부족(stride 0.39). 50개에서 stride 6.94. 핵심은 "어떤 reward" (V42~V44)
-- **joint_default_pose는 shoulder와 leg를 분리해야 함**: 12개 관절 동일 penalty → stride↔splay trade-off (V44)
-- **output=0 reward는 weight를 올려도 0**: coupling reward 1500+ iter 무효 (V44, 교훈#1 재확인)
+- **reward 수를 줄이는 것이 정답은 아님**: 15개 clean -> splay 해결(0.40) but 보행 부족(stride 0.39). 50개에서 stride 6.94. 핵심은 "어떤 reward" (V42~V44)
+- **joint_default_pose는 shoulder와 leg를 분리해야 함**: 12개 관절 동일 penalty -> stride/splay trade-off (V44)
+- **output=0 reward는 weight를 올려도 0**: coupling reward 1500+ iter 무효 (V44)
 - **구체적 보행 신호 없이 RL은 가장 쉬운 방법(종종걸음)을 찾음**: leg_lift, rear_alternation 등 필요 (V43-E vs V38.3)
 - **reward 설계 시 phase별 상호작용/충돌 분석 필수**: 개별 reward는 합리적이어도 동시 작동 시 충돌 가능 (V43 boot 실패)
-- **제거한 reward가 핵심 동력일 수 있음**: band/residency +37.56이 stride 6.79의 유력 동력. "복잡한 상호작용"으로 제거했지만 동시에 gait를 만드는 reward (V46-A/B)
+- **제거한 reward가 핵심 동력일 수 있음**: band/residency +37.56이 stride 6.79의 유력 동력 (V46-A/B)
 - **작동하는 시스템을 고치지 말 것**: V38.3은 stride 6.79가 검증됨. 부족한 것(boot)만 더하는 V47이 정답 (V47)
 - **listen.cmd는 Windows에서만 직접 실행**: WSL에서 실행 시 파일 핸들 잠금 발생, 리스너 재시작 불가
-- **boot_standing ramp-down이 너무 빠르면 "낮게 기기" 습관 고착**: V49에서 300 iter ramp-down → 귀뚜라미 보행 원인
+- **boot_standing ramp-down이 너무 빠르면 "낮게 기기" 습관 고착**: V49에서 300 iter ramp-down -> 귀뚜라미 보행 원인
 - **앞/뒷다리 비대칭은 boot phase 높이 습관 미각인**: boot에서 높이 유지 안 되면 walking에서도 낮은 자세 유지
 - **Version 하드코딩 대신 feature flag 사용**: `_USE_BOOT_STANDING` 등으로 버전 분기 없이 기능 제어
-- **CLI 명령은 리스너 경유 통일**: start/stop/resume은 Telegram→Listener 경유, 직접 실행 금지
+- **CLI 명령은 리스너 경유 통일**: start/stop/resume은 Telegram->Listener 경유, 직접 실행 금지
 - **WSL GUI 실행 불가**: 세션 0 제한으로 Isaac Sim GUI 불가
 - **penalty > alive_bonus이면 죽는 게 이득**: height gate w=40에서 즉사 발생 (V51)
 - **height gate는 boot OFF, walking만 적용**: boot에서 height penalty 주면 서기 학습 자체 불가 (V51)
@@ -445,6 +458,12 @@ def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.T
 - **.cmd 파일은 CRLF 필수**: LF로 저장 시 Windows에서 실행 불가
 - **launch_training 중복 실행 방지 lock 필수**: launch.lock으로 동시 start 방지 (V52.1)
 - **stall detection은 /stop 후 비활성화**: 의도적 정지를 stall로 오판 방지 (V52.1)
+- **ImplicitActuator effort_limit이 실제로 적용되지 않을 수 있음**: 비현실적 자세(과도한 관절 각도) 주의 (V57)
+- **DCMotor velocity-dependent saturation이 standing의 구조적 병목**: velocity limit에 가까운 관절 속도에서 토크 출력이 급감하여 정적 자세 유지 불가 (V57)
+- **URDF velocity = DCMotor velocity_limit이면 bang-bang 진동 발생**: URDF에 명시된 velocity가 그대로 saturation limit으로 사용되어 on/off 진동 유발 (V57)
+- **per-step reward가 음수면 die-fast**: 빨리 죽는 것이 누적 음수 reward를 줄이는 최적해가 됨 (V57~V58)
+- **penalty 10~50배 과다 -> Isaac Lab 표준 수준 유지 필수**: V57에서 과도한 penalty가 학습 실패의 직접 원인 (V57)
+- **feet_air_time threshold=0.5는 달성 불가**: SpotMicro 크기에서 0.5초 체공은 비현실적 -> 0.2로 낮춰야 발 들기 시작 (V58)
 
 ---
 
@@ -463,23 +482,26 @@ python scripts/analyze_v20.py
 - `plan/QUADRUPED_RL_RESEARCH.md` — 4족 보행 RL 연구 조사 (legged_gym, Walk These Ways, AllGaits 비교)
 - `plan/V*_ANALYSIS.md` / `plan/V*_PLAN.md` — 버전별 분석/계획
 - `plan/V01-V08_HISTORY.md` ~ `plan/V18_HISTORY.md` — 버전별 히스토리
-- `plan/V43-V53_HISTORY.md` — V43~V53 Boot Stability → Height Gate → Front Leg Lift 흐름
+- `plan/V43-V53_HISTORY.md` — V43~V53 Boot Stability -> Height Gate -> Front Leg Lift 흐름
 
 ---
 
 ## Robot Configuration
 
 - **URDF**: `assets/robots/spot_micro/spotmicroai_realistic_inertia.urdf`
-- **Joints**: 12개 (3 per leg × 4 legs) — `{front|rear}_{left|right}_{shoulder|leg|foot}`
-- **Actuator**: DC Motor
+- **Joints**: 12개 (3 per leg x 4 legs) — `{front|rear}_{left|right}_{shoulder|leg|foot}`
+- **Actuator**: ImplicitActuator (DCMotor에서 전환, V57 물리 디버깅 성과)
 - **Body ordering**: FL(0) / FR(1) / RL(2) / RR(3)
-- **Base**: `base_link` (180° yaw via `base_rotate`)
+- **Base**: `base_link` (180 deg yaw via `base_rotate`)
+- **init_z**: 0.185
+- **init pose**: leg=-0.70, foot=1.35
+- **URDF velocity**: 20.0
 
 ---
 
 ## IDE Setup (Optional)
 
-VSCode에서 `Ctrl+Shift+P` → `Tasks: Run Task` → `setup_python_env` 실행.
+VSCode에서 `Ctrl+Shift+P` -> `Tasks: Run Task` -> `setup_python_env` 실행.
 Isaac Sim 절대 경로 입력 시 `.vscode/.python.env` 자동 생성.
 
 ### Pylance 설정
