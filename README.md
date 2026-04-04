@@ -1,515 +1,190 @@
-# SpotMicro RL — Quadruped Locomotion with Reinforcement Learning
+# spot_micro_rl
 
-강화학습(PPO)으로 **SpotMicro 4족 로봇**이 **trot 걸음걸이**(대각 교대보행)로 걷도록 훈련하는 프로젝트.
-
-## Overview
-
-NVIDIA Isaac Lab 위에서 병렬 환경으로 SpotMicro 로봇을 훈련합니다. V49+는 4,096개, V42~V48은 8,192개, V41 이하는 20,480개 환경을 사용합니다. Isaac Lab extension template 패턴을 따르며, Gymnasium 환경으로 등록되어 있습니다.
-
-**현재 상태**: `V58.B2` 실험 진행 중. Isaac Lab 표준 locomotion 구조로 전환. ImplicitActuator + 표준 11개 reward. B1에서 locomotion bootstrap 성공(ep_len 968, timeout 99%), B2에서 drag propulsion 제거를 위한 feet_air_time 강화 적용.
-
-### 기술 스택
-
-| 항목 | 값 |
-|------|-----|
-| Isaac Lab | v2.3.0 |
-| Isaac Sim | 5.1.0.0 |
-| Python | 3.10 (conda env `env_isaaclab`) |
-| 알고리즘 | PPO ([RSL-RL](https://github.com/leggedrobotics/rsl_rl)) |
-| GPU | NVIDIA RTX 5080 Laptop 16GB |
-| 병렬 환경 수 | 4,096 (V49+), 8,192 (V42~V48), 20,480 (V41 이하) |
-| 최대 iteration | 15,000 |
-
-### 등록된 환경
-
-| 환경 ID | 용도 |
-|---------|------|
-| `Isaac-Velocity-Flat-SpotMicro-v0` | Flat 지형 학습 (주요) |
-| `Isaac-Velocity-Rough-SpotMicro-v0` | Rough 지형 학습 |
-| `Isaac-Velocity-Rough-SpotMicro-Play-v0` | Rough 지형 평가 |
-| `Isaac-Velocity-Flat-SteepSlope-SpotMicro-Play-v0` | 급경사 지형 평가 |
+SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 프로젝트**입니다.  
+이 저장소는 단순 결과물 보관용이 아니라, **가설 → 구현 → 실험 → 분석 → 교훈**을 지속적으로 축적하는 **연구형/실험형 프로젝트**를 목표로 합니다.
 
 ---
 
-## Project Structure
+## 1. 프로젝트 목적
 
-```
-spot_micro_rl/
-├── source/spot_micro_rl/spot_micro_rl/
-│   ├── tasks/manager_based/spot_micro_rl/
-│   │   ├── spot_micro_rl_env_cfg.py    # 환경 설정, 리워드 가중치, 커리큘럼
-│   │   ├── __init__.py                 # Gymnasium 환경 등록 (4개)
-│   │   ├── mdp/
-│   │   │   ├── rewards.py              # 커스텀 리워드 함수 50+ 개
-│   │   │   └── __init__.py             # MDP 모듈 re-export
-│   │   └── agents/
-│   │       └── rsl_rl_ppo_cfg.py       # PPO 하이퍼파라미터
-│   └── robots/
-│       └── spot_micro.py               # URDF articulation, DC motor 설정
-├── isaac_ops/                          # ★ 독립 운영 패키지 (IsaacOps)
-│   ├── common.py                       # Telegram, process, state, report/video helper, KPI 분석
-│   ├── listener.py                     # 통합 Telegram listener (supervisor + heartbeat)
-│   ├── cli_send.py                     # CLI에서 명령 실행 / 메시지 전송
-│   ├── listen.cmd                      # Windows 런처 (listener)
-│   └── cli.cmd                         # Windows 런처 (CLI)
-├── scripts/
-│   ├── rsl_rl/
-│   │   ├── train.py                    # 훈련 entry point
-│   │   └── play.py                     # 평가/비디오 entry point (카메라 preset, contact CSV 지원)
-│   ├── common.py                       # scripts용 common (isaac_ops/common.py와 동기화)
-│   ├── utils/
-│   │   ├── evaluate_limb_gate_checkpoint.py  # checkpoint 단위 limb validity 수동 평가
-│   │   └── analyze_training.py         # limb validity 열 추출, collapse 감지, workbook 기록
-│   └── legacy/                         # 구 supervisor/heartbeat 코드 참고용 보관
-├── plan/
-│   ├── HANDOFF.md                      # AI 세션 핸드오프 (최신 상태 요약)
-│   ├── QUADRUPED_RL_RESEARCH.md        # 4족 보행 RL 연구 조사 (legged_gym, Walk These Ways, AllGaits)
-│   ├── V*_ANALYSIS.md / V*_PLAN.md    # 버전별 분석/계획 문서
-│   └── archive/                        # 이전 상태 문서 보관
-├── assets/robots/spot_micro/           # SpotMicro URDF
-├── logs/rsl_rl/spot_micro_flat/        # 훈련 로그 + 체크포인트
-└── .env                                # Telegram 인증, 경로 설정
-```
+이 프로젝트의 목적은 다음과 같습니다.
+
+- SpotMicro 계열 4족보행 로봇에서 **실제로 배치 가능한(deployable)** RL 보행 정책을 만드는 것
+- 단순히 “걷는다”가 아니라, 아래 조건을 만족하는 보행을 만드는 것
+  - **안정적 부팅**
+  - **자연스러운 보행**
+  - **앞/뒤 다리 균형**
+  - **과도한 nose-down, torsion, front-overload 억제**
+  - **실기체 적용 가능성**
+- 실험 과정에서 나온 **성공/실패 가설과 코드 변화, 결과 해석**을 문서화해 다음 구현자에게 재사용 가능한 자산으로 남기는 것
 
 ---
 
-## Installation
+## 2. 이 저장소의 성격
 
-1. [Isaac Lab v2.3.0 설치](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html) (conda 권장)
+이 저장소는 일반적인 “완성된 제품 코드 저장소”가 아닙니다.  
+다음 두 가지가 함께 존재합니다.
 
-2. 프로젝트 클론 (Isaac Lab 디렉토리 외부):
-    ```bash
-    git clone https://github.com/etnlwind/spot_micro_rl.git
-    cd spot_micro_rl
-    git checkout develop
-    ```
+1. **실제 학습/실험 코드**
+2. **버전별 계획서, 분석 문서, 실패 기록, 교훈 정리**
 
-3. 패키지 설치 (editable mode):
-    ```bash
-    conda activate env_isaaclab
-    pip install -e source/spot_micro_rl
-    ```
+즉 이 저장소는 아래 성격을 갖습니다.
 
-4. 환경 확인:
-    ```bash
-    # Windows
-    C:\IsaacLab\isaaclab.bat -p scripts/list_envs.py
+- **운영 가능한 코드 저장소**
+- **연구 로그 저장소**
+- **의사결정 근거 저장소**
 
-    # Linux
-    ~/.local/share/ov/pkg/isaac-lab/isaaclab.sh -p scripts/list_envs.py
-    ```
-
-5. `.env` 생성:
-    ```bash
-    # PowerShell
-    Copy-Item .env.example .env
-
-    # bash/zsh
-    cp .env.example .env
-    ```
-
-6. `.env` 보안 설정:
-    ```env
-    TELEGRAM_TOKEN=<bot token>
-    TELEGRAM_CHAT_ID=<allowed chat id>
-    TELEGRAM_ALLOWED_USER_IDS=<comma-separated user ids>
-    TELEGRAM_VERBOSE_ERRORS=0
-    ```
-    `.env`는 직접 수정하지 말고 항상 `.env.example`을 복사해서 생성합니다.
-    `TELEGRAM_ALLOWED_USER_IDS`를 설정하면 지정한 사용자만 `start/stop/report` 같은 명령을 실행할 수 있습니다. 설정하지 않으면 private chat에서 `chat_id == user_id`인 경우만 명령을 허용합니다.
-    `TELEGRAM_VERBOSE_ERRORS=1`로 두면 `status`에 `last_error`를 표시하고, supervisor 예외 상세 문자열도 텔레그램으로 전송합니다. 기본값 `0`은 상세 에러를 서버 로그에만 남깁니다.
+따라서 `plan/` 폴더는 부가 자료가 아니라, 프로젝트 이해에 핵심입니다.
 
 ---
 
-## Training
+## 3. 현재 프로젝트 운영 원칙
 
-```bash
-conda activate env_isaaclab
-cd D:\project\spot_micro_rl
+현재 프로젝트는 아래 원칙을 중심으로 진행합니다.
 
-# 훈련 시작 (headless, 4,096 envs)
-C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/train.py \
-  --task=Isaac-Velocity-Flat-SpotMicro-v0 \
-  --num_envs=4096 --headless --max_iterations=15000
+### 3.1 baseline-first
+새 구조를 넣기 전에, 먼저 **부팅/기본 보행 baseline**이 살아 있어야 합니다.
 
-# 체크포인트에서 재개
-C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/train.py \
-  --task=Isaac-Velocity-Flat-SpotMicro-v0 \
-  --num_envs=4096 --headless --max_iterations=15000 \
-  --resume --load_run=<TIMESTAMP>
+### 3.2 mechanics-first
+성공 기준을 단순 `stride`, `timeout`으로 두지 않고, 아래를 같이 봅니다.
 
-# 예시: model_9600.pt 기준 재개
-C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/train.py \
-  --task=Isaac-Velocity-Flat-SpotMicro-v0 \
-  --num_envs=4096 --headless --max_iterations=15000 \
-  --resume --load_run=2026-03-10_07-43-51 --checkpoint=model_9600.pt
-```
+- front/rear balance
+- body posture stability
+- deployability
+- nose-down / torsion / front-overload 억제
 
-### 평가 (Play)
+### 3.3 standard-locomotion-first
+복잡한 heuristic reward 누적 대신, 가능한 한 **Isaac Lab / ANYmal / Walk These Ways** 계열의
+**표준 locomotion 구조**를 우선 참고합니다.
 
-```bash
-C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
-  --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=50 \
-  --checkpoint=logs/rsl_rl/spot_micro_flat/<TIMESTAMP>/model_15000.pt
+### 3.4 patch-loop 최소화
+문제가 생길 때마다 reward를 계속 덧붙이는 방식은 지양합니다.  
+가능하면:
 
-# 단일 로봇 멀티뷰/접촉 CSV 예시
-C:\IsaacLab\isaaclab.bat -p scripts/rsl_rl/play.py \
-  --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=1 \
-  --checkpoint=logs/rsl_rl/spot_micro_flat/<TIMESTAMP>/model_15000.pt \
-  --video --video_length=120 --camera_view=rear \
-  --save_contact_csv --contact_primary_mode=toe --headless
-```
+- baseline 재정의
+- success criteria 재정의
+- 구조 전환
 
-주요 play 옵션:
-- `--camera_view`: `overview`, `side`, `front`, `rear`, `top`, `top_oblique`
-- `--camera_zoom`: 단일 로봇 근접 촬영 거리 조정
-- `--save_contact_csv`: LF/RF/LR/RR 접촉 상태와 force CSV 저장
-- `--contact_primary_mode`: `foot`, `toe`, `aggregate`
-- `VIDEO_LENGTH`: report/video 생성 시 녹화 길이. 초가 아니라 simulation step 기준
-- `VIDEO_FPS`: report/video ZIP에 넣기 전 재인코딩 fps. 낮출수록 같은 step 수라도 더 천천히 재생됨
-- `VIDEO_CAPTURE_HEADLESS`: supervisor 리포트/멀티뷰 생성 시 `--headless` 사용 여부 (기본 1)
-- `VIDEO_CAPTURE_FALLBACK_GUI`: headless 결과가 실패/중복이면 GUI 모드로 1회 재시도 (기본 1)
-- `VIDEO_REQUIRE_DISTINCT_VIEWS`: 뷰별 영상 해시가 중복되면 실패 처리 (기본 1)
-- `REPORT_REQUIRE_XLSX`: report ZIP에 `metrics/heartbeat_history.xlsx`를 반드시 포함 (기본 1)
-
-### 모니터링 — IsaacOps
-
-`isaac_ops/`는 Telegram 기반 훈련 모니터링 통합 패키지입니다. 기존 `supervisor.py` + `heartbeat.py`를 하나의 listener로 통합했습니다.
-
-```bash
-# IsaacOps listener 시작 (Telegram 명령 + 100 iter heartbeat + 자동 영상 리포트)
-isaac_ops\listen.cmd
-
-# CLI 명령 (로컬 실행: status/hb/selfcheck, Telegram→Listener 경유: start/stop/resume)
-isaac_ops\cli.cmd status       # 훈련 상태 조회 (로컬) → Telegram 전송
-isaac_ops\cli.cmd hb           # heartbeat 리포트 (로컬) → Telegram 전송
-isaac_ops\cli.cmd selfcheck    # listener self-check (로컬)
-isaac_ops\cli.cmd stop         # 훈련 중지 (Telegram→Listener 경유)
-isaac_ops\cli.cmd start        # 새 훈련 시작 (Telegram→Listener 경유)
-isaac_ops\cli.cmd start gui    # GUI 모드로 훈련 시작 (Telegram→Listener 경유)
-isaac_ops\cli.cmd resume       # 이어서 훈련 (Telegram→Listener 경유)
-isaac_ops\cli.cmd "메시지"     # 일반 텍스트 → Telegram 전송
-
-# TensorBoard
-python -m tensorboard.main --logdir=logs/rsl_rl/spot_micro_flat --port=6006
-```
-
-**IsaacOps 특징**:
-- **통합 listener**: supervisor(Telegram 명령) + heartbeat(KPI 모니터링) + 자동 영상 리포트를 단일 프로세스로 처리
-- **CLI 도구**: `cli.cmd`로 터미널에서 명령 실행 (status/hb/selfcheck는 로컬, start/stop/resume은 Telegram→Listener 경유)
-- **self-contained**: `isaac_ops/` 폴더만으로 독립 동작 가능, 다른 프로젝트에 재사용 가능
-- **heartbeat 리포트**: raw metric 중심으로 간소화, 자동 판정은 iter 500 이후부터만 활성화
-- **영상 리포트 사용자 확인**: 영상 리포트 생성 전 Telegram으로 확인 요청 (훈련 중지 방지)
-- **자동 run 감지**: CLI에서 새 훈련을 시작해도 listener가 자동으로 새 run/버전 인식
-- **Note**: 구 `scripts/supervisor.py` + `scripts/heartbeat.py`는 `scripts/legacy/`로 이동됨. 현재는 `isaac_ops/listen.cmd`만 사용
-
-**Telegram 명령** (listener가 실행 중일 때):
-- `start` / `stop` / `resume` — 훈련 제어
-- `status` — 현재 상태 조회
-- `report` / `front` / `rear` / `top` / `side` — 영상 리포트
-- `help` — 명령 목록
-
-### 현재 운영 기준
-
-- 학습 버전: `V58.B2`
-- Actuator: `ImplicitActuatorCfg` (effort_limit=15)
-- Reward: 표준 11개 (track_vel, feet_air_time, standing_height 등)
-- 접촉 해석: `foot_link` (merge_fixed_joints로 toe_link 병합)
-- URDF velocity: 20.0
-- 병렬 환경: 4,096
-- 핵심 이슈: drag propulsion 해결 (feet_air_time weight 0.05->0.20, threshold 0.5->0.2)
-- 참고 문서: `plan/V58_PLAN.md`, `plan/V57_ZERO_STAND_DEBUG.md`
-- active 운영: `isaac_ops/listener.py`, `isaac_ops/common.py`, `isaac_ops/cli_send.py`
-- CLI 명령: start/stop/resume은 Telegram->Listener 경유 (직접 실행 아님), status/hb/selfcheck만 로컬
-- `/start gui` 옵션으로 GUI 모드 훈련 시작 가능
-- **주의**: listen.cmd는 Windows 터미널에서만 직접 실행 (WSL 금지)
+을 먼저 검토합니다.
 
 ---
 
-## Reward Design
+## 4. 현재 읽는 기준
 
-### V38.3 Soft CaT (V55까지 사용)
+이 저장소에는 버전 문서가 많습니다.  
+항상 **최신 기준 문서부터** 읽는 것을 권장합니다.
 
-V37.2에서 L2 penalty의 구조적 한계 확인 후, **CaT -> Soft CaT**로 발전:
-- L2 penalty는 reward 채널 — agent가 다른 양의 보상으로 상쇄 가능
-- CaT는 **discount factor 채널** — terminated=True면 미래 보상=0, 상쇄 불가
-- **Soft CaT** (V38.2+): 종료 확률이 dev에 비례 -> phase transition 제거
+### 추천 읽기 순서
 
-```
-prob(dev) = base_prob * clamp((max_dev - threshold) / margin, 0, 1)
-```
-
-| 구간 | Iteration 범위 | 내용 |
-|------|----------------|------|
-| Boot Phase | 0 ~ 300 | alive_bonus(+10/step), undesired_contacts -20->-100 ramp, 저속 command |
-| Velocity Restore | 0 ~ 500 | lin_vel_x (0.01,0.05) -> (0.1,0.5) 선형 복원 |
-| Splay L2 (고정) | 500+ | shoulder -6.0 고정 |
-| **Soft CaT Ramp** | **800 ~ 3000** | **probability 0->0.0015 ramp (threshold 0.3, margin 0.3 고정)** |
-| STAND->WALK Ramp | 1500 ~ 3000 | V32.1 soft-ramp 커리큘럼 |
-| WALK->TROT Ramp | 5500 ~ 8000 | 전체 gait 보상 활성 |
-
-**Soft CaT 결과** (V38.3): shoulder dev 0.54->0.45 (-16%), 0.45에서 local optimum 정체.
-
-### V47~V55
-
-**V47**: V38.3 순정(77 reward) + boot_standing(+15) + boot_contact(+5)만 추가. "작동하는 시스템을 고치지 말고, 부족한 것만 더하자." 상세: `plan/V47_PLAN.md`
-
-**V48~V53 진화**: V47 성공 후, 귀뚜라미 보행(앞다리 미사용) 해결을 위한 연속 실험:
-- **V48**: standing pose 보정 (leg=-0.97), realism 실험(질량/토크) 실패 -> two-track 결정
-- **V49**: baseline 복원, 귀뚜라미 보행 발견, 인프라 정비 (curriculum save/restore, feature flags, CLI routing)
-- **V50**: boot ramp 연장(300->1500) + height 강화 -> walking 활성화 시 높이 유지 실패 (15:1 비율 한계)
-- **V51**: soft height gate hybrid (analysis team 공동 설계) -> anti-crouch 성공, anti-cricket 실패
-- **V52**: min_height termination + data-driven weight 재설계 -> leg_lift 4발 평균이 앞다리를 penalty화하는 구조 발견
-- **V53**: front_leg_lift_reward (FL/FR only, w=15) additive 추가 -> from-scratch 훈련 중
-- **V54**: clean phase-centric handoff 실험 -> baseline locomotion 없는 상태에서 handoff collapse 확인
-- **V55**: baseline recovery first, phase probe second 재설계 -> A5.x로 release collapse 완화, A6 baseline gate 확보
-
-상세: `plan/V53_PLAN.md`, `plan/V54_PLAN.md`, `plan/V55_PLAN.md`, `plan/V43-V53_HISTORY.md`
-
-### V58 (현재)
-
-Isaac Lab 표준 locomotion 구조로 전환. V55까지 누적된 77개 heuristic reward 체계를 폐기하고, 표준 11개 reward로 재구성.
-
-- 77개 heuristic -> 11개 reward
-- 주연: `track_lin_vel_xy_exp`(+1.0), `track_ang_vel_z_exp`(+0.5)
-- 조연: `feet_air_time`(+0.20), `standing_height`(+1.0, command-gated)
-- Penalty: Isaac Lab 표준 수준 (`ang_vel_xy` -0.05, `action_rate` -0.01 등)
-- 핵심 원칙: "한 문제씩, 데이터 기반으로"
-
-**부팅 안정화** (V35.5 검증 완료):
-- `alive_bonus=10.0`: 매 step 생존 보상
-- `undesired_contacts` 초기 완화: -100->-20 (iter 0~300 ramp)
-- 초기 저속 command: (0.01, 0.05) -> 서기 안정화 우선
-
-**Anti-Shuffle** (V36 검증 완료):
-- `stride_length` ramp 200~500, max 15.0
-- `feet_air_time` threshold 0.25 (0.3에서 하향)
-- `swing_stride` weight 4.0 (2.0에서 강화)
-
-### Reward Architecture (V38.3)
-
-V32.1 보상 구조 기반 + multi-layer 커리큘럼 + Soft CaT:
-
-**부팅 안정화**: `alive_bonus(+10.0)`
-
-**자세 제어**: `standing_height(+10)`, `base_height_l2(-15)`, `flat_orientation_l2(-7)`, `shoulder_neutral(-6.0)`, `stance_width(-3.0)`
-
-**Soft CaT**: `shoulder_splay` DoneTerm — dev에 비례한 확률적 에피소드 종료 (prob 0.0015)
-
-**Gait 패턴**: `feet_air_time(+20)`, `diagonal_coupling(+25)`, `gait_cycle_period(+15)`, `trot_gait(+15)`
-
-**전진/보행**: `forward_velocity(+8)`, `stance_propulsion(+8)`, `rear_joint_velocity(+12)`, `stride_length(+15 ramp)`, `swing_stride(+4)`
-
-**Multi-layer 커리큘럼**: boot_ramp -> stride_ramp -> **Soft CaT ramp** -> STAND->WALK -> WALK->TROT
-
-### 리워드 함수 패턴
-
-```python
-def my_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, ...) -> torch.Tensor:
-    """Per-environment scalar reward."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    # ... compute reward
-    return tensor  # shape: (num_envs,)
-```
-
-주요 리워드 카테고리:
-- **양수**: `standing_height`, `forward_velocity`, `trot_gait`, `diagonal_joint_coupling`, `leg_lift`, `foot_clearance`, `stance_propulsion`, `rear_joint_velocity`, `rear_alternation`, `rear_forward_stride`
-- **음수**: `undesired_contacts`, `feet_below_knees`, `dof_acc_l2`, `action_rate_l2`, `flat_orientation_l2`, `rear_joint_frozen`, `same_side_penalty`, `limb_usage_min_penalty`, `rear_left_right_usage_diff_penalty`
-
-운영 해석 원칙:
-- 운동학 KPI 우선 확인 (joint velocity 기반)
-- flat 환경 contact 기준: `toe_link` 우선
-- limb validity 4단계: observe(~500) -> early_warning(500~800) -> lock_warning(800~1200) -> enforce(1200+)
-
-### PPO 하이퍼파라미터
-
-| 파라미터 | 값 |
-|---------|-----|
-| gamma | 0.97 |
-| clip_param | 0.1 |
-| learning_rate | 1e-4 (fixed) |
-| epochs | 3 |
-| mini_batches | 4 |
-| network | [512, 256, 128] ELU |
-| num_steps_per_env | 48 |
+1. **이 README**
+2. `plan/README.md`
+3. `plan/CURRENT_STATUS.md` *(있다면 최우선)*
+4. 현재 active 버전의 계획 문서  
+   - 예: `plan/V58_PLAN.md`
+5. 관련 연구/배경 문서  
+   - 예: `plan/V57_RESEARCH.md`
+6. 필요 시 과거 히스토리 문서  
+   - 예: `plan/V43-V53_HISTORY.md`
 
 ---
 
-## Version History
+## 5. 현재 유효한 접근 / 폐기된 접근
 
-| 버전 | 기간 | 핵심 내용 | 결과 |
-|------|------|----------|------|
-| V1~V8 | 02-17~02-19 | Flat 기본기 (서기->걷기, decimation 조정) | V8 = Flat 베이스라인 |
-| V9~V12 | 02-20~02-23 | Rough 지형 도전, 뒷다리 끌림 문제 | 접촉 센서 리워드 한계 발견 |
-| V13~V14 | 02-24~02-25 | Critic reset 시도 | 3연속 발산 -> from-scratch 전환 |
-| V15d | 02-26 | gamma=0.97, clip=0.1 PPO 안정화 | reward 559, value_loss 0.53 |
-| V16 | 02-27~03-03 | Diagonal coupling (키네마틱 trot) | 접촉->관절속도 기반 전환 |
-| V17.1 | 03-04~03-05 | Action rate + gait cycle + stride | 정지 함정 (35개 리워드 과부하) |
-| V18~V18.3 | 03-06~03-07 | 3-Phase 커리큘럼 (hard switch) | Phase 2 데드락 -> V19로 개선 |
-| V19 | 03-08 | Phase 가중치 튜닝, hard switch | critic shock (value_loss 1000) |
-| **V20** | **03-08~** | **Soft-ramp 선형 보간 커리큘럼** | 완료 |
-| **V21** | **03-10~** | **gait-quality-first 모니터링, iter cadence supervisor, toe contact 진단** | 완료 |
-| **V22** | **03-11~** | **멀티뷰 비디오 패키지, heartbeat workbook, ZIP artifact, top/front view 정리** | 완료 |
-| **V23** | **03-12~** | **posture-first refinement, rear joint velocity 강화** | 완료 |
-| **V24** | **03-13~** | **Limb Validity Gating: rear-left collapse 차단, 좌우 비대칭 페널티, 자동 영상 리포트** | 완료 |
-| **V25** | **03-14~03-15** | **rear_left_contact_floor_penalty -60 직접 처방 (RL 회복, RR collapse 이동)** | 실패 (iter 400) |
-| **V26.1** | **03-15** | **Symmetric Existence Floor + Load Sharing: 모든 다리 동일 기준, collapse 이동 차단** | 완료 |
-| **V27** | **03-16** | **contact residency EMA + prop/usage band: 점진적 접촉 분포 유도** | 실패 (iter 1000 RL collapse) |
-| **V28** | **03-16** | **V27 재기동 + 하이퍼파라미터 조정** | 실패 (RR collapse) |
-| **V28.2** | **03-16** | **rear pair 대칭 강제 (rear_pair_contact_diff_penalty)** | 성공 (iter 1703 rear_usage_diff=0.012) |
-| **V28.3** | **03-17** | **front contact cap(-10.0) 추가** | 실패 (FL/FR contact 0.83~0.88 고착) |
-| **V29** | **03-17** | **Residency band_high=0.65 + stride_length + swing_gate_velocity** | 완료 |
-| **V30** | **03-17** | **Symmetric init pose + supervisor reliability** | 완료 (FL/FR lock-in 미해결) |
-| **V31** | **03-18** | **Front swing enforcement (mirror rear rewards)** | 실패 (역할 분리 유발) |
-| **V31.1** | **03-18** | **front_both_ground + min_swing_ratio** | 실패 (역할 분리) |
-| **V31.2** | **03-18** | **Joint-level front activation (front_joint_velocity/frozen)** | 완료 |
-| **V32** | **03-18~03-19** | **feet_air_time core transition + rear bias reduction** | 완료 |
-| **V33** | **03-19** | **근본 재설계 (122->28개, anti-splay, 4발 공통)** | 실패 (붕괴) |
-| **V33.1** | **03-19** | **standing_height 강화** | 실패 (동일 붕괴) |
-| **V33.2** | **03-19** | **rear 절반 복구 (부팅 신호)** | 실패 (3발 exploit) |
-| **V33.3** | **03-19** | **per-limb penalty (min_swing, limb_usage, validity)** | 실패 (학습 억제) |
-| **V34** | **03-19** | **rel_standing_envs 기반 3-Phase Stand->Walk 커리큘럼** | 실패 (V33 기반) |
-| **V35~V35.2** | **03-19~03-20** | **V32.1 복원 시도, anti-splay/anti-shuffle 수정** | 실패 (이모지 crash + 재현성 문제 발견) |
-| **V35.3~V35.4** | **03-20** | **alive_bonus 도입 (2.0->10.0)** | 부분 효과 (부팅 불완전) |
-| **V35.5** | **03-20** | **부팅 안정화 3가지 결합 (alive+contacts완화+저속)** | 부팅 성공 (iter 400 ep_len=234) |
-| **V36** | **03-20** | **V35.5 + anti-splay(-6,-3,0.23) + anti-shuffle(stride ramp, swing_stride)** | anti-shuffle 성공(stride +34%), anti-splay 실패(shoulder 0.54 고착) |
-| **V37** | **03-20** | **Anti-splay 커리큘럼: shoulder -6->-15, stance -3->-8, height 0.23->0.22** | 실패 (iter 600에서 보행 붕괴) |
-| **V37.2** | **03-20** | **V37 완화: shoulder만 -6->-10, ramp 500~1500, stance/height 변경 없음** | L2 한계 확인 (splay 0.532) |
-| **V38** | **03-21** | **CaT (Constraints as Terminations): shoulder splay -> 확률적 종료** | 실패 (threshold 0.6 너무 타이트) |
-| **V38.1** | **03-21** | **V38 완화: threshold 0.8->0.45, prob 0.03->0.15** | 실패 (phase transition, splay 57%) |
-| **V38.2** | **03-21~03-22** | **Soft CaT: prob / dev, phase transition 제거** | 안정적이나 prob 0.0004 약함 |
-| **V38.3** | **03-22~03-23** | **Soft CaT prob 0.0015 (3.75x)** | shoulder dev 0.54->0.45 (-16%), local optimum |
-| **V38.3.1** | **03-23** | **CaT + L2 병행 (resume + weight -12)** | 실패 (critic 무효화) |
-| **V39** | **03-23~03-24** | **CPG/Phase Clock + reward shape 실험** | shape 교훈 획득, stride -39% |
-| **V40-A** | **03-24** | **CaT prob 0.003 단일 변수 실험** | 0.45->0.384 달성, ep_len 170 천장 |
-| **V41** | **03-24** | **Narrow-stance bootstrap 설계** | 미구현 (V42로 전환) |
-| **V42** | **03-25** | **Clean Reward Restart: 50->16개, 8192 envs** | 설계 완료, exploit 발견 |
-| **V43** | **03-25** | **15개 connected reward (per-leg propulsion gating)** | boot 실패 (ep_len=8) |
-| **V43-B** | **03-25** | **propulsion gate를 boot에서 OFF** | boot 실패 |
-| **V43-C** | **03-25** | **joint_default_pose -2.0->-0.3** | boot 실패 |
-| **V43-D** | **03-25** | **Walking reward boot gating (5-Phase 순차 활성화)** | ep_len 10(+20%), positive 부족 |
-| **V43-E** | **03-25** | **boot_standing + boot_foot_contact (V41 bootstrap 적용)** | boot 성공 (ep_len 248, shoulder 0.40) |
-| **V44** | **03-26** | **diagonal_coupling 복원 + pose -0.5 + adaptive safety** | stride 1.3~2.4, shoulder 0.53 (trade-off) |
-| **V45** | **03-26** | **shoulder-leg 분리 + pair coupling + leg_lift** | 미구현 (V46으로 전환) |
-| **V46-A** | **03-26** | **V43-E + V38.3 gait reward 8개 추가** | stride 1.45 (pose penalty 한계) |
-| **V46-B** | **03-26** | **Run A + shoulder-leg 분리 (shoulder_neutral)** | shoulder 0.44, stride 1.29 |
-| **V47** | **03-26~03-27** | **V38.3 순정(77 reward) + boot_standing + boot_contact** | stride 6.29, coupling 0.46, shoulder 0.43 |
-| **V48** | **03-27~03-28** | **Standing pose 보정 (leg=-0.97), realism 실험** | pose 보정 성공, realism 실패 |
-| **V49** | **03-28** | **Baseline 복원 + 인프라 정비** | stride 6.9, 귀뚜라미 보행 발견 |
-| **V50** | **03-28** | **Boot ramp 연장 + height 강화** | walking 활성화 시 높이 하락 |
-| **V51** | **03-28** | **Soft height gate hybrid** | anti-crouch 성공, anti-cricket 실패 |
-| **V52** | **03-29** | **Min height termination + data-driven weight 재설계** | 4발 평균 perverse incentive 발견 |
-| **V53** | **03-29~** | **front_leg_lift_reward (FL/FR only, w=15)** | from-scratch 훈련 |
-| **V54** | **03-30** | **Clean phase-centric handoff** | handoff collapse |
-| **V55** | **03-30~03-31** | **baseline recovery first, phase probe second** | A6 baseline gate 확보 |
-| **V56** | **04-02** | **pitch-first mechanics correction** | twist exploit |
-| **V57** | **04-02~04-03** | **clean phase-centric reboot + zero-action stand 디버깅** | 물리 디버깅 성공, stand-first RL 실패 |
-| **V58** | **04-03~** | **Isaac Lab 표준 locomotion 복귀** | 진행 중 (B2: drag propulsion 해결) |
+### 현재 유효한 접근
+- baseline-first
+- mechanics-first
+- standard locomotion reward 구조 우선
+- boot 안정성 자산 유지
+- success criteria에 deployability 포함
 
-### 핵심 교훈
+### 현재 주의 깊게 다루는 접근
+- phase/clock 기반 구조 전환
+- clean reward inventory 축소
+- boot와 walking handoff 안정화
+- front/rear balance 회복
 
-- 접촉 센서 리워드는 미세 진동으로 속일 수 있음 -> 키네마틱(joint velocity) 기반 권장
-- 35개 리워드 동시 활성화 -> "정지 함정" (페널티 합 > 보상 합)
-- Hard phase switch -> critic shock (value_loss 445x spike) -> soft ramp 필요
-- PPO 안정성은 `gamma * reward_scale`에 좌우됨 (gamma 0.99->0.97로 해결)
-- Critic reset + fine-tune은 큰 리워드 변경에 부적합 -> from-scratch 권장
-- 곱셈 리워드 `(A * B)`로 "둘 다 해야" 조건 표현 가능
-- **다리별 전용 보상(front_*, rear_*)은 역할 분리를 유발** -> 4발 공통 보상(feet_air_time)이 더 안전
-- **보상 50개+는 항목 간 상호작용 예측 불가** -> 성공한 프레임워크는 15~20개 수준
-- **Gait 패턴은 "발견"보다 "지시"가 안정적** -> phase clock 또는 CPG 구조적 강제가 효과적
-- **서기도 못 하는데 보행+전진 동시 요구는 불가** -> 단계적 학습(서기->걷기) 필요
-- **reward weight=0으로 Phase 분리하면 관측-보상 불일치** -> Isaac Lab `rel_standing_envs` 사용이 정석
-- **재현성 먼저 확인**: "성공한 버전"이라도 재현성 검증 필수 (V32.1은 25% 성공률)
-- **alive_bonus는 locomotion RL의 기본**: 매 step 생존 보상이 없으면 초기 탐색 실패 시 local minimum에 갇힘
-- **초기 harsh penalty는 탐색을 억제**: undesired_contacts=-100은 "시도하지 않는 게 최선"이라는 잘못된 학습 유도
-- **Windows cp949 인코딩 주의**: print 문의 이모지가 UnicodeEncodeError로 훈련 crash 유발
-- **penalty가 전체 reward의 1% 미만이면 무시됨**: V36에서 shoulder=-6.0이 reward 180 대비 0.6% -> 행동 변경 없음. 5~10% 이상 필요
-- **커리큘럼 적층이 안전**: boot_ramp -> splay_ramp -> stride_ramp를 순차 적용하면 각 단계가 안정된 후 다음 단계 시작
-- **Barrier 함수, CaT(제약->종료) 등 최신 기법이 weight 커리큘럼보다 깔끔할 수 있음** (QUADRUPED_RL_RESEARCH.md 참조)
-- **CaT threshold는 실측 dev에 충분한 여유 필요**: V38에서 dev 0.54 대비 threshold 0.6으로 즉시 붕괴. 초기 threshold는 실측의 1.5배 이상 권장
-- **CaT probability는 극히 낮게 시작**: 0.1도 과도. 0.03~0.05에서 시작하여 점진 강화
-- **DoneTerm은 매 step 호출**: probability 설계 시 `(1-p)^ep_len`으로 에피소드 생존율 역산 필수
-- **Soft CaT는 phase transition 없이 안정적**: threshold 고정 + prob만 ramp -> dev에 비례한 연속 압력
-- **CaT에도 local optimum 한계**: 벌칙만으로는 0.45 이하 불가, positive incentive + 구조적 gait 유도 필요
-- **resume 중 reward weight 변경 금지**: critic 무효화로 기존 성과 소실 (교훈 #4 재확인)
-- **Isaac Lab resume은 curriculum 미복원**: CaT ramp 등 curriculum은 iter 0부터 재시작됨
-- **walking reward가 boot에서 충돌**: feet_air_time(+20) "발 들어"가 alive_bonus(+10) "서있어"와 50:50 충돌 -> boot gating 필수 (V43-D)
-- **boot에 positive signal 필수**: reward를 끄는 것과 대체하는 것은 다름. penalty만 남으면 "빨리 죽는 게 이득" (V43-E)
-- **net reward 부호가 학습 방향 결정**: net negative면 ep_len 감소가 최적해 (V43-D 분석)
-- **reward 수를 줄이는 것이 정답은 아님**: 15개 clean -> splay 해결(0.40) but 보행 부족(stride 0.39). 50개에서 stride 6.94. 핵심은 "어떤 reward" (V42~V44)
-- **joint_default_pose는 shoulder와 leg를 분리해야 함**: 12개 관절 동일 penalty -> stride/splay trade-off (V44)
-- **output=0 reward는 weight를 올려도 0**: coupling reward 1500+ iter 무효 (V44)
-- **구체적 보행 신호 없이 RL은 가장 쉬운 방법(종종걸음)을 찾음**: leg_lift, rear_alternation 등 필요 (V43-E vs V38.3)
-- **reward 설계 시 phase별 상호작용/충돌 분석 필수**: 개별 reward는 합리적이어도 동시 작동 시 충돌 가능 (V43 boot 실패)
-- **제거한 reward가 핵심 동력일 수 있음**: band/residency +37.56이 stride 6.79의 유력 동력 (V46-A/B)
-- **작동하는 시스템을 고치지 말 것**: V38.3은 stride 6.79가 검증됨. 부족한 것(boot)만 더하는 V47이 정답 (V47)
-- **listen.cmd는 Windows에서만 직접 실행**: WSL에서 실행 시 파일 핸들 잠금 발생, 리스너 재시작 불가
-- **boot_standing ramp-down이 너무 빠르면 "낮게 기기" 습관 고착**: V49에서 300 iter ramp-down -> 귀뚜라미 보행 원인
-- **앞/뒷다리 비대칭은 boot phase 높이 습관 미각인**: boot에서 높이 유지 안 되면 walking에서도 낮은 자세 유지
-- **Version 하드코딩 대신 feature flag 사용**: `_USE_BOOT_STANDING` 등으로 버전 분기 없이 기능 제어
-- **CLI 명령은 리스너 경유 통일**: start/stop/resume은 Telegram->Listener 경유, 직접 실행 금지
-- **WSL GUI 실행 불가**: 세션 0 제한으로 Isaac Sim GUI 불가
-- **penalty > alive_bonus이면 죽는 게 이득**: height gate w=40에서 즉사 발생 (V51)
-- **height gate는 boot OFF, walking만 적용**: boot에서 height penalty 주면 서기 학습 자체 불가 (V51)
-- **reward 변경 시 per-step net reward 부호 검증 필수**: net negative면 ep_len 감소가 최적해 (V51)
-- **"잘 가라" > "앞으로 가라" — 품질 우선**: stride보다 front_lift 같은 보행 품질 지표가 중요
-- **파라미터 설계: 추정 금지, 실측 먼저**: reward delta 분석으로 실제 per-step 영향 계산 (V52.1)
-- **reward 평균 함수는 다수파가 소수파를 penalty화**: 4발 평균 leg_lift에서 뒷다리(다수)가 앞다리(소수)의 기여를 상쇄 (V52.1)
-- **.cmd 파일은 CRLF 필수**: LF로 저장 시 Windows에서 실행 불가
-- **launch_training 중복 실행 방지 lock 필수**: launch.lock으로 동시 start 방지 (V52.1)
-- **stall detection은 /stop 후 비활성화**: 의도적 정지를 stall로 오판 방지 (V52.1)
-- **ImplicitActuator effort_limit이 실제로 적용되지 않을 수 있음**: 비현실적 자세(과도한 관절 각도) 주의 (V57)
-- **DCMotor velocity-dependent saturation이 standing의 구조적 병목**: velocity limit에 가까운 관절 속도에서 토크 출력이 급감하여 정적 자세 유지 불가 (V57)
-- **URDF velocity = DCMotor velocity_limit이면 bang-bang 진동 발생**: URDF에 명시된 velocity가 그대로 saturation limit으로 사용되어 on/off 진동 유발 (V57)
-- **per-step reward가 음수면 die-fast**: 빨리 죽는 것이 누적 음수 reward를 줄이는 최적해가 됨 (V57~V58)
-- **penalty 10~50배 과다 -> Isaac Lab 표준 수준 유지 필수**: V57에서 과도한 penalty가 학습 실패의 직접 원인 (V57)
-- **feet_air_time threshold=0.5는 달성 불가**: SpotMicro 크기에서 0.5초 체공은 비현실적 -> 0.2로 낮춰야 발 들기 시작 (V58)
+### 현재 폐기 또는 경계하는 접근
+- phase-only hard switch
+- mean-only aggregation으로 gait 품질 평가
+- reward patch 무한 누적
+- stride/timeout만으로 성공 판정
+- old gait reward를 많이 남긴 상태의 무거운 중첩 구조
 
 ---
 
-## Analysis
+## 6. 성공 기준
 
-```bash
-# V19 분석 (hard switch 문제 진단)
-python scripts/analyze_v19.py
+이 프로젝트에서 “성공”은 단순히 걷는 것이 아닙니다.  
+최소한 아래를 함께 만족해야 합니다.
 
-# V20 분석 (soft-ramp 효과 검증, iter 1500+ 권장)
-python scripts/analyze_v20.py
-```
+- 부팅이 안정적으로 재현됨
+- 보행이 지속됨
+- stride가 의미 있게 형성됨
+- front/rear 사용이 한쪽으로 심하게 무너지지 않음
+- body posture가 과도하게 무너지지 않음
+- 실기체 적용 관점에서 과도한 front-overload / torsion / nose-down이 없음
 
-분석/운영 문서:
-- `plan/HANDOFF.md` — AI 세션 핸드오프 (최신 상태 요약)
-- `plan/QUADRUPED_RL_RESEARCH.md` — 4족 보행 RL 연구 조사 (legged_gym, Walk These Ways, AllGaits 비교)
-- `plan/V*_ANALYSIS.md` / `plan/V*_PLAN.md` — 버전별 분석/계획
-- `plan/V01-V08_HISTORY.md` ~ `plan/V18_HISTORY.md` — 버전별 히스토리
-- `plan/V43-V53_HISTORY.md` — V43~V53 Boot Stability -> Height Gate -> Front Leg Lift 흐름
+즉,
+**“움직인다”보다 “실제로 쓸 수 있는 gait인가”를 더 중요하게 봅니다.**
 
 ---
 
-## Robot Configuration
+## 7. 문서 해석 시 주의
 
-- **URDF**: `assets/robots/spot_micro/spotmicroai_realistic_inertia.urdf`
-- **Joints**: 12개 (3 per leg x 4 legs) — `{front|rear}_{left|right}_{shoulder|leg|foot}`
-- **Actuator**: ImplicitActuator (DCMotor에서 전환, V57 물리 디버깅 성과)
-- **Body ordering**: FL(0) / FR(1) / RL(2) / RR(3)
-- **Base**: `base_link` (180 deg yaw via `base_rotate`)
-- **init_z**: 0.185
-- **init pose**: leg=-0.70, foot=1.35
-- **URDF velocity**: 20.0
+버전 문서가 많기 때문에, 아래를 항상 구분해야 합니다.
+
+- **현재 유효한 기준**
+- **과거에 시도했지만 폐기된 접근**
+- **특정 버전에서만 유효했던 로직**
+
+과거 문서는 매우 중요하지만, 자동으로 현재 정답이 되지는 않습니다.  
+항상 최신 기준 문서와 함께 해석해야 합니다.
 
 ---
 
-## IDE Setup (Optional)
+## 8. 디렉토리 안내
 
-VSCode에서 `Ctrl+Shift+P` -> `Tasks: Run Task` -> `setup_python_env` 실행.
-Isaac Sim 절대 경로 입력 시 `.vscode/.python.env` 자동 생성.
+### `plan/`
+버전별 계획, 분석, 연구 메모, 히스토리 문서가 모여 있습니다.  
+이 프로젝트를 이해하려면 가장 중요한 폴더입니다.
 
-### Pylance 설정
+### 학습/환경 코드
+실제 RL 실험 환경, reward, curriculum, locomotion 관련 구현이 포함됩니다.
 
-```json
-{
-    "python.analysis.extraPaths": [
-        "<path-to-project>/source/spot_micro_rl"
-    ]
-}
-```
+### 기타 운영/보조 코드
+로그 수집, 분석, 실험 보조 스크립트 등이 포함될 수 있습니다.
+
+---
+
+## 9. 이 프로젝트를 보는 가장 좋은 관점
+
+이 프로젝트를 “왜 이렇게 문서가 많지?”라는 관점보다,  
+다음처럼 보는 것이 맞습니다.
+
+> 이 프로젝트는 SpotMicro RL 보행 문제를 두고  
+> **어떤 가설을 세웠고, 어떻게 구현했고, 왜 실패했고, 무엇을 교훈으로 남겼는지**를 함께 보존하는 연구형 저장소다.
+
+즉 코드만 보는 것보다,
+**코드 + plan 문서 + 분석 결과**를 같이 읽어야 전체가 보입니다.
+
+---
+
+## 10. 앞으로 문서를 추가할 때 권장 사항
+
+새 문서를 추가할 때는 가능하면 아래를 명확히 남깁니다.
+
+- 가설
+- 변경 코드/파라미터
+- 기대 효과
+- 실패 기준
+- 성공 기준
+- 결과
+- 다음 버전으로 넘어가는 이유
+
+이 7개가 남으면, 이후 AI 협업이나 사람 협업 모두에서 해석 비용이 크게 줄어듭니다.
+
+---
+
+## 11. 한 줄 요약
+
+**spot_micro_rl은 SpotMicro 기반 4족보행 RL 연구 프로젝트이며, 단순히 “걷게 만드는 것”이 아니라 “재현 가능하고 자연스럽고 실기체에 배치 가능한 gait”를 목표로, 코드와 실험 문서를 함께 축적하는 저장소입니다.**
