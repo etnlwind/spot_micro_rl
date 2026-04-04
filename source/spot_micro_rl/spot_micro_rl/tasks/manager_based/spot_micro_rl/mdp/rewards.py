@@ -1702,6 +1702,21 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
     return torch.sum(torch.square(joint_pos - target), dim=1)
 
 
+def joint_default_pos_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """모든 관절이 init pose(default_joint_pos)에서 벗어나면 penalty.
+
+    서기 학습에서 "이상적 자세 유지"를 직접 유도.
+    splay, 웅크림, 비대칭 등 모든 자세 이탈을 하나의 항으로 억제.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    current = asset.data.joint_pos
+    default = asset.data.default_joint_pos
+    return torch.sum(torch.square(current - default), dim=1)
+
+
 def standing_height_exp(
     env: ManagerBasedRLEnv,
     target_height: float,
@@ -1726,12 +1741,51 @@ def standing_height_exp(
     if start_time > 0.0:
         elapsed = env.episode_length_buf * env.step_dt
         result = result * (elapsed >= start_time).float()
-    # Optional command gate: only reward standing height when the commanded planar speed is near zero.
+    # Optional command gate: only reward standing height when the commanded locomotion speed is near zero.
+    # yaw 포함: sqrt(vx^2 + vy^2 + 0.5*wz^2) — yaw-only turning env에서 standing reward 방지.
     if standing_vel_threshold is not None:
         command = env.command_manager.get_command("base_velocity")
-        command_speed = torch.linalg.norm(command[:, :2], dim=1)
+        vx = command[:, 0]
+        vy = command[:, 1]
+        wz = command[:, 2] if command.shape[1] > 2 else torch.zeros_like(vx)
+        command_speed = torch.sqrt(vx * vx + vy * vy + 0.5 * wz * wz)
         result = result * (command_speed <= standing_vel_threshold).float()
     return result
+
+
+def shoulder_torque_saturated(
+    env: ManagerBasedRLEnv,
+    threshold_ratio: float = 0.95,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Terminate when any shoulder joint torque reaches servo limit.
+    Returns True (terminate) if any shoulder |torque| >= threshold_ratio * effort_limit."""
+    asset = env.scene[asset_cfg.name]
+    if not hasattr(asset.data, "applied_torque"):
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    torques = asset.data.applied_torque  # (num_envs, num_joints)
+    # Find shoulder joint indices
+    shoulder_ids = [i for i, name in enumerate(asset.joint_names) if "shoulder" in name]
+    if not shoulder_ids:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    shoulder_torques = torques[:, shoulder_ids].abs()  # (num_envs, num_shoulders)
+    effort_limit = asset.actuators["legs"].effort_limit
+    if isinstance(effort_limit, torch.Tensor):
+        limit = float(effort_limit.max().item())
+    else:
+        limit = float(effort_limit)
+    saturated = (shoulder_torques >= threshold_ratio * limit).any(dim=1)
+    return saturated
+
+
+def flat_orientation_bonus(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """수평 유지 보상. 완전 수평이면 1.0, 기울어질수록 0에 가까움."""
+    asset = env.scene[asset_cfg.name]
+    gravity_xy = asset.data.projected_gravity_b[:, :2]
+    return torch.exp(-7.0 * torch.sum(torch.square(gravity_xy), dim=1))
 
 
 def feet_below_knees(
@@ -2045,6 +2099,193 @@ def foot_clearance_reward(
     vel_x = robot.data.root_lin_vel_b[:, 0]
     vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
     return base_reward * vel_gate
+
+
+def excessive_contact_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    command_name: str = "base_velocity",
+    max_contact_time: float = 0.4,
+    cap: float = 0.6,
+    yaw_scale: float = 0.5,
+    command_threshold: float = 0.1,
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Moving env에서 발이 과도하게 오래 접촉 시 penalty. Drag propulsion을 dense하게 억제.
+
+    feet_air_time(sparse, touchdown 시점에만 발생)과 달리,
+    이 penalty는 매 step contact_time 초과분에 비례하여 발생한다.
+    정상 보행(주기적 발 들기)에서는 contact_time이 reset되어 penalty=0.
+    Drag 상태에서는 contact_time이 누적되어 penalty가 지속 증가.
+
+    집계: mean + 0.5*max — 전체 drag와 단일 leg drag 모두 포착.
+    Gate: sqrt(vx^2 + vy^2 + yaw_scale*wz^2) > threshold — standing env 제외, yaw 포함.
+    Cap: excess를 cap에서 제한하여 무한 누적 방지.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    # per-foot continuous contact time
+    net_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1)
+    in_contact = net_forces.max(dim=1)[0] > contact_threshold  # (num_envs, num_feet)
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+
+    # saturating excess: clamp(contact_time - max, 0, cap)
+    excess = torch.clamp(contact_time - max_contact_time, min=0.0, max=cap)
+
+    # aggregate: mean + 0.5*max (전체 drag + single leg drag 모두 포착)
+    penalty = excess.mean(dim=1) + 0.5 * excess.max(dim=1).values
+
+    # command gate: yaw 포함 locomotion command 기준
+    command = env.command_manager.get_command(command_name)
+    vx = command[:, 0]
+    vy = command[:, 1]
+    wz = command[:, 2] if command.shape[1] > 2 else torch.zeros_like(vx)
+    cmd_magnitude = torch.sqrt(vx * vx + vy * vy + yaw_scale * wz * wz)
+    penalty = penalty * (cmd_magnitude > command_threshold).float()
+
+    # safety clamp: cap=0.6이면 max possible = 0.6 + 0.3 = 0.9
+    return torch.clamp(penalty, max=2.0)
+
+
+def moving_height_l2(
+    env: ManagerBasedRLEnv,
+    target_height: float = 0.18,
+    command_name: str = "base_velocity",
+    yaw_scale: float = 0.5,
+    command_threshold: float = 0.1,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Moving env 전용 높이 L2 penalty. Standing env는 standing_height가 담당.
+
+    (height - target)²를 반환하되, command 속도가 threshold 이하(standing)이면 0.
+    Walking env에서 웅크리는 해를 억제.
+    """
+    asset = env.scene[asset_cfg.name]
+    height = asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    height_error_sq = torch.square(height - target_height)
+
+    # moving env에서만 적용
+    command = env.command_manager.get_command(command_name)
+    vx = command[:, 0]
+    vy = command[:, 1]
+    wz = command[:, 2] if command.shape[1] > 2 else torch.zeros_like(vx)
+    cmd_magnitude = torch.sqrt(vx * vx + vy * vy + yaw_scale * wz * wz)
+    moving_mask = (cmd_magnitude > command_threshold).float()
+
+    return height_error_sq * moving_mask
+
+
+def prolonged_contact_termination(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    command_name: str = "base_velocity",
+    max_contact_time: float = 0.25,
+    yaw_scale: float = 0.5,
+    command_threshold: float = 0.1,
+    start_time: float = 0.15,
+) -> torch.Tensor:
+    """Terminate when disallowed bodies remain in sustained contact during locomotion.
+
+    This is intended for the ``L L`` sit pathology: lower foot-body links lie on the ground
+    and remain there stably. Unlike immediate illegal-contact termination, this gives the
+    policy a short window to recover before ending the episode.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    prolonged_contact = contact_time.max(dim=1).values > max_contact_time
+
+    command = env.command_manager.get_command(command_name)
+    vx = command[:, 0]
+    vy = command[:, 1]
+    wz = command[:, 2] if command.shape[1] > 2 else torch.zeros_like(vx)
+    cmd_magnitude = torch.sqrt(vx * vx + vy * vy + yaw_scale * wz * wz)
+    moving = cmd_magnitude > command_threshold
+
+    elapsed = env.episode_length_buf * env.step_dt
+    time_gate = elapsed >= start_time
+
+    return prolonged_contact & moving & time_gate
+
+
+def b4_phase_curriculum(
+    env: ManagerBasedRLEnv,
+    phase2_iter: int = 500,
+    phase3_iter: int = 1500,
+) -> None:
+    """V58.B4 3-Phase 자동 커리큘럼.
+
+    Phase 1 (iter 0~500):    standing only, 균형 학습
+    Phase 2 (iter 500~1500): standing 50% + 느린 전진 0~0.2
+    Phase 3 (iter 1500~):    standing 20% + 전진 0~0.4
+    """
+    iteration = env.common_step_counter // env.max_episode_length if hasattr(env, 'max_episode_length') else 0
+
+    cmd_mgr = env.command_manager
+    command_term = cmd_mgr._terms.get("base_velocity", None)
+    if command_term is None:
+        return
+
+    cfg = command_term.cfg
+
+    if iteration < phase2_iter:
+        # Phase 1: standing only
+        cfg.rel_standing_envs = 1.0
+        cfg.ranges.lin_vel_x = (0.0, 0.0)
+        cfg.ranges.ang_vel_z = (0.0, 0.0)
+    elif iteration < phase3_iter:
+        # Phase 2: 50% standing + slow walking
+        cfg.rel_standing_envs = 0.5
+        cfg.ranges.lin_vel_x = (0.0, 0.2)
+        cfg.ranges.ang_vel_z = (-0.1, 0.1)
+    else:
+        # Phase 3: 20% standing + normal walking
+        cfg.rel_standing_envs = 0.2
+        cfg.ranges.lin_vel_x = (0.0, 0.4)
+        cfg.ranges.ang_vel_z = (-0.2, 0.2)
+
+
+def delayed_posture_termination(
+    env: ManagerBasedRLEnv,
+    min_height: float = 0.14,
+    max_tilt: float = 0.5,
+    violation_duration: float = 1.0,
+    grace_period: float = 1.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """높이 또는 수평 위반이 연속 violation_duration 이상 지속 시 terminate.
+
+    즉시 사망이 아닌 복원 기회를 준다. grace_period 이전에는 체크하지 않음 (settling 보호).
+    violation_duration 초가 연속으로 기준 미달이면 terminate.
+
+    내부 상태: env._posture_violation_steps로 연속 위반 step 수 추적.
+    """
+    asset = env.scene[asset_cfg.name]
+    height = asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    gravity_xy = asset.data.projected_gravity_b[:, :2]
+    tilt = torch.norm(gravity_xy, dim=1)
+
+    # 위반 조건: 높이 미달 OR 기울어짐 초과
+    violated = (height < min_height) | (tilt > max_tilt)
+
+    # grace period 체크
+    elapsed = env.episode_length_buf * env.step_dt
+    in_grace = elapsed < grace_period
+
+    # 연속 위반 카운터 (env에 저장)
+    if not hasattr(env, "_posture_violation_steps"):
+        env._posture_violation_steps = torch.zeros(env.num_envs, device=env.device)
+
+    # grace period 또는 위반 아닌 경우 카운터 리셋
+    reset_mask = in_grace | (~violated)
+    env._posture_violation_steps[reset_mask] = 0.0
+    env._posture_violation_steps[~reset_mask] += 1.0
+
+    # episode reset 시 카운터 리셋 (episode_length_buf=0이면 방금 reset된 env)
+    just_reset = env.episode_length_buf == 0
+    env._posture_violation_steps[just_reset] = 0.0
+
+    # violation_duration 초과 시 terminate
+    violation_steps = violation_duration / env.step_dt
+    return env._posture_violation_steps >= violation_steps
 
 
 def stationary_reward(

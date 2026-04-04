@@ -578,3 +578,32 @@ V60.3: Fine-tuning
 
 해결: ImplicitActuator 전환 + URDF vel=20 + init_z=0.185 + depenetration=0.2
 ```
+
+---
+
+## V58 종료 및 V59 전환 (2026-04-04)
+
+### V58 시리즈 결론
+
+```text
+V58.B1: 표준 locomotion 복귀 → rollout 성공, drag propulsion 잔존
+V58.B2: feet_air_time 강화 → drag 개선 시도
+V58.B3: 과도한 penalty → die-fast 재발
+V58.B4: 3-Phase 서기→보행 curriculum → 서기 자체가 불안정
+
+핵심 실패 원인:
+1. ImplicitActuator + 비균일 PD (foot=8) → 관절 붕괴로 주저앉음
+2. 비대칭 init pose (foot=0.87) → CoM-support polygon 불일치
+3. 서기/보행 분리 curriculum → 표준 예제는 분리하지 않음
+```
+
+### V59 전환 근거
+
+```text
+1. Isaac Lab 표준 4족 로봇(Go2, A1)은 전부 DCMotor + 균일 PD + 표준 locomotion
+2. "서기가 너무 쉽다"는 문제가 아니라 전제 — 서기가 안 되면 학습 자체가 불가
+3. 대칭 Z-bend (foot=-2*leg) → toe가 shoulder 아래, 기하학적 균형
+4. DCMotor stiffness=20 전관절 동일 → zero-action에서도 1000 step 서기 확인
+```
+
+→ V59_PLAN.md 참조

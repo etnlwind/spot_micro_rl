@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V58.B2"
+TRAIN_VERSION = "V59"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -27,6 +27,7 @@ _IS_V55 = TRAIN_VERSION.startswith("V55")
 _IS_V56 = TRAIN_VERSION.startswith("V56")
 _IS_V57 = TRAIN_VERSION.startswith("V57")
 _IS_V58 = TRAIN_VERSION.startswith("V58")
+_IS_V59 = TRAIN_VERSION.startswith("V59")
 _V55_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V55 and "." in TRAIN_VERSION else ("A1" if _IS_V55 else "")
 _V56_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V56 and "." in TRAIN_VERSION else ("M1" if _IS_V56 else "")
 _V57_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V57 and "." in TRAIN_VERSION else ("A1" if _IS_V57 else "")
@@ -2133,11 +2134,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # V58: Isaac Lab 표준 locomotion — 77개 heuristic 탈피
         # 표준 10개 reward, ImplicitActuator, velocity tracking
         # ══════════════════════════════════════════════════════════
-        if _IS_V58 and _V58_TRACK in {"B1", "B2"}:
+        if _IS_V58 and _V58_TRACK in {"B1", "B2", "B3", "B4"}:
             # ── Control ──
-            self.actions.joint_pos.scale = 0.30  # 초기 posture disturbance를 더 줄여 orientation-first collapse 완화
+            self.action_warmup_steps = 5  # 0.1초 최소 접촉 후 policy 즉시 제어
+            self.actions.joint_pos.scale = 0.30  # B1 검증 수준
             self.decimation = 4
-            self.episode_length_s = 20.0  # 표준값 (10s→20s)
+            self.episode_length_s = 20.0
 
             # ── Commands: 보수적 locomotion bootstrap ──
             self.commands.base_velocity.rel_standing_envs = 0.2
@@ -2147,15 +2149,15 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.commands.base_velocity.ranges.ang_vel_z = (-0.2, 0.2)
 
             # ── Events: 표준 구조를 유지하되 bootstrap-friendly로 보수화 ──
-            self.events.reset_robot_joints.params["position_range"] = (0.8, 1.2)
+            self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)  # 안정 init pose에서 시작 (0.8→foot=1.08=L자)
             self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
             # push_robot은 SpotMicro가 가벼워서 일단 비활성 유지 (V58.1에서 검토)
 
             # ── Terminations: 실제 엎드림/base contact 중심 ──
-            self.terminations.min_height.params["min_height"] = 0.12  # IdealPD eq ≈ 0.124
-            self.terminations.bad_orientation.params["limit_angle"] = 1.1  # orientation은 보조, 실제 실패는 min_height/base_contact로 처리
+            self.terminations.min_height.params["min_height"] = 0.16  # settling ~0.19, 30mm 여유
+            self.terminations.bad_orientation.params["limit_angle"] = 0.51  # 29도 즉시 사망
             self.terminations.shoulder_splay = None
-            # body/다리 접촉 즉시 사망: 주저앉음, 눕기, 다리 바닥 닿기 모두 terminate
+            # body/윗다리 접촉은 즉시 사망. foot_link는 L L 앉기 병변을 위해 별도 delayed termination으로 처리.
             self.terminations.base_contact = DoneTerm(
                 func=isaaclab_mdp.illegal_contact,
                 params={
@@ -2183,6 +2185,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "flat_orientation_l2",
                 "dof_torques_l2",
                 "standing_height",
+                "excessive_contact",
+                "moving_height_l2",
+                "joint_default_pos",
             }
             for attr in list(vars(self.rewards).keys()):
                 if attr.startswith("_") or attr in keep_reward_names:
@@ -2192,9 +2197,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 except Exception:
                     pass
 
-            # [fix #4] merge_fixed_joints=True → toe_link가 foot_link에 병합
-            # Isaac Lab SpotMicro 공식 예제도 .*foot_link 사용
-            foot_sensor = SceneEntityCfg("contact_forces", body_names=".*foot_link")
+            # toe_link가 실제로 병합되지 않고 별도 body로 존재 (진단 확인)
+            # .*foot_link는 foot body 접촉만 감지, toe sphere 접촉은 .*toe_link로 감지
+            toe_sensor = SceneEntityCfg("contact_forces", body_names=".*toe_link")
 
             # [주연] velocity tracking
             self.rewards.track_lin_vel_xy_exp.weight = 1.0
@@ -2204,7 +2209,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
             # [조연] feet air time
             self.rewards.feet_air_time.weight = 0.05
-            self.rewards.feet_air_time.params["sensor_cfg"] = foot_sensor  # [fix #4] toe→foot
+            self.rewards.feet_air_time.params["sensor_cfg"] = toe_sensor
             self.rewards.feet_air_time.params["threshold"] = 0.5
 
             # [penalty — Isaac Lab 표준 수준]
@@ -2239,6 +2244,169 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 self.rewards.feet_air_time.weight = 0.20
                 self.rewards.feet_air_time.params["threshold"] = 0.2
                 self.rewards.standing_height.weight = 1.0
+
+            if _V58_TRACK == "B4":
+                # V58.B4: 3-Phase 자동 커리큘럼
+                # Phase 1 (iter 0~500):    standing only, 균형 학습
+                # Phase 2 (iter 500~1500): standing 50% + 느린 전진 0~0.2
+                # Phase 3 (iter 1500~):    standing 20% + 전진 0~0.4
+
+                # Phase 1 초기값 (curriculum이 runtime에서 업데이트)
+                self.commands.base_velocity.rel_standing_envs = 1.0
+                self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.0)
+                self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+                self.rewards.standing_height.weight = 2.0
+                self.rewards.feet_air_time.weight = 0.125
+                # 이상적 자세 유지: 모든 관절이 init pose에서 벗어나면 penalty
+                # splay/웅크림/비대칭 모두 하나의 항으로 억제
+                self.rewards.joint_default_pos = RewTerm(
+                    func=custom_mdp.joint_default_pos_l2,
+                    weight=-2.0,
+                    params={"asset_cfg": SceneEntityCfg("robot")},
+                )
+
+                # 3-Phase auto curriculum (env._b4_phase_update에서 처리)
+                self._b4_phase2_iter = 500
+                self._b4_phase3_iter = 1500
+
+                # Posture termination
+                self.terminations.posture_violation = DoneTerm(
+                    func=custom_mdp.delayed_posture_termination,
+                    params={
+                        "min_height": 0.17,
+                        "max_tilt": 0.31,  # 18도
+                        "violation_duration": 3.0,
+                        "grace_period": 1.5,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                    },
+                )
+
+        # ══════════════════════════════════════════════════════════
+        # V59: stand-first 기본자세 학습
+        # 목표: 초기 대칭 Z-bend 근처에서 최소한의 동작으로 넘어지지 않고 서기
+        # ══════════════════════════════════════════════════════════
+        if _IS_V59:
+            # ── Control ──
+            self.action_warmup_steps = 5
+            self.actions.joint_pos.scale = 0.03  # stand-first: body correction은 가능하되 급격한 관절 수축은 억제
+            self.decimation = 4
+            self.episode_length_s = 20.0
+
+            # ── Commands: stand-only ──
+            self.commands.base_velocity.heading_command = False
+            self.commands.base_velocity.rel_standing_envs = 1.0
+            self.commands.base_velocity.rel_heading_envs = 0.0
+            self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.0)
+            self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+            self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+            # ── Events: standing-ready 초기 조건 고정 ──
+            self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
+            self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
+            self.events.reset_base.params["pose_range"]["x"] = (0.0, 0.0)
+            self.events.reset_base.params["pose_range"]["y"] = (0.0, 0.0)
+            self.events.reset_base.params["pose_range"]["yaw"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["x"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["y"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["z"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["roll"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["pitch"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["yaw"] = (0.0, 0.0)
+            self.events.add_base_mass = None
+            self.events.base_com = None
+            self.events.base_external_force_torque = None
+            self.events.push_robot = None
+
+            # ── Terminations: loaded eq=149mm, pitch=-3° 기준 ──
+            self.terminations.min_height.params["min_height"] = 0.13  # eq=149mm, 19mm 여유
+            self.terminations.bad_orientation.params["limit_angle"] = 0.6  # 34도
+            self.terminations.shoulder_splay = None
+            self.terminations.posture_violation = None  # loaded eq가 termination과 충돌 방지
+            self.terminations.base_contact = DoneTerm(
+                func=isaaclab_mdp.illegal_contact,
+                params={
+                    "sensor_cfg": SceneEntityCfg("contact_forces", body_names="base_link"),
+                    "threshold": 1.0,
+                },
+            )
+            # shoulder_saturated: 현재 자세에서 rear shoulder가 이미 100% 포화
+            # → termination 대신 reward로 제어 (flat_orientation_bonus가 수평 유지 유도)
+
+            # ── Curriculum: 없음 ──
+            self.curriculum.reward_weights = None
+
+            # ── Observations: phase clock OFF ──
+            self.observations.policy.phase_clock = None
+
+            # ── Rewards: 기본자세 근처 stand를 직접 목표로 ──
+            keep_reward_names = {
+                "track_lin_vel_xy_exp",
+                "track_ang_vel_z_exp",
+                "lin_vel_z_l2",
+                "ang_vel_xy_l2",
+                "action_rate_l2",
+                "flat_orientation_l2",
+                "dof_torques_l2",
+                "standing_height",
+                "base_height_l2",
+                "joint_default_pos",
+                "shoulder_neutral",
+                "shoulder_symmetry",
+                "flat_orientation_bonus",
+            }
+            for attr in list(vars(self.rewards).keys()):
+                if attr.startswith("_") or attr in keep_reward_names:
+                    continue
+                try:
+                    setattr(self.rewards, attr, None)
+                except Exception:
+                    pass
+
+            # [주연] zero-command stand 안정화
+            self.rewards.track_lin_vel_xy_exp.weight = 1.0
+            self.rewards.track_lin_vel_xy_exp.params["std"] = 0.20
+            self.rewards.track_ang_vel_z_exp.weight = 0.5
+            self.rewards.track_ang_vel_z_exp.params["std"] = 0.20
+            self.rewards.standing_height.weight = 3.0
+            self.rewards.standing_height.params["target_height"] = 0.17
+            self.rewards.standing_height.params["sigma"] = 0.04
+            self.rewards.standing_height.params["standing_vel_threshold"] = None
+            self.rewards.base_height_l2.weight = -10.0
+            self.rewards.base_height_l2.params["target_height"] = 0.17
+            self.rewards.joint_default_pos = RewTerm(
+                func=custom_mdp.joint_default_pos_l2,
+                weight=-3.0,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+            self.rewards.shoulder_neutral = RewTerm(
+                func=custom_mdp.shoulder_neutral_penalty,
+                weight=-2.0,
+                params={
+                    "shoulder_cfg": SceneEntityCfg(
+                        "robot",
+                        joint_names=["front_left_shoulder", "front_right_shoulder", "rear_left_shoulder", "rear_right_shoulder"],
+                    ),
+                    "target_angles": [0.0, 0.0, 0.0, 0.0],
+                },
+            )
+            self.rewards.shoulder_symmetry.weight = -1.0
+
+            # [핵심] 수평 유지 — penalty + 양의 보상
+            self.rewards.flat_orientation_l2.weight = -3.0
+            self.rewards.flat_orientation_bonus = RewTerm(
+                func=custom_mdp.flat_orientation_bonus,
+                weight=3.0,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+
+            # [보조] 적은 움직임과 낮은 토크로 서기
+            self.rewards.lin_vel_z_l2.weight = -2.0
+            self.rewards.ang_vel_xy_l2.weight = -0.5
+            self.rewards.action_rate_l2.weight = -0.1
+            self.rewards.dof_torques_l2 = RewTerm(
+                func=velocity_mdp.joint_torques_l2,
+                weight=-5.0e-5,
+            )
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

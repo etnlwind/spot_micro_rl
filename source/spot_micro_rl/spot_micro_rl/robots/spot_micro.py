@@ -43,37 +43,37 @@ SPOT_MICRO_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.185),  # Phase 2 equilibrium 근처 시작 (낙하 에너지 최소화)
+        pos=(0.0, 0.0, 0.229),  # V59: FK=0.229 정확히 (낙하 0)
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
-            # FK-calibrated: toe directly below shoulder (foot=1.35)
-            # foot=1.32 → toe 2.8mm behind shoulder → 뒤로 주저앉음 경향
-            # foot=1.35 → toe 0.1mm behind shoulder → 거의 정확히 아래
-            # height = 0.210m, init_z = 0.185 (loaded eq 근처)
-            "front_left_shoulder": -0.04,
-            "front_left_leg": -0.70,
-            "front_left_foot": 1.35,
-            "front_right_shoulder": 0.04,
-            "front_right_leg": -0.70,
-            "front_right_foot": 1.35,
-            "rear_left_shoulder": -0.04,
-            "rear_left_leg": -0.70,
-            "rear_left_foot": 1.35,
-            "rear_right_shoulder": 0.04,
-            "rear_right_leg": -0.70,
-            "rear_right_foot": 1.35,
+            # V59: 대칭 Z-bend (foot=-2*leg), toe under shoulder
+            "front_left_shoulder": -0.05,
+            "front_left_leg": -0.52,
+            "front_left_foot": 1.04,
+            "front_right_shoulder": 0.05,
+            "front_right_leg": -0.52,
+            "front_right_foot": 1.04,
+            "rear_left_shoulder": -0.05,
+            "rear_left_leg": -0.52,
+            "rear_left_foot": 1.04,
+            "rear_right_shoulder": 0.05,
+            "rear_right_leg": -0.52,
+            "rear_right_foot": 1.04,
         },
         joint_vel={".*": 0.0},
     ),
     soft_joint_pos_limit_factor=0.7,  # foot 관절 최대 접힘 제한 (2.59×0.7=1.81rad)
     actuators={
-        "legs": ImplicitActuatorCfg(
-            # V58.B1 locomotion bootstrap: ImplicitActuator로 안정적 rollout 확보
-            # bad_orientation 즉사 대신 실제 엎드림(min_height/base_contact) 기준으로 학습
+        "legs": DCMotorCfg(
+            # V59: STS3215 실제 서보 스펙 기반
+            # URDF mass 실물 기준 수정 (5.3kg→1.4kg) 후 3Nm으로 서기 검증됨
+            # stand test: h=149mm, pitch=-3°, 500 step 안정
             joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
-            effort_limit=15.0,
-            stiffness={".*shoulder": 12.0, ".*leg": 28.0, ".*foot": 8.0},
-            damping={".*shoulder": 4.0, ".*leg": 5.0, ".*foot": 2.0},
+            effort_limit=3.0,        # STS3215 (30kg·cm @ 12V = 3.0 Nm)
+            saturation_effort=3.0,
+            stiffness=5.0,           # 0.6rad error에서 3Nm 포화
+            damping=0.5,             # Go2 표준
+            velocity_limit=19.0,     # STS3215 (~19 rad/s)
         ),
     },
 )
