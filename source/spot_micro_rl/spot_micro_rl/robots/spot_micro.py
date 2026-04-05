@@ -22,13 +22,13 @@ SPOT_MICRO_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         asset_path=_URDF_PATH,
         fix_base=False,
-        merge_fixed_joints=True,  # Merge toe fixed joints into foot links
+        merge_fixed_joints=False,  # toe_link를 독립 rigid body로 유지해 toe contact reporting을 보장
         activate_contact_sensors=True,
         force_usd_conversion=True,  # V48-C: URDF mass 변경 → USD 재변환 필요
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                stiffness=0.0,  # PhysX drive PD=0, DCMotor computes torque
-                damping=0.0,    # PhysX drive PD=0, DCMotor computes torque
+                stiffness=0.0,  # URDF drive PD는 비활성화하고 actuator 설정값을 사용
+                damping=0.0,    # ImplicitActuator가 런타임에 stiffness/damping을 설정
             ),
             target_type="position",  # Creates PhysX DriveAPI (required for actuators!)
         ),
@@ -43,37 +43,35 @@ SPOT_MICRO_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.229),  # V59: FK=0.229 정확히 (낙하 0)
+        pos=(0.0, 0.0, 0.222),  # V59: FK=228mm - 6mm (4발 접지 보장, shoulder 벌림 보정)
         # rot default = (1,0,0,0) — no rotation needed, URDF now has +X forward
         joint_pos={
-            # V59: 대칭 Z-bend (foot=-2*leg), toe under shoulder
-            "front_left_shoulder": -0.05,
-            "front_left_leg": -0.52,
-            "front_left_foot": 1.04,
-            "front_right_shoulder": 0.05,
-            "front_right_leg": -0.52,
-            "front_right_foot": 1.04,
-            "rear_left_shoulder": -0.05,
-            "rear_left_leg": -0.52,
-            "rear_left_foot": 1.04,
-            "rear_right_shoulder": 0.05,
-            "rear_right_leg": -0.52,
-            "rear_right_foot": 1.04,
+            # V59: spot_mini_mini 기본 자세 (INIT_LEG=-0.658, INIT_FOOT=pi/3)
+            # mike4192 실물 standing height = 155mm (loaded equilibrium)
+            "front_left_shoulder": -0.15,
+            "front_left_leg": -0.66,
+            "front_left_foot": 1.05,
+            "front_right_shoulder": 0.15,
+            "front_right_leg": -0.66,
+            "front_right_foot": 1.05,
+            "rear_left_shoulder": -0.15,
+            "rear_left_leg": -0.66,
+            "rear_left_foot": 1.05,
+            "rear_right_shoulder": 0.15,
+            "rear_right_leg": -0.66,
+            "rear_right_foot": 1.05,
         },
         joint_vel={".*": 0.0},
     ),
     soft_joint_pos_limit_factor=0.7,  # foot 관절 최대 접힘 제한 (2.59×0.7=1.81rad)
     actuators={
-        "legs": DCMotorCfg(
-            # V59: STS3215 실제 서보 스펙 기반
-            # URDF mass 실물 기준 수정 (5.3kg→1.4kg) 후 3Nm으로 서기 검증됨
-            # stand test: h=149mm, pitch=-3°, 500 step 안정
+        "legs": ImplicitActuatorCfg(
+            # V59: stand-first bootstrap용 ImplicitActuator
+            # merge_fixed_joints=False에서 toe contact reporting이 정상 동작하는 설정
             joint_names_expr=[".*shoulder", ".*leg", ".*foot"],
-            effort_limit=3.0,        # STS3215 (30kg·cm @ 12V = 3.0 Nm)
-            saturation_effort=3.0,
-            stiffness=5.0,           # 0.6rad error에서 3Nm 포화
-            damping=0.5,             # Go2 표준
-            velocity_limit=19.0,     # STS3215 (~19 rad/s)
+            # effort_limit_sim은 일단 두지 않고, stand manifold 형성 후 제한 토크를 재도입
+            stiffness=20.0,
+            damping=0.5,
         ),
     },
 )

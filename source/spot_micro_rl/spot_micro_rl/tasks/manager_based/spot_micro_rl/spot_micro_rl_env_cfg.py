@@ -2288,7 +2288,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         if _IS_V59:
             # ── Control ──
             self.action_warmup_steps = 5
-            self.actions.joint_pos.scale = 0.03  # stand-first: body correction은 가능하되 급격한 관절 수축은 억제
+            self.actions.joint_pos.scale = 0.04  # stand-first: toe 고정 상태에서 body correction만 가능하도록 더 축소
             self.decimation = 4
             self.episode_length_s = 20.0
 
@@ -2317,11 +2317,30 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.events.base_external_force_torque = None
             self.events.push_robot = None
 
-            # ── Terminations: loaded eq=149mm, pitch=-3° 기준 ──
-            self.terminations.min_height.params["min_height"] = 0.13  # eq=149mm, 19mm 여유
-            self.terminations.bad_orientation.params["limit_angle"] = 0.6  # 34도
+            # ── Terminations: 기울거나 주저앉으면 즉사 ──
+            self.terminations.min_height.params["min_height"] = 0.14  # loaded eq=150mm, 주저앉으면 즉사
+            # bad_orientation: 20도 제한 + 초반 3초 유예 (착지 충격)
+            self.terminations.bad_orientation = DoneTerm(
+                func=custom_mdp.bad_orientation_grace,
+                params={
+                    "limit_angle": 0.52,    # 30도
+                    "grace_steps": 150,     # 3초 (decimation=4, dt=0.005, 150*0.02=3s)
+                    "asset_cfg": SceneEntityCfg("robot"),
+                },
+            )
             self.terminations.shoulder_splay = None
-            self.terminations.posture_violation = None  # loaded eq가 termination과 충돌 방지
+            self.terminations.posture_violation = None
+            # 발 떼면 즉사 (grace 3초 후)
+            toe_term_sensor = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            self.terminations.feet_lifted = DoneTerm(
+                func=custom_mdp.feet_lifted_termination,
+                params={
+                    "sensor_cfg": toe_term_sensor,
+                    "threshold": 1.0,
+                    "grace_steps": 25,  # 0.5초 유예: 초기 착지 직후를 제외하면 toe 이탈을 빠르게 실패로 처리
+                    "consecutive_steps": 8,  # 순간 contact dropout은 무시하고 연속 이탈만 실패로 처리
+                },
+            )
             self.terminations.base_contact = DoneTerm(
                 func=isaaclab_mdp.illegal_contact,
                 params={
@@ -2329,8 +2348,6 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "threshold": 1.0,
                 },
             )
-            # shoulder_saturated: 현재 자세에서 rear shoulder가 이미 100% 포화
-            # → termination 대신 reward로 제어 (flat_orientation_bonus가 수평 유지 유도)
 
             # ── Curriculum: 없음 ──
             self.curriculum.reward_weights = None
@@ -2338,7 +2355,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             # ── Observations: phase clock OFF ──
             self.observations.policy.phase_clock = None
 
-            # ── Rewards: 기본자세 근처 stand를 직접 목표로 ──
+            # ── Rewards: toe 고정 + 몸체 수평 이동으로 균형 ──
             keep_reward_names = {
                 "track_lin_vel_xy_exp",
                 "track_ang_vel_z_exp",
@@ -2347,12 +2364,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "action_rate_l2",
                 "flat_orientation_l2",
                 "dof_torques_l2",
-                "standing_height",
-                "base_height_l2",
-                "joint_default_pos",
-                "shoulder_neutral",
-                "shoulder_symmetry",
                 "flat_orientation_bonus",
+                "feet_on_ground",
+                "feet_lift_penalty",
+                "contact_foot_velocity_penalty",
+                "standing_height",
+                "joint_default_pos",
             }
             for attr in list(vars(self.rewards).keys()):
                 if attr.startswith("_") or attr in keep_reward_names:
@@ -2362,51 +2379,86 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 except Exception:
                     pass
 
-            # [주연] zero-command stand 안정화
-            self.rewards.track_lin_vel_xy_exp.weight = 1.0
-            self.rewards.track_lin_vel_xy_exp.params["std"] = 0.20
-            self.rewards.track_ang_vel_z_exp.weight = 0.5
-            self.rewards.track_ang_vel_z_exp.params["std"] = 0.20
-            self.rewards.standing_height.weight = 3.0
-            self.rewards.standing_height.params["target_height"] = 0.17
-            self.rewards.standing_height.params["sigma"] = 0.04
-            self.rewards.standing_height.params["standing_vel_threshold"] = None
-            self.rewards.base_height_l2.weight = -10.0
-            self.rewards.base_height_l2.params["target_height"] = 0.17
-            self.rewards.joint_default_pos = RewTerm(
-                func=custom_mdp.joint_default_pos_l2,
-                weight=-3.0,
-                params={"asset_cfg": SceneEntityCfg("robot")},
-            )
-            self.rewards.shoulder_neutral = RewTerm(
-                func=custom_mdp.shoulder_neutral_penalty,
-                weight=-2.0,
-                params={
-                    "shoulder_cfg": SceneEntityCfg(
-                        "robot",
-                        joint_names=["front_left_shoulder", "front_right_shoulder", "rear_left_shoulder", "rear_right_shoulder"],
-                    ),
-                    "target_angles": [0.0, 0.0, 0.0, 0.0],
-                },
-            )
-            self.rewards.shoulder_symmetry.weight = -1.0
+            # ── 서기 목표: 목표 높이 유지 + 발 접지 + 수평 + 최소 부하/움직임 ──
+            # "멈춰" 명령 시 이 상태를 유지해야 함
 
-            # [핵심] 수평 유지 — penalty + 양의 보상
-            self.rewards.flat_orientation_l2.weight = -3.0
+            # [핵심1] 수평 유지
             self.rewards.flat_orientation_bonus = RewTerm(
                 func=custom_mdp.flat_orientation_bonus,
+                weight=5.0,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+            self.rewards.flat_orientation_l2.weight = -3.0
+
+            # [핵심2] 목표 높이(~205mm, stiffness=20 loaded stand) 유지 + heartbeat 리포트용
+            self.rewards.standing_height = RewTerm(
+                func=custom_mdp.standing_height_exp,
                 weight=3.0,
+                params={
+                    "target_height": 0.205,
+                    "sigma": 0.03,
+                    "standing_vel_threshold": None,
+                    "asset_cfg": SceneEntityCfg("robot"),
+                },
+            )
+
+            # [핵심3] 가만히 서 있기 (vel=0 tracking)
+            self.rewards.track_lin_vel_xy_exp.weight = 2.0
+            self.rewards.track_lin_vel_xy_exp.params["std"] = 0.25
+            self.rewards.track_ang_vel_z_exp.weight = 1.0
+            self.rewards.track_ang_vel_z_exp.params["std"] = 0.25
+
+            # [핵심4] 발을 지면에 유지
+            toe_sensor = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            self.rewards.feet_on_ground = RewTerm(
+                func=custom_mdp.all_feet_on_ground,
+                weight=6.0,
+                params={
+                    "sensor_cfg": toe_sensor,
+                    "threshold": 1.0,
+                },
+            )
+
+            # [핵심5] 관절 init pose 유지 — 다리 접기/벌리기 방지
+            self.rewards.joint_default_pos = RewTerm(
+                func=custom_mdp.joint_default_pos_l2,
+                weight=-4.0,  # 관절 deviation에 비례하는 penalty
                 params={"asset_cfg": SceneEntityCfg("robot")},
             )
 
-            # [보조] 적은 움직임과 낮은 토크로 서기
-            self.rewards.lin_vel_z_l2.weight = -2.0
-            self.rewards.ang_vel_xy_l2.weight = -0.5
-            self.rewards.action_rate_l2.weight = -0.1
+            # [핵심6] 발 떼면 벌 (grace 후 termination도 있으니 적당히)
+            self.rewards.feet_lift_penalty = RewTerm(
+                func=custom_mdp.feet_lift_penalty,
+                weight=-20.0,  # 1발만 들어도 즉시 크게 불리
+                params={
+                    "sensor_cfg": toe_sensor,
+                    "threshold": 1.0,
+                },
+            )
+
+            # [핵심7] 접촉 중 toe 미끄럼 금지 — 붙인 상태에서 body만 조정하도록 유도
+            self.rewards.contact_foot_velocity_penalty = RewTerm(
+                func=custom_mdp.contact_foot_velocity_penalty,
+                weight=-5.0,
+                params={
+                    "sensor_cfg": toe_sensor,
+                    "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),
+                    "threshold": 1.0,
+                },
+            )
+
+            # [핵심8] 최소 움직임
+            self.rewards.action_rate_l2.weight = -0.5
+
+            # [핵심9] 부하 최소화
             self.rewards.dof_torques_l2 = RewTerm(
                 func=velocity_mdp.joint_torques_l2,
-                weight=-5.0e-5,
+                weight=-0.02,
             )
+
+            # [보조] 흔들림
+            self.rewards.lin_vel_z_l2.weight = -2.0
+            self.rewards.ang_vel_xy_l2.weight = -1.0
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

@@ -27,7 +27,7 @@ import common  # noqa: E402
 _OPS_LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 LOG = os.path.join(_OPS_LOG_DIR, "listener.log")
 PID_FILE = os.path.join(_OPS_LOG_DIR, "listener.pid")
-_CONFIRM_TIMEOUT_SEC = 15.0
+_CONFIRM_TIMEOUT_SEC = 180.0  # 3분
 
 # Collapse detection config (from TRAINING_CONFIG)
 _collapse_cfg = common.TRAINING_CONFIG.get("collapse_restart", {})
@@ -196,7 +196,7 @@ def _handle_start(pending_confirm_ref: list, headless: bool = True) -> None:
             f"<b>{common.TRAIN_VERSION} [{mode_str}]</b>\n"
             f"새 훈련 시작 (iter 0)\n\n"
             f"승인하시겠습니까? [Yes / No]\n"
-            f"<i>(60초 내 응답)</i>",
+            f"<i>(3분 내 응답)</i>",
             LOG, parse_mode="HTML",
         )
     else:
@@ -988,7 +988,7 @@ def main() -> int:
                                     continue
                                 elif time.time() >= pending_confirm[0].get("expires_at", 0):
                                     pending_confirm.clear()
-                                    _send_notice("START CANCELLED", "확인 시간 초과 (60초).", icon="⛔")
+                                    _send_notice("START CANCELLED", "확인 시간 초과 (3분).", icon="⛔")
                                 elif text.strip().lower().startswith("y"):
                                     confirmed_headless = pending_confirm[0].get("headless", True)
                                     pending_confirm.clear()

@@ -1778,6 +1778,64 @@ def shoulder_torque_saturated(
     return saturated
 
 
+def bad_orientation_grace(
+    env: ManagerBasedRLEnv,
+    limit_angle: float = 0.35,
+    grace_steps: int = 150,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """bad_orientation with grace period. First grace_steps are immune."""
+    asset = env.scene[asset_cfg.name]
+    gravity = asset.data.projected_gravity_b  # (N, 3)
+    # tilt = angle from upright: acos(-gz / |g|)
+    tilt = torch.acos(torch.clamp(-gravity[:, 2] / (torch.norm(gravity, dim=1) + 1e-6), -1, 1))
+    past_grace = env.episode_length_buf >= grace_steps
+    return (tilt > limit_angle) & past_grace
+
+
+def feet_lifted_termination(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    threshold: float = 1.0,
+    grace_steps: int = 150,
+    consecutive_steps: int = 5,
+) -> torch.Tensor:
+    """발이 하나라도 연속으로 떠있으면 termination (grace period 이후).
+
+    순간적인 toe contact dropout으로 즉사하지 않도록, one-step glitch는 무시하고
+    연속 ``consecutive_steps`` 동안 하나 이상의 toe가 비접촉일 때만 종료한다.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, threshold)
+    any_lifted = ~contacts.all(dim=1)  # 하나라도 안 닿으면 True
+    past_grace = env.episode_length_buf >= grace_steps
+
+    buf_name = f"_feet_lifted_consec_{sensor_cfg.name}"
+    if not hasattr(env, buf_name):
+        setattr(env, buf_name, torch.zeros(env.num_envs, device=env.device, dtype=torch.long))
+
+    consec = getattr(env, buf_name)
+    reset_mask = env.episode_length_buf <= 1
+    consec = torch.where(reset_mask, torch.zeros_like(consec), consec)
+    consec = torch.where(any_lifted, consec + 1, torch.zeros_like(consec))
+    setattr(env, buf_name, consec)
+
+    return (consec >= consecutive_steps) & past_grace
+
+
+def feet_lift_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    threshold: float = 1.0,
+) -> torch.Tensor:
+    """서기 중 발을 떼면 penalty. 뗀 발 수에 비례 (0~1, 1=4발 전부 뗌)."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, threshold)
+    # contacts: True=접지, False=떠있음
+    lifted = (~contacts).float()  # 떠있으면 1
+    return lifted.mean(dim=1)  # 0=전부 접지, 0.25=1발, 0.5=2발, 1.0=전부 뗌
+
+
 def flat_orientation_bonus(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
