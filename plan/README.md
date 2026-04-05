@@ -1,11 +1,11 @@
-# SpotMicro RL 실험 흐름 요약 (V1 ~ V58)
+# SpotMicro RL 실험 흐름 요약 (V1 ~ V59)
 
-이 문서는 `plan` 폴더의 V1~V58 흐름을 바탕으로,
+이 문서는 `plan` 폴더의 V1~V59 흐름을 바탕으로,
 각 버전이 **무엇을 해결하려던 실험이었는지**를 짧고 쉽게 정리하면서도,
 전체 맥락이 보이도록 해설을 덧붙인 요약 문서이다.
 
-> 최신 active family는 `V58`.
-> 현재는 `V58.B2`에서 drag propulsion 제거를 위한 feet_air_time 강화를 적용 중이다.
+> 최신 active family는 `V59`.
+> **서기 학습 성공** (timeout 98%, 4발 접지 98%). 다음은 보행 전환.
 
 ---
 
@@ -363,6 +363,29 @@ V55까지의 77개 heuristic 체계를 폐기하고, Isaac Lab 표준 locomotion
 - **V54**: phase를 주연으로 올렸더니 baseline 없는 handoff collapse 확인
 - **V55**: baseline을 다시 살린 뒤 phase를 probe로 얹는 전략으로 재설계
 - **V56~V58**: 77개 heuristic 폐기, Isaac Lab 표준 locomotion 구조로 전환. 표준 11개 reward + ImplicitActuator로 locomotion bootstrap 성공, drag propulsion 해결 진행 중
+- **V59**: URDF 질량 실물 기준 수정(5.3→1.41kg), merge_fixed_joints=False(contact 정상화), STS3215 서보 스펙 반영, **서기 학습 성공** (timeout 98%, 4발 접지 98%, 수평 유지 98%)
+
+---
+
+# 11기 — 실물 기반 서기 학습 시대 (V59)
+
+## 이 시기의 핵심
+
+V58까지의 locomotion 시도에서 반복된 실패(주저앉음, 넘어짐, 발 들기)의 근본 원인을 찾아낸 시기이다.
+
+> **URDF 질량이 실물의 3배, merge_fixed_joints=True가 contact를 깨뜨림, 서기를 먼저 배워야 함**
+
+## 핵심 발견
+
+- **URDF 질량**: 원본 5.3kg은 실물 ~1.7kg의 3배. base 링크 inertial 누락으로 PhysX 1kg 기본값 추가
+- **merge_fixed_joints=True**: toe_link contact reporting 완전 불가. False로 전환해야 4발 접촉 감지
+- **서기 먼저**: 표준 locomotion으로 바로 가면 주저앉기가 최적해. 서기를 먼저 학습해야 함
+- **consecutive termination**: 1 step 판정은 미세 진동으로 즉사. 연속 8 step 판정이 핵심
+
+## 서기 학습 결과
+
+- timeout 98%, 4발 접지 98%, 수평 유지 98%, 목표 높이 91%
+- 다음 단계: 서기 체크포인트에서 보행 학습으로 전환
 
 ---
 
@@ -370,4 +393,4 @@ V55까지의 77개 heuristic 체계를 폐기하고, Isaac Lab 표준 locomotion
 
 이 프로젝트의 흐름은,
 
-> **"걷게 만들기"에서 시작해, "꼼수를 막고", "reward를 줄여보고", "작동하는 시스템을 고치지 말 것"을 배우고, "앞다리 미사용"을 데이터로 분석한 뒤, 77개 heuristic의 한계를 인정하고 Isaac Lab 표준 locomotion 구조로 전환하여, 11개 reward만으로 bootstrap에 성공한 상태에서 drag propulsion을 해결하는 단계에 와 있다.**
+> **"걷게 만들기"에서 시작해, 꼼수를 막고, reward를 줄이고, 표준으로 전환하고, URDF 질량과 contact 센서의 근본 문제를 해결한 뒤, "서기를 먼저 배우자"는 원칙 아래 4발 접지 + 수평 유지 서기 학습에 성공한 상태에서, 보행 전환을 준비하는 단계에 와 있다.**

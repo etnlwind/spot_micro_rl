@@ -69,63 +69,81 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 
 ---
 
-## 4. 현재 읽는 기준
+## 4. 현재 상태 (V59)
 
-이 저장소에는 버전 문서가 많습니다.  
-항상 **최신 기준 문서부터** 읽는 것을 권장합니다.
+**서기 학습 성공** (2026-04-05)
+
+현재 버전 V59에서 로봇이 4발 접지 + 수평 유지 + 목표 높이 유지하면서 안정적으로 서 있는 policy를 학습했습니다.
+
+| 지표 | 결과 |
+|------|------|
+| 생존율 (timeout) | 98% |
+| 4발 접지율 | 98% |
+| 수평 유지율 | 98% |
+| 목표 높이 달성 | 91% |
+
+핵심 설정:
+- **URDF 질량**: 1.41kg (원본 5.3kg에서 실물 기준 수정)
+- **merge_fixed_joints=False** (True면 toe contact reporting 불가)
+- **ImplicitActuator** stiffness=20, damping=0.5
+- **서보 기준**: STS3215 (30kg·cm, 12V)
+
+다음 단계: 서기 체크포인트에서 보행 학습으로 전환
 
 ### 추천 읽기 순서
 
 1. **이 README**
-2. `plan/README.md`
-3. `plan/CURRENT_STATUS.md` *(있다면 최우선)*
-4. 현재 active 버전의 계획 문서  
-   - 예: `plan/V58_PLAN.md`
-5. 관련 연구/배경 문서  
-   - 예: `plan/V57_RESEARCH.md`
-6. 필요 시 과거 히스토리 문서  
-   - 예: `plan/V43-V53_HISTORY.md`
+2. **`plan/V59_PLAN.md`** (현재 active 버전)
+3. `plan/README.md`
+4. 필요 시 과거 히스토리 문서
+   - `plan/V58_PLAN.md`, `plan/V43-V53_HISTORY.md`
 
 ---
 
 ## 5. 현재 유효한 접근 / 폐기된 접근
 
 ### 현재 유효한 접근
-- baseline-first
-- mechanics-first
+- **stand-first**: 서기를 먼저 배우고 보행으로 전환
+- **실물 기준 URDF**: 질량, 서보 스펙을 실물에 맞춤
+- **merge_fixed_joints=False**: toe contact reporting 보장
+- **contact 기반 reward**: feet_on_ground, feet_lift_penalty, contact_foot_velocity_penalty
+- **consecutive termination**: 미세 진동은 무시, 연속 이탈만 판정
 - standard locomotion reward 구조 우선
-- boot 안정성 자산 유지
 - success criteria에 deployability 포함
 
 ### 현재 주의 깊게 다루는 접근
-- phase/clock 기반 구조 전환
-- clean reward inventory 축소
-- boot와 walking handoff 안정화
-- front/rear balance 회복
+- ImplicitActuator → DCMotor 전환 (Sim2Real)
+- effort_limit_sim 도입 시점
+- 서기 → 보행 전환 시 reward 구조 변경
 
 ### 현재 폐기 또는 경계하는 접근
-- phase-only hard switch
-- mean-only aggregation으로 gait 품질 평가
+- merge_fixed_joints=True (contact reporting 불가)
+- URDF 원본 질량 그대로 사용 (5.3kg, 실물의 3.2배)
+- action_scale과 zero-action stability 미검증 상태로 학습 시작
 - reward patch 무한 누적
 - stride/timeout만으로 성공 판정
-- old gait reward를 많이 남긴 상태의 무거운 중첩 구조
 
 ---
 
 ## 6. 성공 기준
 
-이 프로젝트에서 “성공”은 단순히 걷는 것이 아닙니다.  
+이 프로젝트에서 “성공”은 단순히 걷는 것이 아닙니다.
 최소한 아래를 함께 만족해야 합니다.
 
-- 부팅이 안정적으로 재현됨
-- 보행이 지속됨
-- stride가 의미 있게 형성됨
+### 서기 (V59 달성)
+- 4발 접지 유지 (98%+)
+- 몸체 수평 유지 (pitch < 5°)
+- 목표 높이 유지 (205mm 근처)
+- 발을 떼지 않고 관절 미세 조정으로 균형 유지
+
+### 보행 (다음 목표)
+- 서기에서 자연스럽게 보행 전환
 - front/rear 사용이 한쪽으로 심하게 무너지지 않음
-- body posture가 과도하게 무너지지 않음
 - 실기체 적용 관점에서 과도한 front-overload / torsion / nose-down이 없음
+- STS3215 서보 (3Nm) 한계 내에서 동작
 
 즉,
-**“움직인다”보다 “실제로 쓸 수 있는 gait인가”를 더 중요하게 봅니다.**
+**”움직인다”보다 “실제로 쓸 수 있는 gait인가”를 더 중요하게 봅니다.**
 
 ---
 
@@ -185,6 +203,18 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 
 ---
 
-## 11. 한 줄 요약
+## 11. V59 핵심 교훈
 
-**spot_micro_rl은 SpotMicro 기반 4족보행 RL 연구 프로젝트이며, 단순히 “걷게 만드는 것”이 아니라 “재현 가능하고 자연스럽고 실기체에 배치 가능한 gait”를 목표로, 코드와 실험 문서를 함께 축적하는 저장소입니다.**
+이번 V59에서 얻은 핵심 교훈입니다.
+
+1. **URDF 질량은 반드시 실물 기준 검증** — 원본 5.3kg은 실물 1.7kg의 3배
+2. **merge_fixed_joints=True는 contact reporting을 깨뜨림** — SpotMicro에서는 반드시 False
+3. **zero-action stand test를 gating test로** — 학습 전에 물리 안정성 먼저 확인
+4. **contact termination은 consecutive 판정 필수** — 1 step 판정은 진동으로 즉사
+5. **서기를 먼저 배워야** — 표준 locomotion으로 바로 가면 주저앉음/넘어짐이 최적해
+
+---
+
+## 12. 한 줄 요약
+
+**spot_micro_rl은 SpotMicro 기반 4족보행 RL 연구 프로젝트이며, “서기 → 보행”의 순서로 실기체 배치 가능한 policy를 만드는 것을 목표로, 코드와 실험 문서를 함께 축적하는 저장소입니다.**
