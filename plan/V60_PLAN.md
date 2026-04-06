@@ -1,7 +1,7 @@
 # V60 Plan: From-Scratch Walking + Asymmetry Exploit Correction
 
 > 작성/갱신: 2026-04-06
-> 현재 코드 truth 기준 버전: `V60.D`
+> 현재 코드 truth 기준 버전: `V60.F`
 > 기반: V59.B 서기 마스터 → V59.D 보행 전환 실패 → V60 from-scratch
 
 ---
@@ -174,13 +174,17 @@ V60.E (rear swing 생성 집중, V60.D resume):
 
 ### V60.D 결과 → no-go → V60.E로 전환
 
-### V60.E 성공 기준
-- swing_time_rl > 0.03
-- swing_time_rr > 0.03
-- feet_air_time >= 0
-- ep_len > 900
+### V60.E 결과 → no-go → V60.F로 전환
+- RL swing 0.007, RR swing 0.013 (835 iter 플라토)
+- rear 보상을 더 얹는 것만으로는 정적 해를 깨지 못함
 
-### V60.E 실패 시 다음 단계
-- rear swing 여전히 고착 → rear contact_ratio 상한 penalty 추가
+### V60.F 성공 기준
+- swing_time_rl > 0.02
+- swing_time_rr > 0.02
+- rear_air_time >= 0
+- ep_len > 850
+
+### V60.F 실패 시 다음 단계
+- 정적 해 여전히 유지 → rear contact_ratio 상한 penalty (과접지 벌칙)
 - 또는 front_rear_swing_diff 직접 penalty
-- 또는 rear 전용 feet_air_time (rear만 계산)
+- 또는 from-scratch V61 (reward 구조 근본 재설계)
