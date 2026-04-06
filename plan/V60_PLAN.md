@@ -1,7 +1,7 @@
 # V60 Plan: From-Scratch Walking + Asymmetry Exploit Correction
 
 > 작성/갱신: 2026-04-06
-> 현재 코드 truth 기준 버전: `V60.F`
+> 현재 코드 truth 기준 버전: `V60.H`
 > 기반: V59.B 서기 마스터 → V59.D 보행 전환 실패 → V60 from-scratch
 
 ---
@@ -142,7 +142,18 @@ V60.E (rear swing 생성 집중, V60.D resume):
   - front_rear_swing_balance_penalty: -5 (앞뒤 swing 차이 벌칙)
   - front_rear_contact_balance_penalty: -5 (앞뒤 contact 차이 벌칙)
   - simple_diagonal_coupling_reward: +2 (약한 trot 유도)
-- 성공 기준: 4발 모두 swing>0, front/rear gap 감소, diagonal_coupling>0, ep_len>850
+- 결과: 4발 swing 균형 개선 (gap 축소), 하지만 diagonal_coupling_raw=0 전 구간
+- 교훈: balance penalty로 균형은 잡히나, 교대 패턴(trot)은 자동 발생 안 함
+
+### V60.H: 대각선 교대 구조 직접 유도 (현재)
+- Resume from: `2026-04-06_23-22-03/model_24100.pt`
+- 핵심: diagonal_coupling 2→8 강화, balance penalty -5→-2 완화
+- 변경:
+  - diagonal_coupling: +2 → +8 (핵심 강화)
+  - feet_air_time: 8→5, foot_clearance: 3→2 (gait 완화)
+  - fr_swing/contact_balance: -5→-2 (balance 완화)
+  - rear_air_time: 0, rear_clearance: 0 (rear 전용 제거)
+- 성공 기준: diagonal_coupling_raw>0, 4발 swing>0, ep_len>900, 500 iter 판정
 
 ---
 

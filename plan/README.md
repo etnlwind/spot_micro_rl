@@ -423,7 +423,9 @@ feet_air_time reward가 1발만 들어도 보상을 주기 때문에, 가장 쉬
 
 - **V60.F** — 철학 전환: 정적 해를 이득 아니게. rear swing 폭발 성공(RL=0.78, RR=0.93), 하지만 front 고착(FL/FR 99% 접지). **한쪽만 유도→다른쪽 고착** 패턴 재확인.
 
-- **V60.G** — "한쪽만 들면 손해, 균형 있게 교대하면 이득". rear 보상 대폭 약화(6→1), 전역 clearance 복원(+3), front_rear_swing/contact_balance penalty(-5), simple_diagonal_coupling(+2). **진행 중.**
+- **V60.G** — front/rear pair balance + diagonal coupling. 4발 swing 균형 개선, 하지만 diagonal_coupling_raw=0 전 구간. balance는 잡히나 교대 패턴은 자동 발생 안 함.
+
+- **V60.H** — diagonal coupling 2→8 강화, balance penalty -5→-2 완화, rear 전용 보상 제거. 대각선 교대 구조 직접 유도. **진행 중.**
 
 ## 핵심 교훈
 
