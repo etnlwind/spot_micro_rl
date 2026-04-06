@@ -419,7 +419,9 @@ feet_air_time reward가 1발만 들어도 보상을 주기 때문에, 가장 쉬
 
 - **V60.D** — V60.C resume + static bias 약화 + gait incentive 강화. **no-go**: 앞다리만 swing(FL +97%, FR +182%), 뒷다리 완전 고착. FR 단독 과부상 발생.
 
-- **V60.E** — V60.D resume + rear 전용 clearance 보상(+6), front clearance 약화(6→3), static bias 완전 제거, 대칭 penalty 완화(-10→-6), yaw OFF. **진행 중.**
+- **V60.E** — V60.D resume + rear 전용 clearance 보상(+6), front clearance 약화(6→3), static bias 제거, 대칭 penalty 완화(-10→-6), yaw OFF. **no-go**: rear swing 여전히 미달 (RL 0.007, RR 0.013). rear 보상을 더 얹는 것만으로는 정적 해를 깨지 못함.
+
+- **V60.F** — 철학 전환: "rear를 더 밀자"→"정적 해가 더 이상 싸지 않게". lin_vel_x min 0.12, standing_height/joint_default 완전 제거, rear_feet_air_time 직접 보상(+6), front clearance OFF, 대칭 penalty -3. **진행 중.**
 
 ## 핵심 교훈
 

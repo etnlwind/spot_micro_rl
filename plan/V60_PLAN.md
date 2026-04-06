@@ -116,7 +116,21 @@ V60.E (rear swing 생성 집중, V60.D resume):
   - static bias 제거: contact_foot_vel=0, joint_default=-0.1, standing_height=1.0
   - 대칭 penalty 완화: -10 → -6
   - yaw OFF (ang_vel_z=0), standing_envs=0.0, min vel_x=0.05
-- 성공 기준: sw_RL>0.03, sw_RR>0.03, feet_air_time>=0, ep_len>900
+- 결과: no-go (RL swing 0.007, RR swing 0.013, 835 iter 플라토)
+- 교훈: rear 보상을 더 얹는 것만으로는 부족 — 정적 접지 해 자체가 여전히 더 싼 구조
+
+### V60.F: 정적 접지 해를 이득 아니게 만드는 구조 전환 (현재)
+- Resume from: `2026-04-06_21-27-33/model_16600.pt`
+- 철학 전환: "rear를 더 밀자" → "정적 해가 더 이상 싸지 않게"
+- 변경:
+  - lin_vel_x min: 0.05 → 0.12 (느린 정적 전진 불허)
+  - track_lin: 5 → 4 (정밀 추종보다 실제 전진)
+  - standing_height: 0.0, joint_default_pos: 0.0 (static bias 완전 제거)
+  - rear_feet_air_time_reward: +6 신규 (rear 비접촉 시간 직접 보상)
+  - foot_clearance(전체): 0.0 (front clearance OFF)
+  - 대칭 penalty: -6→-3, rear_lr: -5→-2
+  - yaw OFF, standing_envs=0.0
+- 성공 기준: sw_RL>0.02, sw_RR>0.02, rear_air_time>=0, ep_len>850
 
 ---
 
