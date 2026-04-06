@@ -295,13 +295,13 @@ penalty가 작동하고 있지만 양수 reward budget(~15/step)에 비해 크�
 ### 교훈
 - penalty weight는 양수 reward budget 대비 수치 검증 필수
 - -3.0은 양수 15 대비 한참 부족
-- Codex가 -8~-12를 권장했는데 보수적으로 -3.0을 선택한 것이 실수 (Claude 판단 오류)
+- 당시에는 penalty를 너무 보수적으로 잡았고, 그게 실수였다. 실제로는 `-8~-12` 수준의 강한 penalty가 필요했다.
 
 ### 판정
 **no-go** — 4300 iter에도 cr_RR 0.033
 
 ### 다음 단계
-Codex 권장 범위(-8~-12)를 신뢰하여 penalty 대폭 상향 → V60.C
+검증된 필요 범위(`-8~-12`)까지 penalty를 대폭 상향 → V60.C
 
 ---
 
@@ -310,12 +310,12 @@ Codex 권장 범위(-8~-12)를 신뢰하여 penalty 대폭 상향 → V60.C
 **Run:** `2026-04-06_16-46-38` | **iter 11300→13000 (1700 iter, V60.B resume)**
 
 ### 목적
-Codex 권장 -10으로 penalty를 상향하고, rear pair balance penalty를 추가하여 RR exploit을 즉시 교정한다.
+충분히 강한 수준인 `-10`으로 penalty를 상향하고, rear pair balance penalty를 추가하여 RR exploit을 즉시 교정한다.
 
 ### V60.B 대비 변경점
 | 항목 | V60.B | V60.C | 변경 이유 |
 |------|-------|-------|----------|
-| per_leg_contact_min | -3.0 | **-10.0** | 3.3x 상향 (Codex 권장) |
+| per_leg_contact_min | -3.0 | **-10.0** | 3.3x 상향 |
 | per_leg_excess_swing | -3.0 | **-10.0** | 3.3x 상향 |
 | rear_lr_balance | 없음 | **-5.0** | RL/RR pair 불균형 표적 (신규) |
 
@@ -348,7 +348,7 @@ Codex 권장 -10으로 penalty를 상향하고, rear pair balance penalty를 추
 RR exploit **완전 교정 성공**. 하지만 새 문제 발생: 4발 모두 99%+ 접지 (swing 2~4%). 로봇이 "발을 안 드는 게 가장 안전"이라는 새 local optimum을 찾음. diagonal_coupling=0 유지.
 
 ### 교훈
-- penalty weight는 Codex 권장 범위(-8~-12)를 신뢰해야 함
+- penalty weight는 reward budget과 경쟁 가능한 수준(`-8~-12`)까지 올려야 함
 - -3.0 → -10.0 상향이 즉각 효과 (100 iter)
 - 비대칭 교정 후 정적 접지 해로 전환하는 패턴 확인
 
@@ -555,7 +555,7 @@ front/rear pair balance penalty 도입 → V60.G
 
 **실패:** diagonal_coupling_raw가 전 구간(7500 iter) **0.000**. 교대 패턴은 자동 발생 안 함.
 
-**Codex 리뷰로 발견된 설계 결함:**
+**사후 리뷰로 발견된 설계 결함:**
 1. diagonal_coupling의 초기 구현이 contact ratio 유사성만 보상 → 4발 접지도 높은 점수
 2. balance penalty의 가장 쉬운 해가 "균형 있는 정지" (4발 접지면 차이=0)
 3. 수정: anti_phase + swing_gate 조건 추가 (정적 접지=0, 교대만 보상)
@@ -639,6 +639,153 @@ V60.G에서 달성한 4발 균형 swing 위에, **대각선 교대(trot) 패턴�
 
 ---
 
+## 다음 단계 설계: V60.I
+
+V60.H까지의 결과를 보면, 이제 문제는 "발을 더 들게 하자"가 아니다.
+
+이미 확인된 것:
+- 정적 접지 해는 깨졌다
+- 4발 swing은 생겼다
+- front/rear 한쪽만 고착되는 문제도 상당 부분 줄었다
+
+하지만 여전히:
+- `diagonal_coupling_raw = 0`
+
+즉 현재 남은 문제는
+**얼마나 움직이느냐**가 아니라
+**언제 어떤 다리가 움직여야 하느냐**이다.
+
+### 왜 V60.I가 필요한가
+
+V60.G와 V60.H는 모두
+"reward만 잘 주면 diagonal alternation도 자연스럽게 생기지 않을까?"
+라는 가정 위에 있었다.
+
+하지만 실제 결과는 다르게 나왔다.
+
+- V60.G: 4발 swing 균형은 개선, diagonal 0
+- V60.H: 4발 swing 분산은 더 좋아짐, diagonal 0
+
+즉 reward만으로는 policy가
+**시간 구조를 스스로 발명하지 못하고 있다**는 뜻이다.
+
+그래서 V60.I의 핵심 철학은:
+
+> **이제는 alternation의 "리듬 기준"을 environment가 직접 제공해야 한다.**
+
+### V60.I 목표
+
+- `balanced swing`을 `alternating diagonal gait`로 바꾸기
+- 성공 기준:
+  - `diagonal_coupling_raw > 0`
+  - `ep_len > 900`
+  - `track_lin` 급락 없음
+  - 특정 다리 고착 재발 없음
+
+### 핵심 설계 변경
+
+#### 1. phase clock 도입
+
+Observation에 다음과 같은 phase 정보를 추가한다.
+
+```text
+sin(phase)
+cos(phase)
+```
+
+여기서 `phase`는 gait cycle의 진행도를 나타낸다.
+
+핵심은:
+- policy가 "지금이 어느 다리를 들어야 하는 위상인지"를 알 수 있어야 한다는 점이다.
+- 지금까지는 reward만 주고, 그 타이밍 자체는 policy가 알아서 발명해야 했다.
+
+#### 2. diagonal alternation을 phase-aligned reward로 바꿈
+
+현재 `diagonal_coupling`은 결과적으로 "잘 교대했는지"만 본다.
+V60.I에서는 여기에 더해,
+phase에 따라 **어떤 diagonal pair가 swing이어야 하는지**를 직접 보상한다.
+
+예시:
+- phase A: `FL + RR` swing, `FR + RL` stance
+- phase B: `FR + RL` swing, `FL + RR` stance
+
+즉 reward는:
+- "교대했는가"뿐 아니라
+- **"올바른 위상에서 올바른 pair가 swing했는가"**
+까지 본다.
+
+#### 3. 기존 reward 구조는 크게 유지
+
+유지:
+- `track_lin_vel_xy_exp = 4.0`
+- `forward_velocity = 5.0`
+- `feet_air_time = 5.0`
+- `foot_clearance = 2.0`
+- `per_leg_contact_min = -3.0`
+- `per_leg_excess_swing = -3.0`
+- `fr_swing_balance = -2.0`
+- `fr_contact_balance = -2.0`
+- `diagonal_coupling = 8.0` 유지 또는 `10.0` 검토
+
+계속 0 유지:
+- `rear_air_time`
+- `rear_clearance`
+- `standing_height`
+- `joint_default_pos`
+- `contact_foot_velocity`
+
+즉:
+- 기존에 만든 "4발 모두 swing하는 바닥"은 유지하고
+- 그 위에 **시간 구조만 새로 얹는다**
+
+### command/action
+
+V60.I에서는 reward만 바꾸지 않고, command는 최대한 고정한다.
+
+```text
+lin_vel_x = (0.12, 0.3)
+ang_vel_z = 0.0
+rel_standing_envs = 0.0
+action.scale = 0.25
+```
+
+이유:
+- 지금 문제는 command가 약해서가 아니라
+- **구조가 없어서** 생기는 문제이기 때문이다
+
+### resume 지점
+
+V60.I는 `V60.G`가 아니라 **`V60.H` 결과에서 resume**하는 것이 맞다.
+
+이유:
+- V60.H가 이미 4발 swing 분산을 더 밀어놨기 때문
+- 이제 필요한 건 "더 들게 만들기"가 아니라 "구조화"다
+
+권장:
+- 최신 런 [2026-04-07_05-13-42](/mnt/d/project/spot_micro_rl/logs/rsl_rl/spot_micro_flat/2026-04-07_05-13-42)
+- 다만 너무 뒤 checkpoint보다, tracking이 덜 무너진 **중간 checkpoint**를 잡는 것이 좋다
+- 보수적으로는 `model_25500.pt` 전후가 1차 후보
+
+### 1차 판정 기준
+
+`500 iter` 1차 판정:
+- `diagonal_coupling_raw > 0`
+- 네 다리 `swing_time` 모두 유지
+- `ep_len > 900`
+- `track_lin > 2.7`
+
+실패 시:
+- reward만 더 조정하는 것이 아니라
+- **phase-conditioned contact target**을 더 직접적으로 도입해야 한다
+
+### 한 줄 요약
+
+V60.I는
+`발을 더 들게 만드는 버전`이 아니라,
+**이미 생긴 4발 swing에 시간 구조(phase)를 넣어 diagonal alternation으로 바꾸려는 버전**이다.
+
+---
+
 ## 핵심 발견 요약
 
 ### 1. Curriculum 복원 버그 (V59.D)
@@ -654,7 +801,7 @@ V60.G에서 달성한 4발 균형 swing 위에, **대각선 교대(trot) 패턴�
 
 ### 4. Penalty Budget 검증 필수 (V60.B→C)
 - -3.0은 양수 15 대비 부족, -10이 필요
-- Codex 권장 범위를 신뢰해야 함
+- 보수적 추정보다 실제 reward budget에 맞는 강한 penalty가 필요함
 
 ### 5. 한쪽 유도 → 다른쪽 고착 (V60.D, V60.F)
 - front clearance만 → 앞다리만 흔듦
