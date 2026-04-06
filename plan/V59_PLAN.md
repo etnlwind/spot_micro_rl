@@ -1,8 +1,28 @@
-# V59 Plan: Stand-First to Small-Walk Transition
+# V59 실험 보고서: Stand-First 학습과 첫 보행 전환 설계
 
 > 작성/갱신: 2026-04-04 ~ 2026-04-05
 > 현재 코드 truth 기준 버전: `V59.C`
 > 현재 성공 런 해석: `2026-04-05_11-24-24`는 실질적으로 `V59.B`
+
+---
+
+## 배경
+
+V59의 출발점은 단순했다.
+
+> **보행을 배우기 전에, 로봇이 먼저 확실히 배워야 하는 것은 무엇인가?**
+
+그 시점까지의 관찰로는, SpotMicro가 곧바로 gait를 배우는 것보다 먼저 필요한 것은:
+- 4발 접지 유지
+- 좋은 기본자세 유지
+- 수평 유지
+- 발을 불필요하게 들지 않기
+- 작은 움직임에도 안 무너지기
+
+즉 `V59`는 처음부터 "걷게 만들자"가 아니라,
+**잘 서는 정책을 먼저 만들고, 그 위에 아주 작은 movement를 얹을 수 있는지 확인하는 stand-first 트랙**이었다.
+
+이 문서는 그 과정을 기록한다.
 
 ---
 
@@ -30,6 +50,90 @@ V59.B 성격 런은 성공:
 - `V59.C` 하나만으로 사용자가 원하는 "자연스러운 첫 걸음"이 바로 나올 가능성은 낮다.
 - 이유는 현재 정책이 이미 `4발 접지 + quasi-static drift` local optimum에 강하게 수렴했기 때문이다.
 - 따라서 이후 단계는 한 번에 해결하는 단일 버전이 아니라, local optimum을 순차적으로 깨는 multi-stage curriculum이어야 한다.
+
+---
+
+## 쉽게 보는 V59 전체 흐름
+
+### V59에서 실제로 확인된 것
+
+1. contact sensor가 정확해야 stand reward가 의미를 가진다
+2. toe contact dropout을 1-step 즉사로 보면 학습이 바로 망가진다
+3. 잘 서는 것과 잘 걷는 것은 전혀 다른 문제다
+4. 먼저 `stand manifold`를 만들고, 그 다음 작은 movement를 얹어야 한다
+
+즉 V59는 "보행 완성 버전"이 아니라,
+**보행을 배우기 전에 반드시 안정화해야 할 바닥을 만드는 버전**이었다.
+
+### 버전별 한 줄 요약
+
+| 버전 | 왜 만들었나 | 뭘 보려고 했나 | 실제 결과 | 왜 다음 단계로 갔나 |
+|------|-------------|----------------|-----------|----------------------|
+| V59.B | 좋은 기본자세를 안정적으로 유지하게 하려고 | 4발 접지, 수평 유지, 발 들기 억제가 되는지 | stand manifold 형성 성공, small drift 가능 | 잘 서는 건 성공했지만 swing은 없음 |
+| V59.C | 서기 정책 위에 아주 작은 전진만 얹어보려고 | stand manifold를 깨지 않고 movement가 가능한지 | 보수적 small-forward 전환 가능, 실제 gait는 아님 | gait emergence를 만들기엔 too stand-biased |
+| V59.D~G | 이후 gait 전환 설계안 | toe-off → controlled swing → pattern → small walk | 계획 단계 | V60로 넘어가며 본격 보행 탐색으로 확장 |
+
+### V59를 읽는 방법
+
+V59는 `V60`처럼 많은 실제 버전 실행 로그가 있는 문서가 아니다.
+이 문서에는 다음 세 층이 같이 들어 있다.
+
+1. **실제로 성공한 stand 런 (`V59.B`)**
+2. **그 다음 보수적 전환 코드 (`V59.C`)**
+3. **아직 실행 전인 `V59.D~G` 설계안**
+
+즉 이 문서는 절반은 실험 결과 문서이고,
+절반은 "**그 다음 gait로 어떻게 넘어갈 것인가**"에 대한 설계 문서다.
+
+---
+
+## 실험에서 보는 핵심 지표와 해석법
+
+### 안정성
+- `ep_len`
+  - 한 episode가 얼마나 오래 살아남았는지
+- `time_out`
+  - 끝까지 살아남은 비율
+- `feet_lifted`
+  - 발 들기 termination 비율
+- `base_contact`, `bad_orientation`
+  - 몸통 접촉 / 자세 붕괴 종료 비율
+
+즉 V59에서는 먼저:
+- `ep_len`이 길고
+- `time_out`이 높고
+- `feet_lifted`, `base_contact`, `bad_orientation`이 낮아야
+stand task 성공으로 본다.
+
+### 접지와 자세
+- `feet_on_ground`
+  - 4발 접지가 얼마나 잘 유지되는지
+- `standing_height`
+  - 목표 높이를 유지하는지
+- `flat_orientation_bonus`
+  - 몸체 수평을 잘 유지하는지
+- `joint_default_pos`
+  - 기본자세에서 얼마나 크게 벗어나는지
+
+즉 V59에서 좋은 정책은
+**많이 움직이는 정책**이 아니라
+**좋은 기본자세를 크게 버리지 않고 버티는 정책**이다.
+
+### gait 관련 지표
+- `contact_ratio_*`
+- `swing_time_*`
+- `clearance_*`
+- `diagonal_coupling_raw`
+
+이 지표들은 V59에서 "좋은 보행"의 성공 기준이라기보다,
+**아직 gait가 안 생겼다는 증거**를 보여주는 보조 지표로 쓰였다.
+
+즉 V59는
+- `contact_ratio ≈ 1`
+- `swing_time ≈ 0`
+- `diagonal_coupling = 0`
+상태여도,
+stand manifold 형성이 목적이었다면 성공일 수 있다.
 
 ---
 
@@ -150,6 +254,14 @@ diagonal_coupling_raw:     0.0000
 - `stand + quasi-static drift`는 맞음
 - `실제 swing gait`는 아직 아님
 
+쉽게 말하면:
+- `V59.B`는 "잘 걷는다"가 아니라
+- **"안정적으로 잘 서고, 조금 움직여도 안 무너진다"**의 성공이다
+
+왜 중요했나:
+- 이후 모든 보행 실험은 결국
+  이 stand manifold를 깨지 않고 어떻게 확장할지의 문제였기 때문이다
+
 ### 2.1 direct resume 결과
 
 `model_1400.pt`에서 headless direct resume를 수행했을 때,
@@ -173,6 +285,11 @@ latest checkpoint:       model_2600.pt
 - direct resume 이후에도 stability는 그대로 유지됨
 - `feet_lifted=0`, `time_out=1.0`이 계속 유지되어 stand manifold는 매우 견고함
 - 하지만 gait 쪽은 여전히 quasi-static drift 수준으로 남아 있음
+
+결론:
+- `V59.B`는 reproducible한 stand 정책이라고 볼 수 있다
+- 즉 "우연히 한 번 잘 된 런"이 아니라,
+  resume 이후에도 유지되는 기반 정책이었다
 
 ---
 
@@ -218,6 +335,12 @@ latest checkpoint:       model_2600.pt
 - 미끄럼 최소화
 - quasi-static body drift
 로 수렴
+
+즉 `V59.B`의 성공은 설계상 자연스러운 결과다.
+이 reward는 애초에
+"발을 드는 정책"이 아니라
+"발을 안 들고도 잘 버티는 정책"
+을 만들기 위해 설계되었기 때문이다.
 
 ---
 
@@ -289,6 +412,15 @@ contact_foot_velocity_penalty:  -3.0
 - 하지만 실제 gait emergence를 만들기엔 아직 too stand-biased
 - 즉 **보행 전환이라기보다 stand-preserving micro-forward 단계**
 
+쉽게 말하면:
+- `V59.C`는 "첫 걸음"을 만드는 버전이라기보다
+- **서기 정책을 깨지 않고 살짝 움직이게 하는 버전**이다
+
+왜 이게 중요했나:
+- 당시에는 이 정도 보수적 전환이 필요하다고 봤지만,
+- 이후 실제 결과를 보면 V59 계열만으로 gait를 만들기엔 한계가 크다는 점이 드러났고,
+- 그래서 본격 보행 탐색은 결국 `V60 from-scratch`로 넘어가게 된다.
+
 ---
 
 ## 6. 이후 단계: V59.D~G 설계
@@ -297,6 +429,11 @@ contact_foot_velocity_penalty:  -3.0
 - 아래 설계는 **보행 완성 보장** 설계가 아니다.
 - 대신 현재 local optimum을 깨기 위해 필요한 단계를 충분히 나눈 설계다.
 - RL/contact locomotion 특성상 결과는 비결정적이므로, 각 단계를 통과 기준으로 평가하며 넘어가야 한다.
+
+즉 이 구간은 "이미 실행해서 성공/실패가 확정된 로그"가 아니라,
+V59 관점에서 생각한 **보수적 gait curriculum 설계안**이다.
+
+나중에 실제로는 이 철학 일부가 V60에서 더 급진적인 형태로 실험되었다.
 
 ### 6.1 목표
 
@@ -502,3 +639,19 @@ V59.G 성공:
 6. V59.C 하나로 원하는 보행이 바로 나오진 않을 가능성이 높다.
 7. 버전 naming은 V59.B(성공 런) -> V59.C(보수적 전환) -> V59.D/E/F/G(진짜 swing/gait curriculum)로 보는 것이 가장 자연스럽다.
 ```
+
+---
+
+## 최종 요약
+
+V59는 한 문장으로 정리하면 이렇다.
+
+> **보행을 잘하게 만든 버전이 아니라, 보행 전에 반드시 필요한 stand manifold를 실제로 만들어낸 버전이다.**
+
+그리고 그 과정에서 확인한 것은:
+- contact sensor와 contact dropout 설계가 얼마나 중요한지
+- 잘 서는 것과 잘 걷는 것이 얼마나 다른지
+- 너무 일찍 gait를 기대하면 오히려 local optimum만 강화될 수 있다는 점이었다
+
+즉 V59는 V60의 출발점이자,
+`"먼저 무엇을 안정화해야 하는가"`에 대한 답을 만든 단계였다.
