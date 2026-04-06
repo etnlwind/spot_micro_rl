@@ -130,7 +130,19 @@ V60.E (rear swing 생성 집중, V60.D resume):
   - foot_clearance(전체): 0.0 (front clearance OFF)
   - 대칭 penalty: -6→-3, rear_lr: -5→-2
   - yaw OFF, standing_envs=0.0
-- 성공 기준: sw_RL>0.02, sw_RR>0.02, rear_air_time>=0, ep_len>850
+- 결과: 뒷다리 swing 폭발(RL=0.78, RR=0.93), 하지만 앞다리 고착(FL/FR 99% 접지)
+- 교훈: 한쪽만 유도하면 다른쪽 고착 — front/rear 균형 설계 필요
+
+### V60.G: Front/Rear Pair Balance + Diagonal Coupling (현재)
+- Resume from: `2026-04-06_22-30-44/model_17600.pt`
+- 철학: "한쪽만 들면 손해, 균형 있게 교대하면 이득"
+- 변경:
+  - rear_air_time: 6→1, rear_clearance: 6→1 (rear 과다 억제)
+  - foot_clearance: 0→3 (전역 복원)
+  - front_rear_swing_balance_penalty: -5 (앞뒤 swing 차이 벌칙)
+  - front_rear_contact_balance_penalty: -5 (앞뒤 contact 차이 벌칙)
+  - simple_diagonal_coupling_reward: +2 (약한 trot 유도)
+- 성공 기준: 4발 모두 swing>0, front/rear gap 감소, diagonal_coupling>0, ep_len>850
 
 ---
 

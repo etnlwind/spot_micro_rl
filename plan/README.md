@@ -421,7 +421,9 @@ feet_air_time reward가 1발만 들어도 보상을 주기 때문에, 가장 쉬
 
 - **V60.E** — V60.D resume + rear 전용 clearance 보상(+6), front clearance 약화(6→3), static bias 제거, 대칭 penalty 완화(-10→-6), yaw OFF. **no-go**: rear swing 여전히 미달 (RL 0.007, RR 0.013). rear 보상을 더 얹는 것만으로는 정적 해를 깨지 못함.
 
-- **V60.F** — 철학 전환: "rear를 더 밀자"→"정적 해가 더 이상 싸지 않게". lin_vel_x min 0.12, standing_height/joint_default 완전 제거, rear_feet_air_time 직접 보상(+6), front clearance OFF, 대칭 penalty -3. **진행 중.**
+- **V60.F** — 철학 전환: 정적 해를 이득 아니게. rear swing 폭발 성공(RL=0.78, RR=0.93), 하지만 front 고착(FL/FR 99% 접지). **한쪽만 유도→다른쪽 고착** 패턴 재확인.
+
+- **V60.G** — "한쪽만 들면 손해, 균형 있게 교대하면 이득". rear 보상 대폭 약화(6→1), 전역 clearance 복원(+3), front_rear_swing/contact_balance penalty(-5), simple_diagonal_coupling(+2). **진행 중.**
 
 ## 핵심 교훈
 

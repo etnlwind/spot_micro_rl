@@ -2255,6 +2255,62 @@ def rear_feet_air_time_reward(
     return reward_per_leg.sum(dim=1) * vel_gate
 
 
+def front_rear_swing_balance_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Front pair vs Rear pair의 swing 비율 차이를 penalty.
+
+    front_swing = mean(1-cr_FL, 1-cr_FR), rear_swing = mean(1-cr_RL, 1-cr_RR).
+    |front_swing - rear_swing|가 크면 penalty → 한쪽만 swing하는 패턴 방지.
+    """
+    cr = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )  # (num_envs, 4): FL, FR, RL, RR
+    front_swing = (1.0 - cr[:, 0] + 1.0 - cr[:, 1]) / 2.0
+    rear_swing = (1.0 - cr[:, 2] + 1.0 - cr[:, 3]) / 2.0
+    return torch.abs(front_swing - rear_swing)
+
+
+def front_rear_contact_balance_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Front pair vs Rear pair의 contact 비율 차이를 penalty.
+
+    한쪽 pair가 완전 접지(99%) + 다른쪽 완전 swing(1%)인 극단 해 방지.
+    """
+    cr = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )
+    front_contact = (cr[:, 0] + cr[:, 1]) / 2.0
+    rear_contact = (cr[:, 2] + cr[:, 3]) / 2.0
+    return torch.abs(front_contact - rear_contact)
+
+
+def simple_diagonal_coupling_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """대각선 쌍(FL-RR, FR-RL)의 contact 상태 동기화를 보상.
+
+    trot에서 FL과 RR은 동시 swing/동시 stance.
+    동기화 = 둘 다 접지 or 둘 다 swing → +1, 하나만 접지 → 0.
+    두 대각 쌍의 평균.
+    """
+    cr = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )  # FL(0), FR(1), RL(2), RR(3)
+    # 대각 쌍 A: FL-RR, 대각 쌍 B: FR-RL
+    # 동기화 = 1 - |cr_FL - cr_RR| (둘이 같으면 1, 다르면 0)
+    pair_a = 1.0 - torch.abs(cr[:, 0] - cr[:, 3])
+    pair_b = 1.0 - torch.abs(cr[:, 1] - cr[:, 2])
+    return (pair_a + pair_b) / 2.0
+
+
 def per_leg_contact_min_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),

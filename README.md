@@ -95,7 +95,8 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 | V60.C | penalty -10.0 + rear balance -5.0 | **RR 교정 성공** (cr_RR 0.03→0.997) |
 | V60.D | gait incentive 강화 + static bias 약화 | no-go: 앞다리만 swing, 뒷다리 고착 |
 | V60.E | rear 전용 clearance + static bias 제거 | no-go: rear swing 미달 (0.007/0.013) |
-| V60.F | 정적 해 구조 전환 + rear air_time 직접 보상 | **진행 중** |
+| V60.F | 정적 해 구조 전환 + rear air_time 직접 보상 | rear swing 폭발, front 고착 (앞뒤 역전) |
+| V60.G | front/rear pair balance + diagonal coupling | **진행 중** |
 
 핵심 설정:
 - **URDF 질량**: 1.41kg (원본 5.3kg에서 실물 기준 수정)
