@@ -2159,6 +2159,66 @@ def foot_clearance_reward(
     return base_reward * vel_gate
 
 
+def per_leg_contact_min_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    min_contact_ratio: float = 0.15,
+) -> torch.Tensor:
+    """4발 중 가장 적게 접지하는 다리의 contact_ratio가 min_contact_ratio 미만이면 penalty.
+
+    RR만 98% 공중에 띄우는 등 한 다리 비사용 exploit를 직접 벌함.
+    전체 std 대신 min값만 보므로, 정상 보행의 순간적 비대칭은 건드리지 않음.
+    """
+    contact_ratio = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )  # (num_envs, num_feet)
+    min_ratio = contact_ratio.min(dim=1).values  # (num_envs,)
+    # min_contact_ratio 미만인 만큼 penalty (0이면 penalty 없음)
+    gap = torch.clamp(min_contact_ratio - min_ratio, min=0.0)
+    return gap
+
+
+def per_leg_excess_swing_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    max_swing_ratio: float = 0.70,
+) -> torch.Tensor:
+    """한 다리의 swing 비율(=1-contact_ratio)이 max_swing_ratio를 초과하면 penalty.
+
+    RR swing_time=0.98 같은 영구 공중부양을 직접 타격.
+    정상 보행에서 swing은 보통 30-50%이므로 70% threshold는 안전한 마진.
+    """
+    contact_ratio = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )  # (num_envs, num_feet)
+    swing_ratio = 1.0 - contact_ratio  # (num_envs, num_feet)
+    # threshold 초과분의 합 (다리별로 독립)
+    excess = torch.clamp(swing_ratio - max_swing_ratio, min=0.0)
+    return excess.sum(dim=1)  # 여러 다리가 동시에 초과하면 누적
+
+
+def rear_left_right_balance_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Rear pair(RL, RR)의 contact ratio 차이를 penalty.
+
+    현재 병변이 RR에 집중돼 있으므로 전체 4발 std보다 rear pair만 표적.
+    정상 보행에서도 순간 차이는 있으나, RL=0.975 vs RR=0.033 같은
+    극단적 비대칭은 이 penalty로 직접 벌함.
+    """
+    contact_ratio = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )  # (num_envs, num_feet) — 순서: FL, FR, RL, RR
+    # rear pair: index 2=RL, 3=RR
+    rl_ratio = contact_ratio[:, 2]
+    rr_ratio = contact_ratio[:, 3]
+    return torch.abs(rl_ratio - rr_ratio)
+
+
 def excessive_contact_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
@@ -5364,30 +5424,59 @@ def restore_curriculum_snapshot(env, state: dict) -> bool:
             setattr(env, key, value)
             restored_keys.append(key)
 
-    # Restore reward weights
+    # Restore reward weights / termination params
+    # 버전이 변경된 resume에서는 env_cfg 설정이 우선해야 하므로 skip
+    from spot_micro_rl.tasks.manager_based.spot_micro_rl.spot_micro_rl_env_cfg import TRAIN_VERSION
+    saved_iteration = state.get("_iteration", -1)
     weights = state.get("_reward_weights", {})
-    weight_count = 0
-    for name, w in weights.items():
-        try:
-            cfg = env.reward_manager.get_term_cfg(name)
-            cfg.weight = w
-            env.reward_manager.set_term_cfg(name, cfg)
-            weight_count += 1
-        except Exception:
-            pass
-
-    # Restore termination params (CaT)
     term_params = state.get("_termination_params", {})
-    term_count = 0
-    for name, params in term_params.items():
-        try:
-            cfg = env.termination_manager.get_term_cfg(name)
-            for k, v in params.items():
-                cfg.params[k] = v
-            env.termination_manager.set_term_cfg(name, cfg)
-            term_count += 1
-        except Exception:
-            pass
+
+    # 현재 env_cfg의 reward weight를 먼저 수집
+    current_weights = {}
+    try:
+        for name in env.reward_manager._term_names:
+            cfg = env.reward_manager.get_term_cfg(name)
+            current_weights[name] = cfg.weight
+    except Exception:
+        pass
+
+    # 저장된 weight와 현재 weight가 다르면 = 버전 변경 resume
+    version_changed = False
+    for name, w in weights.items():
+        if name in current_weights and abs(current_weights[name] - w) > 1e-6:
+            version_changed = True
+            break
+    # 현재 env_cfg에만 있는 새 reward가 있으면 = 버전 변경
+    new_rewards = set(current_weights.keys()) - set(weights.keys())
+    if new_rewards:
+        version_changed = True
+
+    if version_changed:
+        weight_count = 0
+        term_count = 0
+        print(f"[Curriculum] Version change detected (new rewards: {new_rewards})")
+        print(f"[Curriculum] Reward weight/termination restore SKIPPED (env_cfg {TRAIN_VERSION} priority)")
+    else:
+        weight_count = 0
+        for name, w in weights.items():
+            try:
+                cfg = env.reward_manager.get_term_cfg(name)
+                cfg.weight = w
+                env.reward_manager.set_term_cfg(name, cfg)
+                weight_count += 1
+            except Exception:
+                pass
+
+        term_count = 0
+        for name, params in term_params.items():
+            try:
+                cfg = env.termination_manager.get_term_cfg(name)
+                for k, v in params.items():
+                    cfg.params[k] = v
+                env.termination_manager.set_term_cfg(name, cfg)
+                term_count += 1
+            except Exception:
+                pass
 
     alpha_count = sum(1 for k in _CRR_ALPHA_KEYS if k in state)
     print(f"[Curriculum] Snapshot restored: {alpha_count} alphas, "
