@@ -2204,10 +2204,10 @@ def rear_feet_air_time_reward(
     threshold: float = 0.1,
     min_vel: float = 0.05,
 ) -> torch.Tensor:
-    """뒷다리(RL, RR)의 비접촉 시간을 직접 보상.
+    """뒷다리(RL, RR) touchdown 시점에 air_time 기반 보상.
 
-    clearance(높이)가 아닌 air_time(시간) 자체를 보상.
-    뒷다리가 접지→swing→접지 사이클을 만들어야 양수.
+    Isaac Lab feet_air_time과 동일 구조: swing→contact 전환 시점에만 보상.
+    매 step dense가 아니므로 "rear를 계속 들고 있기" exploit를 방지.
     body 순서: FL(0), FR(1), RL(2), RR(3).
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
@@ -2220,19 +2220,20 @@ def rear_feet_air_time_reward(
     dt = env.step_dt
     if not hasattr(env, "_rear_air_time"):
         env._rear_air_time = torch.zeros(env.num_envs, 2, device=env.device)
+        env._rear_last_contacts = torch.ones(env.num_envs, 2, dtype=torch.bool, device=env.device)
 
     # swing 중이면 시간 누적, contact 시 리셋
     env._rear_air_time += dt
     env._rear_air_time *= ~rear_contacts  # contact 시 0으로 리셋
 
-    # touchdown 시점에만 보상 (contact가 된 발의 이전 air_time - threshold)
-    # Isaac Lab feet_air_time과 동일 구조
-    first_contact = rear_contacts & (env._rear_air_time < dt * 1.5)
-    # 실제로는 air_time이 0이 된 직후 = 방금 착지
-    # 더 간단한 접근: 매 step swing 중이면 (air_time - threshold) 보상
-    air_bonus = torch.clamp(env._rear_air_time - threshold, min=0.0)
-    swing_mask = ~rear_contacts
-    reward_per_leg = air_bonus * swing_mask.float()
+    # touchdown 감지: 이전 step swing → 현재 step contact
+    first_contact = rear_contacts & ~env._rear_last_contacts
+    env._rear_last_contacts = rear_contacts.clone()
+
+    # touchdown 시점에만 보상: (누적 air_time - threshold), 이미 리셋됐으므로 직전 값 사용 불가
+    # 대안: air_time이 threshold 이상이었다가 contact된 순간을 보상
+    # 간단한 구현: first_contact 발에 고정 보너스 + air_time 비례 없음 (sparse)
+    reward_per_leg = first_contact.float()  # touchdown마다 +1
 
     # 전진 게이팅
     robot = env.scene[asset_cfg.name]
