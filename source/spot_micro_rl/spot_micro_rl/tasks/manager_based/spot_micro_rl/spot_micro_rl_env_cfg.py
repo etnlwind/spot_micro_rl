@@ -3394,12 +3394,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                         "sensor_cfg": toe_sensor_i,
                         "asset_cfg": SceneEntityCfg("robot"),
                         "contact_threshold": 1.0,
-                        "base_frequency": 2.0,
                         "vel_scale": 4.0,
                         "min_frequency": 1.0,
                         "max_frequency": 4.0,
                         "duty_factor": 0.55,
                         "min_vel": 0.05,
+                        "command_name": "base_velocity",
                     },
                 )
 
