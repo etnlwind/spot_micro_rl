@@ -69,18 +69,30 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 
 ---
 
-## 4. 현재 상태 (V59)
+## 4. 현재 상태 (V60)
 
-**서기 학습 성공** (2026-04-05)
+**서기 성공 → From-Scratch 보행 학습 → 비대칭 Exploit 교정 중** (2026-04-06)
 
-현재 버전 V59에서 로봇이 4발 접지 + 수평 유지 + 목표 높이 유지하면서 안정적으로 서 있는 policy를 학습했습니다.
+### V59: 서기 학습 성공
 
 | 지표 | 결과 |
 |------|------|
-| 생존율 (timeout) | 98% |
-| 4발 접지율 | 98% |
-| 수평 유지율 | 98% |
-| 목표 높이 달성 | 91% |
+| 생존율 (timeout) | 100% |
+| 4발 접지율 | 99.9% |
+| 수평 유지율 | 99.8% |
+| 목표 높이 달성 | 96% |
+
+### V59.D: 서기→보행 전환 시도 (실패)
+- 서기 정책이 너무 강해 보행으로 전환 불가
+- curriculum 복원 버그 발견 (저장된 reward weight가 env_cfg를 덮어씀)
+
+### V60: From-Scratch 보행 학습
+
+| 버전 | 결과 | 문제 |
+|------|------|------|
+| V60.A | 생존 100%, tracking 96%, 약간 전진 | RR(오른뒤) 비대칭 exploit — 1발만 98% 공중 |
+| V60.B | penalty -3.0 추가 | 효과 부족 (cr_RR 2%→3.3%) |
+| V60.C | penalty -10.0 + rear balance -5.0 | **진행 중** |
 
 핵심 설정:
 - **URDF 질량**: 1.41kg (원본 5.3kg에서 실물 기준 수정)
@@ -88,33 +100,30 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 - **ImplicitActuator** stiffness=20, damping=0.5
 - **서보 기준**: STS3215 (30kg·cm, 12V)
 
-다음 단계: 서기 체크포인트에서 보행 학습으로 전환
-
 ### 추천 읽기 순서
 
 1. **이 README**
-2. **`plan/V59_PLAN.md`** (현재 active 버전)
-3. `plan/README.md`
-4. 필요 시 과거 히스토리 문서
-   - `plan/V58_PLAN.md`, `plan/V43-V53_HISTORY.md`
+2. **`plan/V60_PLAN.md`** (현재 active 버전)
+3. `plan/V59_PLAN.md` (서기 학습 상세)
+4. `plan/README.md` (V1~V59 전체 히스토리)
 
 ---
 
 ## 5. 현재 유효한 접근 / 폐기된 접근
 
 ### 현재 유효한 접근
-- **stand-first**: 서기를 먼저 배우고 보행으로 전환
-- **실물 기준 URDF**: 질량, 서보 스펙을 실물에 맞춤
+- **from-scratch 보행**: 서기 선행 없이 처음부터 동적 균형+보행을 동시에 학습
+- **실물 기준 URDF**: 질량 1.41kg, STS3215 서보 스펙
 - **merge_fixed_joints=False**: toe contact reporting 보장
-- **contact 기반 reward**: feet_on_ground, feet_lift_penalty, contact_foot_velocity_penalty
-- **consecutive termination**: 미세 진동은 무시, 연속 이탈만 판정
+- **per-leg exploit 교정**: 비대칭 사용을 직접 penalty (contact_min, excess_swing, rear_balance)
+- **curriculum 복원 자동 skip**: 버전 변경 resume 시 env_cfg 우선
 - standard locomotion reward 구조 우선
 - success criteria에 deployability 포함
 
 ### 현재 주의 깊게 다루는 접근
 - ImplicitActuator → DCMotor 전환 (Sim2Real)
-- effort_limit_sim 도입 시점
-- 서기 → 보행 전환 시 reward 구조 변경
+- penalty weight는 reward budget 대비 수치 검증 필수
+- 서기→보행 전환 vs from-scratch (from-scratch가 더 효과적으로 확인됨)
 
 ### 현재 폐기 또는 경계하는 접근
 - merge_fixed_joints=True (contact reporting 불가)
@@ -122,6 +131,7 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 - action_scale과 zero-action stability 미검증 상태로 학습 시작
 - reward patch 무한 누적
 - stride/timeout만으로 성공 판정
+- **서기→보행 resume 전환** (정적 균형이 동적 균형으로 전이 안 됨)
 
 ---
 
@@ -203,18 +213,23 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 
 ---
 
-## 11. V59 핵심 교훈
+## 11. V59~V60 핵심 교훈
 
-이번 V59에서 얻은 핵심 교훈입니다.
-
+### V59 교훈
 1. **URDF 질량은 반드시 실물 기준 검증** — 원본 5.3kg은 실물 1.7kg의 3배
 2. **merge_fixed_joints=True는 contact reporting을 깨뜨림** — SpotMicro에서는 반드시 False
-3. **zero-action stand test를 gating test로** — 학습 전에 물리 안정성 먼저 확인
-4. **contact termination은 consecutive 판정 필수** — 1 step 판정은 진동으로 즉사
-5. **서기를 먼저 배워야** — 표준 locomotion으로 바로 가면 주저앉음/넘어짐이 최적해
+3. **contact termination은 consecutive 판정 필수** — 1 step 판정은 진동으로 즉사
+4. **curriculum 복원 버그** — resume 시 저장된 reward weight가 env_cfg를 덮어씀
+
+### V60 교훈
+5. **서기→보행 resume 전환은 비효율** — 정적 균형(서기)과 동적 균형(보행)은 완전히 다른 스킬
+6. **from-scratch가 resume보다 나음** — V60.A가 V59.D보다 훨씬 좋은 결과
+7. **1발 exploit** — feet_air_time이 1발만 들어도 보상 → 최소 비용 exploit 발생
+8. **penalty는 reward budget 대비 수치 검증 필수** — -3.0은 양수 15에 비해 부족, -10 이상 필요
+9. **exploit 교정은 간접(penalty)보다 직접(표적 타격)이 효과적** — rear pair balance가 전체 std보다 정확
 
 ---
 
 ## 12. 한 줄 요약
 
-**spot_micro_rl은 SpotMicro 기반 4족보행 RL 연구 프로젝트이며, “서기 → 보행”의 순서로 실기체 배치 가능한 policy를 만드는 것을 목표로, 코드와 실험 문서를 함께 축적하는 저장소입니다.**
+**spot_micro_rl은 SpotMicro 기반 4족보행 RL 연구 프로젝트이며, 실물 기반 물리 설정 위에서 from-scratch 보행 학습과 exploit 교정을 통해 실기체 배치 가능한 4족 보행 policy를 만드는 것을 목표로 합니다.**

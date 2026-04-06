@@ -4,8 +4,8 @@
 각 버전이 **무엇을 해결하려던 실험이었는지**를 짧고 쉽게 정리하면서도,
 전체 맥락이 보이도록 해설을 덧붙인 요약 문서이다.
 
-> 최신 active family는 `V59`.
-> **서기 학습 성공** (timeout 98%, 4발 접지 98%). 다음은 보행 전환.
+> 최신 active family는 `V60`.
+> **서기 성공(V59) → from-scratch 보행(V60) → RR 비대칭 exploit 교정 중(V60.C)**.
 
 ---
 
@@ -363,7 +363,8 @@ V55까지의 77개 heuristic 체계를 폐기하고, Isaac Lab 표준 locomotion
 - **V54**: phase를 주연으로 올렸더니 baseline 없는 handoff collapse 확인
 - **V55**: baseline을 다시 살린 뒤 phase를 probe로 얹는 전략으로 재설계
 - **V56~V58**: 77개 heuristic 폐기, Isaac Lab 표준 locomotion 구조로 전환. 표준 11개 reward + ImplicitActuator로 locomotion bootstrap 성공, drag propulsion 해결 진행 중
-- **V59**: URDF 질량 실물 기준 수정(5.3→1.41kg), merge_fixed_joints=False(contact 정상화), STS3215 서보 스펙 반영, **서기 학습 성공** (timeout 98%, 4발 접지 98%, 수평 유지 98%)
+- **V59**: URDF 질량 실물 기준 수정(5.3→1.41kg), merge_fixed_joints=False(contact 정상화), STS3215 서보 스펙 반영, **서기 학습 성공** (timeout 100%, 4발 접지 99.9%, 수평 유지 99.8%)
+- **V60**: 서기→보행 전환 실패 → from-scratch 보행 학습 → RR 비대칭 exploit 발견 → penalty 강화로 교정 중
 
 ---
 
@@ -389,8 +390,46 @@ V58까지의 locomotion 시도에서 반복된 실패(주저앉음, 넘어짐, �
 
 ---
 
+# 12기 — From-Scratch 보행 + Exploit 교정 시대 (V60)
+
+## 이 시기의 핵심
+
+V59에서 서기 학습에 성공했지만, 서기→보행 resume 전환(V59.D)이 실패했다.
+정적 균형(서기)과 동적 균형(보행)은 완전히 다른 스킬이라는 결론으로,
+from-scratch 보행 학습(V60)으로 전환했다.
+
+> **서기를 먼저 배울 필요 없이, 처음부터 동적 균형과 보행을 동시에 학습시키자.**
+
+그런데 V60.A에서 새로운 문제가 발생했다.
+
+> **로봇이 RR(오른쪽 뒷발) 하나만 98% 공중에 띄우고 나머지 3발로 서 있는 exploit를 찾았다.**
+
+이것은 V24~V35 시대의 "3족 exploit"과 본질적으로 같은 문제이다.
+feet_air_time reward가 1발만 들어도 보상을 주기 때문에, 가장 쉬운 최적해를 찾은 것이다.
+
+## 버전별 한 줄 요약
+
+- **V59.D** — 서기 마스터(model_2700)에서 보행 reward로 resume. 서기 정책이 너무 강해 전환 불가. curriculum 복원 버그 발견 (저장된 reward weight가 env_cfg를 덮어씀).
+
+- **V60.A** — from-scratch 보행. 생존 100%, tracking 96% 달성. 하지만 RR 비대칭 exploit 발생 (cr_RR=0.02, 나머지 0.89~0.94). diagonal_coupling=0 (보행 패턴 없음).
+
+- **V60.B** — V60.A resume + per_leg_contact_min(-3.0), per_leg_excess_swing(-3.0) penalty 추가. 효과 부족 (cr_RR 0.02→0.033, 3000 iter). penalty가 양수 reward budget(~15/step)에 비해 약함(-1.4/step).
+
+- **V60.C** — V60.B resume + penalty 대폭 상향: per_leg_contact_min(-10), per_leg_excess_swing(-10), rear_lr_balance(-5, 신규). 예상 penalty -8.55/step. **진행 중.**
+
+## 핵심 교훈
+
+- 서기→보행 resume 전환은 비효율 — 정적 균형이 동적 균형으로 전이 안 됨 (V59.D)
+- from-scratch가 resume보다 나음 — V60.A가 V59.D보다 훨씬 좋은 결과 (V60.A)
+- feet_air_time이 1발만 들어도 보상 → 최소 비용 1발 exploit (V60.A)
+- penalty weight는 reward budget 대비 수치 검증 필수 — -3.0은 부족, -10 이상 필요 (V60.B)
+- 전체 std penalty보다 표적(rear pair balance)이 효과적 (V60.C)
+- curriculum 파일이 resume 시 env_cfg를 덮어쓰는 silent bug — 자동 skip 로직 필요 (V59.D)
+
+---
+
 # 최종 한 문장
 
 이 프로젝트의 흐름은,
 
-> **"걷게 만들기"에서 시작해, 꼼수를 막고, reward를 줄이고, 표준으로 전환하고, URDF 질량과 contact 센서의 근본 문제를 해결한 뒤, "서기를 먼저 배우자"는 원칙 아래 4발 접지 + 수평 유지 서기 학습에 성공한 상태에서, 보행 전환을 준비하는 단계에 와 있다.**
+> **"걷게 만들기"에서 시작해, 꼼수를 막고, reward를 줄이고, 표준으로 전환하고, URDF 질량과 contact 센서의 근본 문제를 해결한 뒤, 서기를 배우고, from-scratch 보행으로 전환해 4발 비대칭 exploit를 직접 교정하는 단계에 와 있다.**
