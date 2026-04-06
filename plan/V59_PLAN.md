@@ -139,6 +139,48 @@ stand manifold 형성이 목적이었다면 성공일 수 있다.
 
 ## 1. 코드 Truth
 
+### 1.0 URDF 물리 설정
+
+V59의 stand-first 접근이 성공한 핵심 이유 중 하나는 **URDF 물리 파라미터를 실물에 맞게 수정**한 것이다.
+
+#### 질량 수정
+
+원본 SpotMicro URDF(mike4192)의 총 질량은 **5.3kg**이었다. 이것은 실물 SpotMicro(~1.7kg)의 약 3배에 해당한다. 원본 URDF의 질량은 개발자 본인이 "guesses"라고 명시한 추정값이었다.
+
+| 부위 | 원본 질량 | 수정 후 | 비고 |
+|------|----------|---------|------|
+| base_link | inertial 태그 없음 | **0.50kg** | PhysX는 inertial 없으면 1.0kg 기본값 부여 |
+| lidar_link (SBC 탑재부) | 0.50kg | **0.17kg** | |
+| front/rear_link (몸체) | 0.20kg × 2 | **0.07kg** × 2 | |
+| shoulder_link × 4 | 0.10kg × 4 | **0.04kg** × 4 | |
+| leg_link × 4 | 0.15kg × 4 | **0.05kg** × 4 | |
+| foot_link × 4 | 0.10kg × 4 | **0.04kg** × 4 | |
+| toe_link × 4 | 0.05kg × 4 | **0.02kg** × 4 | |
+| **합계** | **~5.3kg** | **~1.41kg** | 실물 기준 |
+
+핵심 발견:
+- **base_link에 `<inertial>` 태그가 없었다** → PhysX가 자동으로 1.0kg을 부여. 이것만으로 전체 질량의 19%를 차지.
+- 질량이 3배이면 같은 stiffness에서 서보 부하가 3배 → 주저앉거나 관절 collapse 발생.
+- 수정 후 ImplicitActuator stiffness=20으로 안정적 서기 가능.
+
+URDF 파일: [`assets/robots/spot_micro/spotmicroai_realistic_inertia.urdf`](/mnt/d/project/spot_micro_rl/assets/robots/spot_micro/spotmicroai_realistic_inertia.urdf)
+
+#### 서보 스펙
+
+실물 SpotMicro에 사용되는 서보: **STS3215** (12V, 30kg·cm = 3.0 Nm, ~19 rad/s)
+
+현재 학습에서는 ImplicitActuator를 사용하므로 effort_limit을 걸지 않지만, 향후 Sim2Real 전환 시 DCMotor(effort_limit=3.0Nm)로 전환해야 한다.
+
+주의: URDF의 `<limit velocity="100">`은 PhysX maxJointVelocity이며, DCMotor의 velocity_limit과 같은 값이면 bang-bang 진동이 발생한다. 운용 속도의 2배 이상으로 설정해야 한다.
+
+#### merge_fixed_joints
+
+SpotMicro URDF에서 `toe_link`는 `foot_link`에 fixed joint로 연결되어 있다. Isaac Lab의 `merge_fixed_joints=True`(기본값)를 사용하면 toe_link가 foot_link에 합쳐지면서 **toe contact reporting이 완전히 불가능**해진다 (모든 body 0N).
+
+`merge_fixed_joints=False`로 설정해야 toe_link가 독립 body로 남아 contact sensor가 정상 작동한다.
+
+이 설정은 V59 이후 모든 버전에서 유지된다.
+
 ### 1.1 Robot / Actuator
 
 현재 [spot_micro.py](/mnt/d/project/spot_micro_rl/source/spot_micro_rl/spot_micro_rl/robots/spot_micro.py) 기준:
@@ -161,9 +203,10 @@ Init pose:
 ```
 
 핵심:
-- `merge_fixed_joints=False`가 현재 contact reporting 정상화의 필수 조건
+- `merge_fixed_joints=False`가 현재 contact reporting 정상화의 필수 조건 (상세는 1.0 참조)
 - `toe_link` contact가 실제로 들어오며, `True`일 때는 이 경로가 깨졌음
 - 현재는 stand-first bootstrap을 위해 `Implicit + stiffness=20`을 사용 중
+- URDF 질량은 실물 기준 1.41kg으로 수정됨 (상세는 1.0 참조)
 
 ### 1.2 Reward / Termination 핵심
 
