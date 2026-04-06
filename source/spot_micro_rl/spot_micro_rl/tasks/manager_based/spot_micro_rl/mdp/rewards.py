@@ -2295,20 +2295,37 @@ def simple_diagonal_coupling_reward(
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
     contact_threshold: float = 1.0,
 ) -> torch.Tensor:
-    """대각선 쌍(FL-RR, FR-RL)의 contact 상태 동기화를 보상.
+    """대각선 교대(trot) 패턴을 보상.
 
-    trot에서 FL과 RR은 동시 swing/동시 stance.
-    동기화 = 둘 다 접지 or 둘 다 swing → +1, 하나만 접지 → 0.
-    두 대각 쌍의 평균.
+    trot = 한 대각 쌍(FL-RR)이 swing일 때 다른 쌍(FR-RL)이 stance, 그리고 교대.
+    보상 조건:
+    1. 대각 쌍 내 동기화: FL-RR 비슷, FR-RL 비슷 (각 쌍이 함께 움직임)
+    2. 대각 쌍 간 반대: pair_A와 pair_B가 다른 상태 (교대)
+    3. 실제 움직임: 4발 모두 접지인 정적 해 배제 (최소 swing 요구)
+
+    4발 접지 시: sync=1이지만 anti_phase=0, swing_gate=0 → 보상 0.
     """
     cr = _contact_ratio(
         env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
     )  # FL(0), FR(1), RL(2), RR(3)
-    # 대각 쌍 A: FL-RR, 대각 쌍 B: FR-RL
-    # 동기화 = 1 - |cr_FL - cr_RR| (둘이 같으면 1, 다르면 0)
-    pair_a = 1.0 - torch.abs(cr[:, 0] - cr[:, 3])
-    pair_b = 1.0 - torch.abs(cr[:, 1] - cr[:, 2])
-    return (pair_a + pair_b) / 2.0
+
+    # 대각 쌍 평균 contact ratio
+    pair_a_cr = (cr[:, 0] + cr[:, 3]) / 2.0  # FL-RR
+    pair_b_cr = (cr[:, 1] + cr[:, 2]) / 2.0  # FR-RL
+
+    # 1. 쌍 내 동기화 (둘이 비슷하면 1)
+    sync_a = 1.0 - torch.abs(cr[:, 0] - cr[:, 3])
+    sync_b = 1.0 - torch.abs(cr[:, 1] - cr[:, 2])
+    sync = (sync_a + sync_b) / 2.0
+
+    # 2. 쌍 간 반대 (두 쌍이 다른 상태면 1)
+    anti_phase = torch.abs(pair_a_cr - pair_b_cr)
+
+    # 3. 실제 swing 존재 (4발 평균 swing > 5%면 gate=1)
+    mean_swing = 1.0 - cr.mean(dim=1)
+    swing_gate = torch.clamp(mean_swing / 0.05, 0.0, 1.0)
+
+    return sync * anti_phase * swing_gate
 
 
 def per_leg_contact_min_penalty(
