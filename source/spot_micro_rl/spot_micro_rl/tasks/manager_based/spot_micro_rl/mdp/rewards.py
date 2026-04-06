@@ -2159,6 +2159,43 @@ def foot_clearance_reward(
     return base_reward * vel_gate
 
 
+def rear_foot_clearance_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_clearance: float = 0.02,
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """뒷다리(RL, RR)만 대상으로 한 foot clearance 보상.
+
+    front는 이미 swing이 나오고 있으므로, rear만 직접 유도.
+    body 순서: FL(0), FR(1), RL(2), RR(3).
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)
+
+    asset = env.scene[foot_cfg.name]
+    foot_z = asset.data.body_pos_w[:, foot_cfg.body_ids, 2]
+    env_origins_z = env.scene.env_origins[:, 2].unsqueeze(1)
+    foot_height = foot_z - env_origins_z
+
+    # rear만 선택 (index 2=RL, 3=RR)
+    rear_swing = ~contacts[:, 2:4]
+    rear_height = foot_height[:, 2:4]
+    clearance_score = torch.clamp(rear_height / target_clearance, 0.0, 1.0)
+    swing_reward = clearance_score * rear_swing.float()
+
+    num_swing = rear_swing.float().sum(dim=1).clamp(min=1.0)
+    base_reward = swing_reward.sum(dim=1) / num_swing
+
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return base_reward * vel_gate
+
+
 def per_leg_contact_min_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),

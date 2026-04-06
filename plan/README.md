@@ -417,7 +417,9 @@ feet_air_time reward가 1발만 들어도 보상을 주기 때문에, 가장 쉬
 
 - **V60.C** — V60.B resume + penalty 대폭 상향: per_leg_contact_min(-10), per_leg_excess_swing(-10), rear_lr_balance(-5, 신규). **RR 비대칭 exploit 완전 교정** (cr_RR 0.033→0.997, ~100 iter). 새 문제: 4발 모두 정적 접지 (swing 2~4%).
 
-- **V60.D** — V60.C resume + static bias 약화(contact_foot_velocity -1→-0.3, joint_default_pos -0.5→-0.2) + gait incentive 강화(feet_air_time 4→8, foot_clearance 2→6). 초기 결과: 앞다리 swing +97%/+182%, 뒷다리 고착. **진행 중.**
+- **V60.D** — V60.C resume + static bias 약화 + gait incentive 강화. **no-go**: 앞다리만 swing(FL +97%, FR +182%), 뒷다리 완전 고착. FR 단독 과부상 발생.
+
+- **V60.E** — V60.D resume + rear 전용 clearance 보상(+6), front clearance 약화(6→3), static bias 완전 제거, 대칭 penalty 완화(-10→-6), yaw OFF. **진행 중.**
 
 ## 핵심 교훈
 

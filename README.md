@@ -93,7 +93,8 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 | V60.A | 생존 100%, tracking 96%, 약간 전진 | RR(오른뒤) 비대칭 exploit — 1발만 98% 공중 |
 | V60.B | penalty -3.0 추가 | 효과 부족 (cr_RR 2%→3.3%) |
 | V60.C | penalty -10.0 + rear balance -5.0 | **RR 교정 성공** (cr_RR 0.03→0.997) |
-| V60.D | gait incentive 강화 + static bias 약화 | 앞다리 swing +97%, 뒷다리 고착. **진행 중** |
+| V60.D | gait incentive 강화 + static bias 약화 | no-go: 앞다리만 swing, 뒷다리 고착 |
+| V60.E | rear 전용 clearance + static bias 제거 | **진행 중** |
 
 핵심 설정:
 - **URDF 질량**: 1.41kg (원본 5.3kg에서 실물 기준 수정)

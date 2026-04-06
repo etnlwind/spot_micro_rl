@@ -37,6 +37,14 @@ V60.D (static bias 약화 + gait incentive 강화, V60.C resume):
     - 앞다리 swing 증가: FL +97%, FR +182%
     - 뒷다리 여전히 고착: RL/RR swing < 0.003
     - diagonal_coupling = 0.000
+  - 판정: no-go (앞다리만 swing, 뒷다리 고착)
+
+V60.E (rear swing 생성 집중, V60.D resume):
+  - rear_foot_clearance_reward: +6 신규 (뒷다리 전용)
+  - foot_clearance: 6→3 (front 약화)
+  - static bias 제거: contact_foot_vel=0, joint_default=-0.1, height=1.0
+  - 대칭 penalty 완화: -10→-6
+  - yaw OFF, standing_envs=0.0, min vel=0.05
   - 진행 중...
 ```
 
@@ -88,20 +96,27 @@ V60.D (static bias 약화 + gait incentive 강화, V60.C resume):
 - 새 문제: 4발 모두 정적 접지 (swing 2~4%, diagonal_coupling=0)
 - 교훈: penalty weight는 Codex 권장 범위(-8~-12)를 신뢰해야 함
 
-### V60.D: Static Bias 약화 + Gait Incentive 강화 (현재)
+### V60.D: Static Bias 약화 + Gait Incentive 강화 (no-go)
 - Run: `2026-04-06_19-14-18` (model_13000 resume)
 - 변경:
-  - feet_air_time: +4 → +8 (발 들기 강력 유도)
-  - foot_clearance: +2 → +6 (의미 있는 높이로 들기)
-  - contact_foot_velocity: -1.0 → -0.3 (static bias 약화)
-  - joint_default_pos: -0.5 → -0.2 (관절 자유도 확대)
-  - 대칭성 penalty 유지
-- 초기 결과 (112 iter):
-  - 앞다리 swing 증가: FL 0.040→0.079 (+97%), FR 0.022→0.062 (+182%)
-  - 뒷다리 고착: RL/RR swing < 0.003
-  - diagonal_coupling: 0.000
-  - ep_len: 1000, forward_velocity: 2.9
-- 진행 중...
+  - feet_air_time: +4 → +8, foot_clearance: +2 → +6
+  - contact_foot_velocity: -1.0 → -0.3, joint_default_pos: -0.5 → -0.2
+- 결과 (2817 iter):
+  - 앞다리 swing 대폭 증가: FL 0.040→0.218, FR 0.022→0.338
+  - 뒷다리 완전 고착: RL/RR swing 0.003~0.006
+  - FR 단독 과부상 (FL의 1.5~2배)
+  - diagonal_coupling: 0.000, penalty 합산 -2.41 (증가 중)
+- 교훈: 전체 gait incentive는 이미 swing이 나오는 앞다리만 강화, 뒷다리 전용 유도 필요
+
+### V60.E: Rear Swing 생성 집중 (현재)
+- Resume from: `2026-04-06_19-14-18/model_15800.pt`
+- 변경:
+  - rear_foot_clearance_reward: +6 신규 (RL/RR 전용 보상)
+  - foot_clearance: 6 → 3 (front 약화)
+  - static bias 제거: contact_foot_vel=0, joint_default=-0.1, standing_height=1.0
+  - 대칭 penalty 완화: -10 → -6
+  - yaw OFF (ang_vel_z=0), standing_envs=0.0, min vel_x=0.05
+- 성공 기준: sw_RL>0.03, sw_RR>0.03, feet_air_time>=0, ep_len>900
 
 ---
 
@@ -143,7 +158,15 @@ V60.D (static bias 약화 + gait incentive 강화, V60.C resume):
 - diagonal_coupling이 0에서 벗어남
 - ep_len > 900, RR 비사용 재발 없음
 
-### V60.D 실패 시 다음 단계
-- 앞다리만 swing + 뒷다리 고착 지속 → 뒷다리 전용 swing reward 추가 (V60.E)
-- front_rear_swing_diff penalty 도입
-- 또는 뒷다리 contact_ratio가 threshold 이상이면 penalty
+### V60.D 결과 → no-go → V60.E로 전환
+
+### V60.E 성공 기준
+- swing_time_rl > 0.03
+- swing_time_rr > 0.03
+- feet_air_time >= 0
+- ep_len > 900
+
+### V60.E 실패 시 다음 단계
+- rear swing 여전히 고착 → rear contact_ratio 상한 penalty 추가
+- 또는 front_rear_swing_diff 직접 penalty
+- 또는 rear 전용 feet_air_time (rear만 계산)
