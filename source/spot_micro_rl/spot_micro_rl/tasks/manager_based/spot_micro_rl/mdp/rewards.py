@@ -2222,18 +2222,30 @@ def rear_feet_air_time_reward(
         env._rear_air_time = torch.zeros(env.num_envs, 2, device=env.device)
         env._rear_last_contacts = torch.ones(env.num_envs, 2, dtype=torch.bool, device=env.device)
 
-    # swing 중이면 시간 누적, contact 시 리셋
+    # swing 중이면 시간 누적
     env._rear_air_time += dt
     env._rear_air_time *= ~rear_contacts  # contact 시 0으로 리셋
 
     # touchdown 감지: 이전 step swing → 현재 step contact
     first_contact = rear_contacts & ~env._rear_last_contacts
-    env._rear_last_contacts = rear_contacts.clone()
 
-    # touchdown 시점에만 보상: (누적 air_time - threshold), 이미 리셋됐으므로 직전 값 사용 불가
-    # 대안: air_time이 threshold 이상이었다가 contact된 순간을 보상
-    # 간단한 구현: first_contact 발에 고정 보너스 + air_time 비례 없음 (sparse)
-    reward_per_leg = first_contact.float()  # touchdown마다 +1
+    # touchdown 시점에 보상: 리셋 전 air_time을 _rear_last_air_time에서 복원
+    # air_time은 이미 리셋됐으므로, 이전 step의 값을 별도 저장
+    if not hasattr(env, "_rear_last_air_time"):
+        env._rear_last_air_time = torch.zeros(env.num_envs, 2, device=env.device)
+
+    # touchdown 시 보상 = clamp(last_air_time - threshold, 0)
+    # threshold 미만의 짧은 떨림은 보상 0
+    air_bonus = torch.clamp(env._rear_last_air_time - threshold, min=0.0)
+    reward_per_leg = air_bonus * first_contact.float()
+
+    # 다음 step을 위해 현재 air_time 저장 (리셋 전 값 = swing 중 누적값)
+    # contact 시 이미 0이므로, swing 중일 때만 갱신
+    swing_mask = ~rear_contacts
+    env._rear_last_air_time = torch.where(swing_mask, env._rear_air_time + dt, env._rear_last_air_time)
+    # contact된 순간 last_air_time은 유지 (touchdown 보상에 사용 후 다음 swing에서 덮어씌워짐)
+
+    env._rear_last_contacts = rear_contacts.clone()
 
     # 전진 게이팅
     robot = env.scene[asset_cfg.name]
