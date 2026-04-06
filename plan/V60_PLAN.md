@@ -1,6 +1,6 @@
 # V60 Plan: From-Scratch Walking + Asymmetry Exploit Correction
 
-> 작성/갱신: 2026-04-06
+> 작성/갱신: 2026-04-07
 > 현재 코드 truth 기준 버전: `V60.H`
 > 기반: V59.B 서기 마스터 → V59.D 보행 전환 실패 → V60 from-scratch
 
@@ -40,11 +40,25 @@ V60.D (static bias 약화 + gait incentive 강화, V60.C resume):
   - 판정: no-go (앞다리만 swing, 뒷다리 고착)
 
 V60.E (rear swing 생성 집중, V60.D resume):
-  - rear_foot_clearance_reward: +6 신규 (뒷다리 전용)
-  - foot_clearance: 6→3 (front 약화)
-  - static bias 제거: contact_foot_vel=0, joint_default=-0.1, height=1.0
-  - 대칭 penalty 완화: -10→-6
-  - yaw OFF, standing_envs=0.0, min vel=0.05
+  - rear_foot_clearance_reward: +6, static bias 제거, 대칭 penalty -6
+  - 결과: no-go (RL swing 0.007, RR swing 0.013, 플라토)
+
+V60.F (정적 접지 해 구조 전환, V60.E resume):
+  - lin_vel_x min 0.12, standing_height=0, joint_default=0
+  - rear_feet_air_time: +6, front clearance OFF
+  - 결과: rear swing 폭발 (RL=0.78, RR=0.93), 하지만 front 고착 (FL/FR 99% 접지)
+  - 교훈: 한쪽만 유도하면 다른쪽 고착
+
+V60.G (front/rear pair balance + diagonal coupling, V60.F resume):
+  - fr_swing/contact_balance: -5, diagonal_coupling: +2
+  - rear 보상 약화 (6→1), 전역 clearance 복원 (+3)
+  - 결과: 4발 swing 균형 개선, diagonal_coupling_raw=0 전 구간
+  - 교훈: balance penalty로 균형은 잡히나 교대 패턴은 자동 발생 안 함
+
+V60.H (대각선 교대 직접 유도, V60.G model_24100 resume):
+  - diagonal_coupling: 2→8 (핵심 드라이버)
+  - feet_air_time: 8→5, foot_clearance: 3→2, balance: -5→-2
+  - rear 전용 보상 제거
   - 진행 중...
 ```
 
@@ -108,7 +122,7 @@ V60.E (rear swing 생성 집중, V60.D resume):
   - diagonal_coupling: 0.000, penalty 합산 -2.41 (증가 중)
 - 교훈: 전체 gait incentive는 이미 swing이 나오는 앞다리만 강화, 뒷다리 전용 유도 필요
 
-### V60.E: Rear Swing 생성 집중 (현재)
+### V60.E: Rear Swing 생성 집중 (no-go)
 - Resume from: `2026-04-06_19-14-18/model_15800.pt`
 - 변경:
   - rear_foot_clearance_reward: +6 신규 (RL/RR 전용 보상)
@@ -119,7 +133,7 @@ V60.E (rear swing 생성 집중, V60.D resume):
 - 결과: no-go (RL swing 0.007, RR swing 0.013, 835 iter 플라토)
 - 교훈: rear 보상을 더 얹는 것만으로는 부족 — 정적 접지 해 자체가 여전히 더 싼 구조
 
-### V60.F: 정적 접지 해를 이득 아니게 만드는 구조 전환 (현재)
+### V60.F: 정적 접지 해를 이득 아니게 만드는 구조 전환 (부분 성공)
 - Resume from: `2026-04-06_21-27-33/model_16600.pt`
 - 철학 전환: "rear를 더 밀자" → "정적 해가 더 이상 싸지 않게"
 - 변경:
@@ -133,7 +147,7 @@ V60.E (rear swing 생성 집중, V60.D resume):
 - 결과: 뒷다리 swing 폭발(RL=0.78, RR=0.93), 하지만 앞다리 고착(FL/FR 99% 접지)
 - 교훈: 한쪽만 유도하면 다른쪽 고착 — front/rear 균형 설계 필요
 
-### V60.G: Front/Rear Pair Balance + Diagonal Coupling (현재)
+### V60.G: Front/Rear Pair Balance + Diagonal Coupling (부분 성공)
 - Resume from: `2026-04-06_22-30-44/model_17600.pt`
 - 철학: "한쪽만 들면 손해, 균형 있게 교대하면 이득"
 - 변경:
@@ -177,7 +191,17 @@ V60.E (rear swing 생성 집중, V60.D resume):
 - RR 교정 후 4발 모두 99%+ 접지, swing 2~4%
 - feet_air_time/foot_clearance 강화로 앞다리만 swing 증가
 - 뒷다리는 여전히 고착 → front-rear 비대칭 새 패턴 발생
-- 교훈: 전체 gait incentive만으로는 뒷다리가 안 깨짐, 뒷다리 전용 유도 필요 가능성
+
+### 한쪽 유도 → 다른쪽 고착 패턴 (V60.D~F)
+- front clearance만 주면 → 앞다리만 흔듦 (V60.D)
+- rear clearance만 주면 → 뒷다리만 흔듦 (V60.F)
+- 교훈: pair 전용 보상은 반대쪽 고착을 유발. 균형 설계 필수
+
+### Balance vs 교대 (V60.G→H)
+- front/rear balance penalty(-5)로 4발 swing 균형은 개선 (V60.G)
+- 하지만 diagonal_coupling_raw=0 전 구간 — 교대 패턴은 자동 발생 안 함
+- balance penalty만으로는 "균형 있는 정지"도 최적해가 됨
+- 교훈: 교대(alternation)는 직접 보상해야 함, 균형만으로는 부족
 
 ---
 
@@ -201,13 +225,20 @@ V60.E (rear swing 생성 집중, V60.D resume):
 - RL swing 0.007, RR swing 0.013 (835 iter 플라토)
 - rear 보상을 더 얹는 것만으로는 정적 해를 깨지 못함
 
-### V60.F 성공 기준
-- swing_time_rl > 0.02
-- swing_time_rr > 0.02
-- rear_air_time >= 0
-- ep_len > 850
+### V60.F 결과 → 부분 성공 → V60.G로 전환
+- rear swing 폭발 (RL=0.78, RR=0.93), front 고착 (FL/FR 99% 접지)
 
-### V60.F 실패 시 다음 단계
-- 정적 해 여전히 유지 → rear contact_ratio 상한 penalty (과접지 벌칙)
-- 또는 front_rear_swing_diff 직접 penalty
-- 또는 from-scratch V61 (reward 구조 근본 재설계)
+### V60.G 결과 → 부분 성공 → V60.H로 전환
+- 4발 swing 균형 개선, diagonal_coupling_raw=0
+
+### V60.H 성공 기준
+- diagonal_coupling_raw > 0
+- 4발 모두 swing > 0
+- ep_len > 900
+- track_lin이 24100 대비 크게 붕괴하지 않음
+- 500 iter 1차 판정
+
+### V60.H 실패 시 다음 단계
+- diagonal_coupling_raw 여전히 0 → reward 구조 변경 (phase clock 도입 검토)
+- 4발 swing 붕괴 → balance penalty 복원
+- 또는 from-scratch V61 (CPG/phase clock 기반 근본 재설계)

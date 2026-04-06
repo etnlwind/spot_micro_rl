@@ -436,6 +436,9 @@ feet_air_time reward가 1발만 들어도 보상을 주기 때문에, 가장 쉬
 - 전체 std penalty보다 표적(rear pair balance)이 효과적 (V60.C)
 - curriculum 파일이 resume 시 env_cfg를 덮어쓰는 silent bug — 자동 skip 로직 필요 (V59.D)
 - 전체 gait incentive만으로는 뒷다리가 안 깨짐 — front만 swing하는 새 비대칭 발생 (V60.D)
+- 한쪽 pair 전용 보상은 반대쪽 고착 유발 — front→rear 고착, rear→front 고착 (V60.D/F)
+- balance penalty만으로는 교대 패턴 미발생 — "균형 있는 정지"도 최적해 (V60.G)
+- 교대(alternation)는 직접 보상 필요 — anti-phase + swing_gate 조건 필수 (V60.H)
 
 ---
 
@@ -443,4 +446,4 @@ feet_air_time reward가 1발만 들어도 보상을 주기 때문에, 가장 쉬
 
 이 프로젝트의 흐름은,
 
-> **"걷게 만들기"에서 시작해, 꼼수를 막고, reward를 줄이고, 표준으로 전환하고, URDF 질량과 contact 센서의 근본 문제를 해결한 뒤, 서기를 배우고, from-scratch 보행으로 전환해 4발 비대칭 exploit를 직접 교정하는 단계에 와 있다.**
+> **"걷게 만들기"에서 시작해, 꼼수를 막고, reward를 줄이고, 표준으로 전환하고, URDF 질량과 contact 센서의 근본 문제를 해결한 뒤, 서기를 배우고, from-scratch 보행으로 전환해 비대칭 exploit를 교정하고, 4발 균형 swing을 달성한 후 대각선 교대(trot) 패턴 형성을 시도하는 단계에 와 있다.**

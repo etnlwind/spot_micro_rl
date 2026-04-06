@@ -232,6 +232,9 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 7. **1발 exploit** — feet_air_time이 1발만 들어도 보상 → 최소 비용 exploit 발생
 8. **penalty는 reward budget 대비 수치 검증 필수** — -3.0은 양수 15에 비해 부족, -10 이상 필요
 9. **exploit 교정은 간접(penalty)보다 직접(표적 타격)이 효과적** — rear pair balance가 전체 std보다 정확
+10. **한쪽 pair 전용 보상은 반대쪽 고착 유발** — front만 유도→rear 고착, rear만 유도→front 고착 (V60.D/F)
+11. **balance penalty만으로는 교대 패턴 미발생** — "균형 있는 정지"도 최적해가 됨 (V60.G)
+12. **교대(alternation)는 직접 보상 필요** — diagonal coupling에 anti-phase + swing_gate 조건 필수 (V60.H)
 
 ---
 
