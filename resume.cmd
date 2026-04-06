@@ -3,8 +3,8 @@ setlocal
 
 set "PROJECT_DIR=D:\project\spot_micro_rl"
 set "LOG_DIR=%PROJECT_DIR%\logs\rsl_rl\spot_micro_flat"
-set "RUN=2026-04-06_10-51-10"
-set "CHECKPOINT=model_11300.pt"
+set "RUN=2026-04-06_16-46-38"
+set "CHECKPOINT=model_13000.pt"
 set "NUM_ENVS=4096"
 set "MAX_ITER=8000"
 set "MODE=--headless"

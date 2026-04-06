@@ -364,7 +364,7 @@ V55까지의 77개 heuristic 체계를 폐기하고, Isaac Lab 표준 locomotion
 - **V55**: baseline을 다시 살린 뒤 phase를 probe로 얹는 전략으로 재설계
 - **V56~V58**: 77개 heuristic 폐기, Isaac Lab 표준 locomotion 구조로 전환. 표준 11개 reward + ImplicitActuator로 locomotion bootstrap 성공, drag propulsion 해결 진행 중
 - **V59**: URDF 질량 실물 기준 수정(5.3→1.41kg), merge_fixed_joints=False(contact 정상화), STS3215 서보 스펙 반영, **서기 학습 성공** (timeout 100%, 4발 접지 99.9%, 수평 유지 99.8%)
-- **V60**: 서기→보행 전환 실패 → from-scratch 보행 학습 → RR 비대칭 exploit 발견 → penalty 강화로 교정 중
+- **V60**: 서기→보행 전환 실패 → from-scratch 보행 학습 → RR 비대칭 exploit 교정 성공(V60.C) → 정적 접지 해 타파 중(V60.D, 앞다리 swing 시작)
 
 ---
 
@@ -415,7 +415,9 @@ feet_air_time reward가 1발만 들어도 보상을 주기 때문에, 가장 쉬
 
 - **V60.B** — V60.A resume + per_leg_contact_min(-3.0), per_leg_excess_swing(-3.0) penalty 추가. 효과 부족 (cr_RR 0.02→0.033, 3000 iter). penalty가 양수 reward budget(~15/step)에 비해 약함(-1.4/step).
 
-- **V60.C** — V60.B resume + penalty 대폭 상향: per_leg_contact_min(-10), per_leg_excess_swing(-10), rear_lr_balance(-5, 신규). 예상 penalty -8.55/step. **진행 중.**
+- **V60.C** — V60.B resume + penalty 대폭 상향: per_leg_contact_min(-10), per_leg_excess_swing(-10), rear_lr_balance(-5, 신규). **RR 비대칭 exploit 완전 교정** (cr_RR 0.033→0.997, ~100 iter). 새 문제: 4발 모두 정적 접지 (swing 2~4%).
+
+- **V60.D** — V60.C resume + static bias 약화(contact_foot_velocity -1→-0.3, joint_default_pos -0.5→-0.2) + gait incentive 강화(feet_air_time 4→8, foot_clearance 2→6). 초기 결과: 앞다리 swing +97%/+182%, 뒷다리 고착. **진행 중.**
 
 ## 핵심 교훈
 
@@ -425,6 +427,7 @@ feet_air_time reward가 1발만 들어도 보상을 주기 때문에, 가장 쉬
 - penalty weight는 reward budget 대비 수치 검증 필수 — -3.0은 부족, -10 이상 필요 (V60.B)
 - 전체 std penalty보다 표적(rear pair balance)이 효과적 (V60.C)
 - curriculum 파일이 resume 시 env_cfg를 덮어쓰는 silent bug — 자동 skip 로직 필요 (V59.D)
+- 전체 gait incentive만으로는 뒷다리가 안 깨짐 — front만 swing하는 새 비대칭 발생 (V60.D)
 
 ---
 

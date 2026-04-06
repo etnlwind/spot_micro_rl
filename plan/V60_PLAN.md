@@ -1,7 +1,7 @@
 # V60 Plan: From-Scratch Walking + Asymmetry Exploit Correction
 
 > 작성/갱신: 2026-04-06
-> 현재 코드 truth 기준 버전: `V60.C`
+> 현재 코드 truth 기준 버전: `V60.D`
 > 기반: V59.B 서기 마스터 → V59.D 보행 전환 실패 → V60 from-scratch
 
 ---
@@ -27,8 +27,17 @@ V60.C (penalty 대폭 상향, V60.B resume):
   - per_leg_contact_min: -3 -> -10
   - per_leg_excess_swing: -3 -> -10
   - rear_lr_balance: 신규 -5
-  - 예상 penalty 합계: -8.55/step (vs 양수 ~15/step)
-  - 검증 중...
+  - 결과: RR 비대칭 exploit 완전 교정 (cr_RR 0.033→0.997)
+  - 하지만 4발 모두 정적 접지 (swing 2~4%, diagonal_coupling=0)
+
+V60.D (static bias 약화 + gait incentive 강화, V60.C resume):
+  - feet_air_time: 4→8, foot_clearance: 2→6
+  - contact_foot_velocity: -1.0→-0.3, joint_default_pos: -0.5→-0.2
+  - 초기 결과 (112 iter):
+    - 앞다리 swing 증가: FL +97%, FR +182%
+    - 뒷다리 여전히 고착: RL/RR swing < 0.003
+    - diagonal_coupling = 0.000
+  - 진행 중...
 ```
 
 ---
@@ -68,14 +77,31 @@ V60.C (penalty 대폭 상향, V60.B resume):
 - 결과: penalty가 약해서 RR 교정 실패 (cr_RR 0.02→0.033)
 - 교훈: penalty weight는 양수 reward budget 대비 수치 검증 필수
 
-### V60.C: Penalty 강력 상향 (현재)
-- Resume from: `2026-04-06_10-51-10/model_11300.pt`
+### V60.C: Penalty 강력 상향 (RR 교정 성공)
+- Run: `2026-04-06_16-46-38` (model_11300 resume)
 - 변경:
   - per_leg_contact_min: -3 → -10
   - per_leg_excess_swing: -3 → -10
   - rear_lr_balance: 신규 -5 (RL/RR pair 불균형 표적)
 - 수치 검증: penalty 합계 -8.55/step vs 양수 ~15/step
-- Go/No-Go: cr_RR>0.15, sw_RR<0.7, ep_len>900, 500-1000 iter 검증
+- 결과: **RR 비대칭 exploit 완전 교정** (cr_RR 0.033→0.997, ~100 iter 만에)
+- 새 문제: 4발 모두 정적 접지 (swing 2~4%, diagonal_coupling=0)
+- 교훈: penalty weight는 Codex 권장 범위(-8~-12)를 신뢰해야 함
+
+### V60.D: Static Bias 약화 + Gait Incentive 강화 (현재)
+- Run: `2026-04-06_19-14-18` (model_13000 resume)
+- 변경:
+  - feet_air_time: +4 → +8 (발 들기 강력 유도)
+  - foot_clearance: +2 → +6 (의미 있는 높이로 들기)
+  - contact_foot_velocity: -1.0 → -0.3 (static bias 약화)
+  - joint_default_pos: -0.5 → -0.2 (관절 자유도 확대)
+  - 대칭성 penalty 유지
+- 초기 결과 (112 iter):
+  - 앞다리 swing 증가: FL 0.040→0.079 (+97%), FR 0.022→0.062 (+182%)
+  - 뒷다리 고착: RL/RR swing < 0.003
+  - diagonal_coupling: 0.000
+  - ep_len: 1000, forward_velocity: 2.9
+- 진행 중...
 
 ---
 
@@ -95,17 +121,29 @@ V60.C (penalty 대폭 상향, V60.B resume):
 - feet_air_time reward가 1발만 들어도 양수 → 최소 비용 exploit
 - 해결: per-leg contact min + excess swing + rear pair balance
 
+### 정적 4발 접지 해 (V60.C→D)
+- RR 교정 후 4발 모두 99%+ 접지, swing 2~4%
+- feet_air_time/foot_clearance 강화로 앞다리만 swing 증가
+- 뒷다리는 여전히 고착 → front-rear 비대칭 새 패턴 발생
+- 교훈: 전체 gait incentive만으로는 뒷다리가 안 깨짐, 뒷다리 전용 유도 필요 가능성
+
 ---
 
 ## 3. Go/No-Go 기준
 
-### V60.C 성공 기준
-- contact_ratio_rr > 0.15
-- swing_time_rr < 0.70
-- ep_len > 900
-- track_lin 큰 하락 없음
+### V60.C 성공 기준 → **달성**
+- contact_ratio_rr > 0.15: **0.997** (달성)
+- swing_time_rr < 0.70: **0.003** (달성)
+- ep_len > 900: **1000** (달성)
 
-### V60.C 실패 시 다음 단계
-- RR 그대로 + penalty만 증가 → termination 추가 (sw_RR>0.9 연속 200step이면 즉사)
-- 전체 보행 붕괴 → penalty 약화 후 재시도
-- 성공 시 → diagonal_coupling 약하게 추가 (V60.D)
+### V60.D 성공 기준
+- contact_ratio가 전반적으로 0.99 아래 (swing 시작)
+- swing_time이 전 다리에서 의미 있게 증가
+- clearance가 상승
+- diagonal_coupling이 0에서 벗어남
+- ep_len > 900, RR 비사용 재발 없음
+
+### V60.D 실패 시 다음 단계
+- 앞다리만 swing + 뒷다리 고착 지속 → 뒷다리 전용 swing reward 추가 (V60.E)
+- front_rear_swing_diff penalty 도입
+- 또는 뒷다리 contact_ratio가 threshold 이상이면 penalty
