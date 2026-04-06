@@ -3384,17 +3384,22 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     },
                 )
 
-                # ── [핵심 신규] phase-conditioned contact reward ──
-                # 내부에서 trot phase 계산, stance/swing 타이밍 일치 시 보상
-                self.rewards.phase_contact = RewTerm(
-                    func=custom_mdp.phase_contact_reward,
-                    weight=10.0,
+                # ── [핵심] velocity-adaptive phase diagonal event reward ──
+                # 속도 연동 cadence + touchdown event 시점만 보상 (sparse)
+                # 고정 2Hz 강제가 아닌 약한 diagonal event bias
+                self.rewards.phase_diagonal_event = RewTerm(
+                    func=custom_mdp.adaptive_phase_diagonal_event_reward,
+                    weight=3.0,  # 보조 (Codex: 2~4)
                     params={
                         "sensor_cfg": toe_sensor_i,
-                        "frequency": 2.0,
-                        "duty_factor": 0.55,
+                        "asset_cfg": SceneEntityCfg("robot"),
                         "contact_threshold": 1.0,
-                        "standing_vel_threshold": 0.08,
+                        "base_frequency": 2.0,
+                        "vel_scale": 4.0,
+                        "min_frequency": 1.0,
+                        "max_frequency": 4.0,
+                        "duty_factor": 0.55,
+                        "min_vel": 0.05,
                     },
                 )
 
@@ -3408,10 +3413,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     },
                 )
 
-                # ── balance penalty 유지 ──
+                # ── balance penalty 완화 (Codex: -2→-1) ──
                 self.rewards.fr_swing_balance = RewTerm(
                     func=custom_mdp.front_rear_swing_balance_penalty,
-                    weight=-2.0,
+                    weight=-1.0,  # V60.H -2→-1
                     params={
                         "sensor_cfg": toe_sensor_i,
                         "contact_threshold": 1.0,
@@ -3419,7 +3424,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 )
                 self.rewards.fr_contact_balance = RewTerm(
                     func=custom_mdp.front_rear_contact_balance_penalty,
-                    weight=-2.0,
+                    weight=-1.0,  # V60.H -2→-1
                     params={
                         "sensor_cfg": toe_sensor_i,
                         "contact_threshold": 1.0,

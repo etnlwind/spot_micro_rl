@@ -2290,6 +2290,70 @@ def front_rear_contact_balance_penalty(
     return torch.abs(front_contact - rear_contact)
 
 
+def adaptive_phase_diagonal_event_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    base_frequency: float = 2.0,
+    vel_scale: float = 4.0,
+    min_frequency: float = 1.0,
+    max_frequency: float = 4.0,
+    duty_factor: float = 0.55,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """속도 연동 phase + touchdown event 기반 diagonal 보상.
+
+    기존 phase_contact_reward와 다른 점:
+    1. frequency가 고정이 아니라 vel_x에 비례 (느리면 느린 cadence)
+    2. 매 step contact match가 아닌 touchdown event 시점만 보상 (sparse)
+    3. 올바른 phase에서 touchdown하면 보상, 잘못된 phase면 0
+
+    body 순서: FL(0), FR(1), RL(2), RR(3)
+    Trot: FL/RR = base phase, FR/RL = base + pi
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)
+
+    # touchdown 감지: 이전 step swing → 현재 step contact
+    if not hasattr(env, "_adp_last_contacts"):
+        env._adp_last_contacts = torch.ones(env.num_envs, 4, dtype=torch.bool, device=env.device)
+    first_contact = contacts & ~env._adp_last_contacts  # (num_envs, 4)
+    env._adp_last_contacts = contacts.clone()
+
+    # velocity-adaptive frequency
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    frequency = torch.clamp(vel_x * vel_scale, min_frequency, max_frequency)  # (num_envs,)
+
+    # phase 계산
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = 2.0 * math.pi * frequency * t  # (num_envs,)
+
+    # Trot phases: FL/RR = base, FR/RL = base + pi
+    fl_phase = base_phase
+    fr_phase = base_phase + math.pi
+    rl_phase = base_phase + math.pi
+    rr_phase = base_phase
+    phases = torch.stack([fl_phase, fr_phase, rl_phase, rr_phase], dim=1)  # (num_envs, 4)
+
+    # stance phase 판정: phase_norm < duty_factor * 2pi → stance expected
+    phase_norm = phases % (2.0 * math.pi)
+    stance_threshold_val = duty_factor * 2.0 * math.pi
+    in_stance_phase = (phase_norm < stance_threshold_val)  # (num_envs, 4)
+
+    # touchdown이 stance phase 시작 시점에 발생하면 보상
+    # touchdown은 swing→contact 전환 = stance phase 진입과 일치해야 함
+    correct_touchdown = first_contact & in_stance_phase  # (num_envs, 4)
+
+    # per-leg reward: 올바른 touchdown마다 +1
+    reward = correct_touchdown.float().sum(dim=1)
+
+    # 전진 게이팅
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return reward * vel_gate
+
+
 def simple_diagonal_coupling_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
