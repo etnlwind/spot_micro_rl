@@ -6,7 +6,7 @@ set "LOG_DIR=%PROJECT_DIR%\logs\rsl_rl\spot_micro_flat"
 set "RUN=2026-04-06_23-22-03"
 set "CHECKPOINT=model_24100.pt"
 set "NUM_ENVS=4096"
-set "MAX_ITER=20000"
+set "MAX_ITER=30000"
 set "MODE=--headless"
 
 if /i "%~1"=="gui" set "MODE=" & shift
