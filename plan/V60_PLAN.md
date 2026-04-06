@@ -80,7 +80,7 @@ V60.H (대각선 교대 직접 유도, V60.G model_24100 resume):
   - 해결: 버전 변경 시 reward/termination 복원 자동 skip
 
 ### V60.A: From-Scratch 보행 (부분 성공)
-- Run: `2026-04-05_21-12-36`
+- Run: `2026-04-05_21-12-36` | **iter 0→8300 (8300 iter, from-scratch)**
 - 설정:
   - action_scale=0.25, standing_envs=0.2, vel_x=(0, 0.3)
   - feet_lifted termination 제거
@@ -90,7 +90,7 @@ V60.H (대각선 교대 직접 유도, V60.G model_24100 resume):
 - 교훈: feet_air_time이 1발만 들어도 보상 → 가장 쉬운 1발 들기로 수렴
 
 ### V60.B: 비대칭 Penalty 추가 (효과 부족)
-- Run: `2026-04-06_10-51-10` (model_8300 resume)
+- Run: `2026-04-06_10-51-10` | **iter 8300→12600 (4300 iter)**
 - 설정:
   - per_leg_contact_min: -3.0 (min_ratio=0.15)
   - per_leg_excess_swing: -3.0 (max_swing=0.70)
@@ -100,7 +100,7 @@ V60.H (대각선 교대 직접 유도, V60.G model_24100 resume):
 - 교훈: penalty weight는 양수 reward budget 대비 수치 검증 필수
 
 ### V60.C: Penalty 강력 상향 (RR 교정 성공)
-- Run: `2026-04-06_16-46-38` (model_11300 resume)
+- Run: `2026-04-06_16-46-38` | **iter 11300→13000 (1700 iter)**
 - 변경:
   - per_leg_contact_min: -3 → -10
   - per_leg_excess_swing: -3 → -10
@@ -111,11 +111,11 @@ V60.H (대각선 교대 직접 유도, V60.G model_24100 resume):
 - 교훈: penalty weight는 Codex 권장 범위(-8~-12)를 신뢰해야 함
 
 ### V60.D: Static Bias 약화 + Gait Incentive 강화 (no-go)
-- Run: `2026-04-06_19-14-18` (model_13000 resume)
+- Run: `2026-04-06_19-14-18` | **iter 13000→15800 (2800 iter)**
 - 변경:
   - feet_air_time: +4 → +8, foot_clearance: +2 → +6
   - contact_foot_velocity: -1.0 → -0.3, joint_default_pos: -0.5 → -0.2
-- 결과 (2817 iter):
+- 결과 (2800 iter):
   - 앞다리 swing 대폭 증가: FL 0.040→0.218, FR 0.022→0.338
   - 뒷다리 완전 고착: RL/RR swing 0.003~0.006
   - FR 단독 과부상 (FL의 1.5~2배)
@@ -123,18 +123,18 @@ V60.H (대각선 교대 직접 유도, V60.G model_24100 resume):
 - 교훈: 전체 gait incentive는 이미 swing이 나오는 앞다리만 강화, 뒷다리 전용 유도 필요
 
 ### V60.E: Rear Swing 생성 집중 (no-go)
-- Resume from: `2026-04-06_19-14-18/model_15800.pt`
+- Run: `2026-04-06_21-27-33` | **iter 15800→16600 (800 iter)**
 - 변경:
   - rear_foot_clearance_reward: +6 신규 (RL/RR 전용 보상)
   - foot_clearance: 6 → 3 (front 약화)
   - static bias 제거: contact_foot_vel=0, joint_default=-0.1, standing_height=1.0
   - 대칭 penalty 완화: -10 → -6
   - yaw OFF (ang_vel_z=0), standing_envs=0.0, min vel_x=0.05
-- 결과: no-go (RL swing 0.007, RR swing 0.013, 835 iter 플라토)
+- 결과: no-go (RL swing 0.007, RR swing 0.013, 플라토)
 - 교훈: rear 보상을 더 얹는 것만으로는 부족 — 정적 접지 해 자체가 여전히 더 싼 구조
 
 ### V60.F: 정적 접지 해를 이득 아니게 만드는 구조 전환 (부분 성공)
-- Resume from: `2026-04-06_21-27-33/model_16600.pt`
+- Run: `2026-04-06_22-30-44` | **iter 16600→17600 (1000 iter)**
 - 철학 전환: "rear를 더 밀자" → "정적 해가 더 이상 싸지 않게"
 - 변경:
   - lin_vel_x min: 0.05 → 0.12 (느린 정적 전진 불허)
@@ -148,7 +148,7 @@ V60.H (대각선 교대 직접 유도, V60.G model_24100 resume):
 - 교훈: 한쪽만 유도하면 다른쪽 고착 — front/rear 균형 설계 필요
 
 ### V60.G: Front/Rear Pair Balance + Diagonal Coupling (부분 성공)
-- Resume from: `2026-04-06_22-30-44/model_17600.pt`
+- Run: `2026-04-06_23-22-03` | **iter 17600→25100 (7500 iter)**
 - 철학: "한쪽만 들면 손해, 균형 있게 교대하면 이득"
 - 변경:
   - rear_air_time: 6→1, rear_clearance: 6→1 (rear 과다 억제)
@@ -160,7 +160,7 @@ V60.H (대각선 교대 직접 유도, V60.G model_24100 resume):
 - 교훈: balance penalty로 균형은 잡히나, 교대 패턴(trot)은 자동 발생 안 함
 
 ### V60.H: 대각선 교대 구조 직접 유도 (현재)
-- Resume from: `2026-04-06_23-22-03/model_24100.pt`
+- Resume from: `2026-04-06_23-22-03/model_24100.pt` | **iter 24100→ (진행 중, 500 iter 판정)**
 - 핵심: diagonal_coupling 2→8 강화, balance penalty -5→-2 완화
 - 변경:
   - diagonal_coupling: +2 → +8 (핵심 강화)
@@ -168,6 +168,20 @@ V60.H (대각선 교대 직접 유도, V60.G model_24100 resume):
   - fr_swing/contact_balance: -5→-2 (balance 완화)
   - rear_air_time: 0, rear_clearance: 0 (rear 전용 제거)
 - 성공 기준: diagonal_coupling_raw>0, 4발 swing>0, ep_len>900, 500 iter 판정
+
+### 누적 iter 요약
+
+| 버전 | 구간 | 추가 iter | 누적 | 유형 |
+|------|------|----------|------|------|
+| V60.A | 0→8300 | 8300 | 8300 | from-scratch |
+| V60.B | 8300→12600 | 4300 | 12600 | resume |
+| V60.C | 11300→13000 | 1700 | - | resume (B 중간에서) |
+| V60.D | 13000→15800 | 2800 | - | resume |
+| V60.E | 15800→16600 | 800 | - | resume |
+| V60.F | 16600→17600 | 1000 | - | resume |
+| V60.G | 17600→25100 | 7500 | - | resume |
+| V60.H | 24100→? | 진행 중 | - | resume |
+| **합계** | | **~26400** | | |
 
 ---
 
