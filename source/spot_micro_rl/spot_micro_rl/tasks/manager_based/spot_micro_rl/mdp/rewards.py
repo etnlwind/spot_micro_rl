@@ -2242,7 +2242,7 @@ def rear_feet_air_time_reward(
     # 다음 step을 위해 현재 air_time 저장 (리셋 전 값 = swing 중 누적값)
     # contact 시 이미 0이므로, swing 중일 때만 갱신
     swing_mask = ~rear_contacts
-    env._rear_last_air_time = torch.where(swing_mask, env._rear_air_time + dt, env._rear_last_air_time)
+    env._rear_last_air_time = torch.where(swing_mask, env._rear_air_time, env._rear_last_air_time)
     # contact된 순간 last_air_time은 유지 (touchdown 보상에 사용 후 다음 swing에서 덮어씌워짐)
 
     env._rear_last_contacts = rear_contacts.clone()
