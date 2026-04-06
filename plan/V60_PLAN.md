@@ -1,7 +1,7 @@
 # V60 실험 보고서: From-Scratch 4족 보행 학습
 
 > 작성/갱신: 2026-04-07
-> 현재 코드 truth 기준 버전: `V60.H`
+> 현재 코드 truth 기준 버전: `V60.I`
 > 기반: V59.B 서기 마스터 → V59.D 보행 전환 실패 → V60 from-scratch
 
 ---
@@ -52,7 +52,8 @@ V59.B에서 SpotMicro의 서기 학습에 완전 수렴했다 (ep_len 1000, 4발
 | V60.E | 뒷다리를 직접 들어보게 만들려고 | rear 전용 보상이 rear swing을 여는지 | 거의 반응 없음 | rear 보상만 더한다고 정적 해가 깨지지 않음 |
 | V60.F | 정적 해 자체를 싸지 않게 만들려고 | rear 비접촉 시간이 실제로 생기는지 | rear swing 폭발, front 고착 | 한쪽만 유도하면 반대쪽이 고착 |
 | V60.G | front/rear 균형을 맞추려고 | 4발 swing을 고르게 만들 수 있는지 | 균형은 개선, diagonal은 0 | 균형과 교대는 별개라는 게 드러남 |
-| V60.H | diagonal alternation을 직접 유도하려고 | 대각선 교대가 실제로 생기는지 | 진행 중 | 500 iter에서 판정 예정 |
+| V60.H | diagonal alternation을 직접 유도하려고 | 대각선 교대가 실제로 생기는지 | 4발 swing은 유지됐지만 diagonal은 끝까지 0 | 시간 구조를 reward에 더 직접 넣어야 했음 |
+| V60.I | phase-aligned event bias를 얹어 diagonal 구조를 직접 밀려고 | 4발 swing 위에 약한 cadence/phase bias가 먹히는지 | 구현 완료, 500 iter 단기 판정 예정 | 성공 시 diagonal alternation 첫 신호 확보, 실패 시 V61로 구조 재설계 |
 
 ### 체크포인트를 왜 `model_24100.pt`로 잡았나
 
@@ -639,7 +640,7 @@ V60.G에서 달성한 4발 균형 swing 위에, **대각선 교대(trot) 패턴�
 
 ---
 
-## 다음 단계 설계: V60.I
+## 다음 단계 설계 및 구현: V60.I
 
 V60.H까지의 결과를 보면, 이제 문제는 "발을 더 들게 하자"가 아니다.
 
@@ -655,7 +656,7 @@ V60.H까지의 결과를 보면, 이제 문제는 "발을 더 들게 하자"가 
 **얼마나 움직이느냐**가 아니라
 **언제 어떤 다리가 움직여야 하느냐**이다.
 
-### 왜 V60.I가 필요한가
+### 왜 V60.I가 필요했나
 
 V60.G와 V60.H는 모두
 "reward만 잘 주면 diagonal alternation도 자연스럽게 생기지 않을까?"
@@ -671,7 +672,7 @@ V60.G와 V60.H는 모두
 
 그래서 V60.I의 핵심 철학은:
 
-> **이제는 alternation의 "리듬 기준"을 environment가 직접 제공해야 한다.**
+> **기존 4발 swing은 유지하되, diagonal alternation에 유리한 시간 bias를 reward로 직접 준다.**
 
 ### V60.I 목표
 
@@ -684,35 +685,34 @@ V60.G와 V60.H는 모두
 
 ### 핵심 설계 변경
 
-#### 1. phase clock 도입
+#### 1. observation 차원은 유지
 
-Observation에 다음과 같은 phase 정보를 추가한다.
+초기 설계에선 `phase_clock` observation을 다시 넣는 안도 있었지만, 그 경우 `V60.H` 체크포인트와 입력 차원이 달라져 resume가 깨질 수 있었다.
 
-```text
-sin(phase)
-cos(phase)
-```
+그래서 실제 구현은:
+- `phase_clock = None` 유지
+- observation 차원 유지
+- 기존 `V60.H` 정책을 그대로 이어받아 resume 가능
 
-여기서 `phase`는 gait cycle의 진행도를 나타낸다.
+즉 V60.I는 **observation 변경 없이 reward 쪽에만 phase bias를 넣는 방식**으로 구현됐다.
 
-핵심은:
-- policy가 "지금이 어느 다리를 들어야 하는 위상인지"를 알 수 있어야 한다는 점이다.
-- 지금까지는 reward만 주고, 그 타이밍 자체는 policy가 알아서 발명해야 했다.
+#### 2. phase-aligned reward를 sparse event로 추가
 
-#### 2. diagonal alternation을 phase-aligned reward로 바꿈
+V60.I의 핵심 신규 항은 `adaptive_phase_diagonal_event_reward`이다.
 
-현재 `diagonal_coupling`은 결과적으로 "잘 교대했는지"만 본다.
-V60.I에서는 여기에 더해,
-phase에 따라 **어떤 diagonal pair가 swing이어야 하는지**를 직접 보상한다.
+이 reward는:
+- 매 step contact match를 강제하지 않고
+- **touchdown event가 발생한 순간만**
+- 속도(command `vel_x`)에 따라 cadence를 조절한 phase 기준과 맞으면 보상한다
 
-예시:
-- phase A: `FL + RR` swing, `FR + RL` stance
-- phase B: `FR + RL` swing, `FL + RR` stance
+쉽게 말하면:
+- "계속 이 자세를 유지해"가 아니라
+- **"착지 타이밍이 대각선 교대 리듬과 맞으면 이득"**
+을 주는 방식이다.
 
-즉 reward는:
-- "교대했는가"뿐 아니라
-- **"올바른 위상에서 올바른 pair가 swing했는가"**
-까지 본다.
+이렇게 한 이유:
+- 기존 `phase_contact_reward`처럼 고정 2Hz를 강하게 강제하면 tracking을 깨뜨릴 위험이 컸다
+- V60.H는 이미 4발 swing이 있었기 때문에, 이번 단계에선 **약한 event bias**만 얹는 것이 더 안전했다
 
 #### 3. 기존 reward 구조는 크게 유지
 
@@ -723,9 +723,10 @@ phase에 따라 **어떤 diagonal pair가 swing이어야 하는지**를 직접 �
 - `foot_clearance = 2.0`
 - `per_leg_contact_min = -3.0`
 - `per_leg_excess_swing = -3.0`
-- `fr_swing_balance = -2.0`
-- `fr_contact_balance = -2.0`
-- `diagonal_coupling = 8.0` 유지 또는 `10.0` 검토
+- `fr_swing_balance = -1.0`
+- `fr_contact_balance = -1.0`
+- `diagonal_coupling = 8.0`
+- `phase_diagonal_event = +3.0`
 
 계속 0 유지:
 - `rear_air_time`
@@ -736,11 +737,11 @@ phase에 따라 **어떤 diagonal pair가 swing이어야 하는지**를 직접 �
 
 즉:
 - 기존에 만든 "4발 모두 swing하는 바닥"은 유지하고
-- 그 위에 **시간 구조만 새로 얹는다**
+- 그 위에 **약한 cadence/phase event bias만 새로 얹는다**
 
 ### command/action
 
-V60.I에서는 reward만 바꾸지 않고, command는 최대한 고정한다.
+V60.I에서는 command/action도 V60.H와 거의 동일하게 유지한다.
 
 ```text
 lin_vel_x = (0.12, 0.3)
@@ -751,7 +752,28 @@ action.scale = 0.25
 
 이유:
 - 지금 문제는 command가 약해서가 아니라
-- **구조가 없어서** 생기는 문제이기 때문이다
+- **구조가 없어서** 생기는 문제였기 때문이다
+
+### 실제 구현 형태
+
+코드 기준 현재 V60.I는 다음과 같이 구현되어 있다.
+
+- `TRAIN_VERSION = "V60.I"`
+- `phase_clock` observation은 계속 `None`
+- 새 reward: `adaptive_phase_diagonal_event_reward`
+- cadence 기준: command `vel_x`
+- touchdown event만 sparse 보상
+- `diagonal_coupling = +8.0`
+- `phase_diagonal_event = +3.0`
+- `fr_swing_balance = -1.0`
+- `fr_contact_balance = -1.0`
+- `rear_air_time = 0.0`
+- `rear_clearance = 0.0`
+- `standing_height = 0.0`
+- `joint_default_pos = 0.0`
+
+즉 설계상 `phase clock 기반 V61`로 가기 전,
+**resume 가능한 reward-only phase 버전**이 V60.I다.
 
 ### resume 지점
 
@@ -766,6 +788,25 @@ V60.I는 `V60.G`가 아니라 **`V60.H` 결과에서 resume**하는 것이 맞�
 - 다만 너무 뒤 checkpoint보다, tracking이 덜 무너진 **중간 checkpoint**를 잡는 것이 좋다
 - 보수적으로는 `model_25500.pt` 전후가 1차 후보
 
+### 코드 리뷰로 확인된 점
+
+V60.I 구현 리뷰 기준으로 확인된 것은 다음과 같다.
+
+- 의도대로 observation 차원은 바뀌지 않음
+- `phase_clock`를 다시 켜지 않았기 때문에 `model_25500.pt` resume가 안전함
+- 새 reward는 old `phase_contact_reward` 재사용이 아니라,
+  **`adaptive_phase_diagonal_event_reward`라는 별도 함수**로 구현됨
+- 초기 리뷰에서 지적됐던 문제
+  - reset 처리 누락
+  - actual velocity 기반 cadence
+  - 의미 없는 고정 2Hz 강제
+  는 수정되어,
+  현재는 **command 기반 cadence + reset-aware sparse touchdown reward**가 됨
+
+남아 있는 리스크:
+- 여전히 cadence 식이 단순(`vel_cmd * vel_scale`)해서 속도 구간별 최적 리듬과 완전히 맞지 않을 수 있음
+- `diagonal_coupling +8`과 `phase_diagonal_event +3` 조합이 공격적이라, 짧은 구간에서 반드시 판정해야 함
+
 ### 1차 판정 기준
 
 `500 iter` 1차 판정:
@@ -778,11 +819,25 @@ V60.I는 `V60.G`가 아니라 **`V60.H` 결과에서 resume**하는 것이 맞�
 - reward만 더 조정하는 것이 아니라
 - **phase-conditioned contact target**을 더 직접적으로 도입해야 한다
 
+### 기대값과 해석
+
+V60.I에서 기대하는 건 "바로 예쁜 trot 완성"이 아니다.
+
+이번 단계의 현실적인 기대는:
+- 기존 4발 swing 분산은 유지
+- `diagonal_coupling_raw`가 0에서 조금이라도 벗어남
+- tracking 붕괴 없이 phase bias가 실제로 반응함
+
+즉 판정은:
+- **명확한 trot 완성 여부**가 아니라
+- **대각선 교대의 첫 신호가 생겼는가**
+를 본다.
+
 ### 한 줄 요약
 
 V60.I는
 `발을 더 들게 만드는 버전`이 아니라,
-**이미 생긴 4발 swing에 시간 구조(phase)를 넣어 diagonal alternation으로 바꾸려는 버전**이다.
+**이미 생긴 4발 swing 위에, resume 가능한 sparse phase event bias를 얹어 diagonal alternation의 첫 신호를 만들려는 버전**이다.
 
 ---
 
