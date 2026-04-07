@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V61"
+TRAIN_VERSION = "V61.B"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -4949,12 +4949,12 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 },
             )
 
-            # [핵심] stance propulsion reward — 진짜 보행만 보상
-            # stance phase에서 발이 body를 밀면 보상. 정적 해=0, 실제 보행=양수.
-            # swing_violation(-3) 대체: "안 들면 벌"보다 "밀면 상"이 서기 학습에 안전.
+            # [핵심] 대각 쌍 propulsion — trot 직접 유도
+            # FL+RR이 동시에 밀거나, FR+RL이 동시에 밀면 보상.
+            # 한쪽만 밀면 min=0 → 앞다리 참여 강제, 뒷다리만 밀기 불가.
             self.rewards.propulsion = RewTerm(
-                func=custom_mdp.stance_propulsion_reward,
-                weight=5.0,
+                func=custom_mdp.diagonal_pair_propulsion_reward,
+                weight=8.0,
                 params={
                     "sensor_cfg": toe_sensor_v61,
                     "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),

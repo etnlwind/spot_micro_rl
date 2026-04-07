@@ -3791,6 +3791,64 @@ def diagonal_joint_coupling_reward(
 # 발이 바닥에 닿아서 뒤로 밀어야 동체가 앞으로 나가는 메커니즘 보상
 # ============================================================
 
+def diagonal_pair_propulsion_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_push_vel: float = 0.3,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """대각 쌍이 동시에 밀어야 보상. trot 보행의 핵심 직접 유도.
+
+    pair_A: FL(왼앞) + RR(오른뒤) → 동시에 push-off하면 보상
+    pair_B: FR(오른앞) + RL(왼뒤) → 동시에 push-off하면 보상
+
+    min(FL_push, RR_push)로 계산하므로:
+    - 한쪽만 밀면 → min = 0 → 보상 없음
+    - 앞다리 안 밀면 → pair 보상 0 → 앞다리 참여 강제
+    - 대각 쌍이 함께 밀면 → 보상 최대
+
+    body 순서: FL(0), FR(1), RL(2), RR(3)
+    """
+    # per-leg propulsion 계산 (stance_propulsion_reward와 동일 로직)
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    stance_mask = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()
+
+    foot_asset = env.scene[foot_cfg.name]
+    foot_vel_w = foot_asset.data.body_vel_w[:, foot_cfg.body_ids, :3]
+
+    robot = env.scene[asset_cfg.name]
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    heading_x = 1.0 - 2.0 * (y * y + z * z)
+    heading_y = 2.0 * (x * y + w * z)
+
+    foot_heading_vel = (
+        foot_vel_w[:, :, 0] * heading_x.unsqueeze(1) +
+        foot_vel_w[:, :, 1] * heading_y.unsqueeze(1)
+    )
+    body_vel_w = robot.data.root_lin_vel_w
+    body_heading_vel = body_vel_w[:, 0] * heading_x + body_vel_w[:, 1] * heading_y
+
+    relative_vel = foot_heading_vel - body_heading_vel.unsqueeze(1)
+    push_magnitude = torch.clamp(-relative_vel, min=0.0)
+    normalized_push = torch.clamp(push_magnitude / target_push_vel, 0.0, 1.0)
+    per_leg_push = normalized_push * stance_mask  # (num_envs, 4): FL, FR, RL, RR
+
+    # 대각 쌍 propulsion: min(앞, 뒤) — 둘 다 밀어야 보상
+    pair_a = torch.min(per_leg_push[:, 0], per_leg_push[:, 3])  # min(FL, RR)
+    pair_b = torch.min(per_leg_push[:, 1], per_leg_push[:, 2])  # min(FR, RL)
+    reward = pair_a + pair_b
+
+    # 전진 게이팅
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    return reward * vel_gate
+
+
 def stance_propulsion_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
