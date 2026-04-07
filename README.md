@@ -117,7 +117,7 @@ V59.D에서 확인했듯이, 서기에서 필요한 정적 균형과 보행에�
 | V60.H | diagonal coupling 8x 강화 + balance 완화 | 4발 swing 분산 개선 |
 | V60.I | velocity-adaptive phase diagonal event | **Go** — pde 0.86, 4발 clearance 균등, pair 역전 |
 | V60.J~M | quality recovery + pair-lock 차단 | exploit 패치 한계 도달 |
-| **V61** | **from-scratch + phase clock obs + swing violation penalty** | **진행 중** |
+| **V61** | **from-scratch + phase clock obs + 독립 swing_contact_penalty** | **진행 중** (수정 2차: 별도 penalty term) |
 
 현재 해석:
 - `V60.A~C`는 **비대칭 exploit 제거 단계**
