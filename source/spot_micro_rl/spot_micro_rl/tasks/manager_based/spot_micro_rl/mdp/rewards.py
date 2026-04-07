@@ -2355,6 +2355,68 @@ def adaptive_phase_diagonal_event_reward(
     return reward * vel_gate
 
 
+def non_toe_contact_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    threshold: float = 1.0,
+) -> torch.Tensor:
+    """toe 이외의 다리 링크(foot_link, leg_link)가 접촉하면 penalty.
+
+    RL이 무릎/발목 관절로 바닥을 찍는 비정상 접촉을 직접 벌함.
+    sensor_cfg.body_ids는 foot_link + leg_link를 포함해야 함 (toe 제외).
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
+    contact_count = (forces > threshold).float().sum(dim=1)
+    return contact_count
+
+
+def contact_drag_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """접촉 중인 발의 수평 속도(끌림)를 penalty.
+
+    RR이 뒤로 끌리거나, 발이 지면에서 미끄러지는 것을 방지.
+    접촉 중 + 수평 속도가 크면 penalty.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)
+
+    asset = env.scene[foot_cfg.name]
+    foot_vel_xy = asset.data.body_vel_w[:, foot_cfg.body_ids, :2]  # (num_envs, num_feet, 2)
+    foot_speed = foot_vel_xy.norm(dim=-1)  # (num_envs, num_feet)
+
+    # 접촉 중인 발의 수평 속도만 penalty
+    drag = foot_speed * contacts.float()
+    return drag.sum(dim=1)
+
+
+def stance_width_min_penalty(
+    env: ManagerBasedRLEnv,
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    min_width: float = 0.10,
+) -> torch.Tensor:
+    """앞/뒤 발 쌍의 좌우 간격이 min_width 미만이면 penalty.
+
+    앞다리를 모아서 걷거나 crossing posture를 방지.
+    body 순서: FL(0), FR(1), RL(2), RR(3).
+    """
+    asset = env.scene[foot_cfg.name]
+    foot_y = asset.data.body_pos_w[:, foot_cfg.body_ids, 1]  # (num_envs, 4)
+
+    # front pair 간격: |FL_y - FR_y|
+    front_width = torch.abs(foot_y[:, 0] - foot_y[:, 1])
+    # rear pair 간격: |RL_y - RR_y|
+    rear_width = torch.abs(foot_y[:, 2] - foot_y[:, 3])
+
+    front_gap = torch.clamp(min_width - front_width, min=0.0)
+    rear_gap = torch.clamp(min_width - rear_width, min=0.0)
+    return front_gap + rear_gap
+
+
 def diagonal_pair_separation_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
