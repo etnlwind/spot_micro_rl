@@ -4810,7 +4810,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
             # ── Commands: 직진 보행 (yaw OFF, from-scratch) ──
             self.commands.base_velocity.heading_command = False
-            self.commands.base_velocity.rel_standing_envs = 0.05
+            self.commands.base_velocity.rel_standing_envs = 0.0  # phase obs와 all-stance reward 모순 방지
             self.commands.base_velocity.rel_heading_envs = 0.0
             self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.25)
             self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
@@ -4883,7 +4883,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 params={"frequency": 2.0},
             )
 
-            # ── Rewards: 10개, 단순하게 ──
+            # ── Rewards: 14개 (양수 6 + 음수 8, V60 대비 대폭 축소) ──
             # 기존 reward 전부 끄고 다시 정의
             keep_reward_names = {
                 "track_lin_vel_xy_exp",
