@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V60.I"
+TRAIN_VERSION = "V60.J"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -3455,6 +3455,188 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     weight=-2.0,
                     params={
                         "sensor_cfg": toe_sensor_i,
+                        "contact_threshold": 1.0,
+                    },
+                )
+
+                # ── static bias 완전 제거 ──
+                self.rewards.contact_foot_velocity_penalty.weight = 0.0
+                self.rewards.joint_default_pos.weight = 0.0
+                self.rewards.standing_height.weight = 0.0
+
+                # ── 안정성 ──
+                self.rewards.flat_orientation_bonus.weight = 3.0
+                self.rewards.flat_orientation_l2.weight = -2.0
+                self.rewards.action_rate_l2.weight = -0.05
+                self.rewards.dof_torques_l2.weight = -1e-4
+
+            if _IS_V60 and _V60_TRACK == "J":
+                # ── V60.J: diagonal 구조 선명화 + clearance/stride 강화 ──
+                # V60.I의 trot 구조 유지, anti-phase 직접 보상 + clearance/stride 추가
+                self.actions.joint_pos.scale = 0.25
+
+                self.commands.base_velocity.rel_standing_envs = 0.0
+                self.commands.base_velocity.ranges.lin_vel_x = (0.12, 0.3)
+                self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+                self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+                self.terminations.feet_lifted = None
+
+                # ── 유지: V60.I 기반 ──
+                self.rewards.feet_on_ground.weight = 0.0
+                self.rewards.feet_lift_penalty.weight = 0.0
+
+                self.rewards.track_lin_vel_xy_exp.weight = 4.0
+                self.rewards.track_lin_vel_xy_exp.params["std"] = 0.15
+                self.rewards.track_ang_vel_z_exp.weight = 2.0
+                self.rewards.track_ang_vel_z_exp.params["std"] = 0.25
+
+                self.rewards.forward_velocity = RewTerm(
+                    func=custom_mdp.forward_velocity_reward,
+                    weight=5.0,
+                    params={"asset_cfg": SceneEntityCfg("robot")},
+                )
+
+                toe_sensor_j = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+
+                # ── gait: V60.I 유지 ──
+                self.rewards.feet_air_time = RewTerm(
+                    func=velocity_mdp.feet_air_time,
+                    weight=5.0,
+                    params={
+                        "command_name": "base_velocity",
+                        "sensor_cfg": toe_sensor_j,
+                        "threshold": 0.1,
+                    },
+                )
+                self.rewards.phase_diagonal_event = RewTerm(
+                    func=custom_mdp.adaptive_phase_diagonal_event_reward,
+                    weight=3.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "contact_threshold": 1.0,
+                        "vel_scale": 4.0,
+                        "min_frequency": 1.0,
+                        "max_frequency": 4.0,
+                        "duty_factor": 0.55,
+                        "min_vel": 0.05,
+                        "command_name": "base_velocity",
+                    },
+                )
+                self.rewards.diagonal_coupling = RewTerm(
+                    func=custom_mdp.simple_diagonal_coupling_reward,
+                    weight=8.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "contact_threshold": 1.0,
+                    },
+                )
+
+                # ── [변경A] clearance 강화 ──
+                self.rewards.foot_clearance = RewTerm(
+                    func=custom_mdp.foot_clearance_reward,
+                    weight=4.0,  # V60.I 2→4
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "target_clearance": 0.03,  # V60.I 0.02→0.03
+                        "contact_threshold": 1.0,
+                        "min_vel": 0.05,
+                    },
+                )
+
+                # ── [변경B] anti-phase 직접 보상 (신규) ──
+                self.rewards.pair_separation = RewTerm(
+                    func=custom_mdp.diagonal_pair_separation_reward,
+                    weight=3.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "contact_threshold": 1.0,
+                        "min_vel": 0.05,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                    },
+                )
+
+                # ── [변경C] stride/전진 보행 보상 (신규) ──
+                self.rewards.forward_step = RewTerm(
+                    func=custom_mdp.forward_step_reward,
+                    weight=2.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "contact_threshold": 1.0,
+                        "min_vel": 0.05,
+                    },
+                )
+
+                # rear 전용 OFF
+                self.rewards.rear_air_time = RewTerm(
+                    func=custom_mdp.rear_feet_air_time_reward,
+                    weight=0.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "contact_threshold": 1.0,
+                        "threshold": 0.1,
+                        "min_vel": 0.05,
+                    },
+                )
+                self.rewards.rear_clearance = RewTerm(
+                    func=custom_mdp.rear_foot_clearance_reward,
+                    weight=0.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "target_clearance": 0.02,
+                        "contact_threshold": 1.0,
+                        "min_vel": 0.05,
+                    },
+                )
+
+                # ── balance/대칭 penalty: V60.I 유지 ──
+                self.rewards.fr_swing_balance = RewTerm(
+                    func=custom_mdp.front_rear_swing_balance_penalty,
+                    weight=-1.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "contact_threshold": 1.0,
+                    },
+                )
+                self.rewards.fr_contact_balance = RewTerm(
+                    func=custom_mdp.front_rear_contact_balance_penalty,
+                    weight=-1.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "contact_threshold": 1.0,
+                    },
+                )
+                self.rewards.per_leg_contact_min = RewTerm(
+                    func=custom_mdp.per_leg_contact_min_penalty,
+                    weight=-3.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "contact_threshold": 1.0,
+                        "min_contact_ratio": 0.15,
+                    },
+                )
+                self.rewards.per_leg_excess_swing = RewTerm(
+                    func=custom_mdp.per_leg_excess_swing_penalty,
+                    weight=-3.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
+                        "contact_threshold": 1.0,
+                        "max_swing_ratio": 0.70,
+                    },
+                )
+                self.rewards.rear_lr_balance = RewTerm(
+                    func=custom_mdp.rear_left_right_balance_penalty,
+                    weight=-2.0,
+                    params={
+                        "sensor_cfg": toe_sensor_j,
                         "contact_threshold": 1.0,
                     },
                 )

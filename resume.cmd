@@ -3,10 +3,10 @@ setlocal
 
 set "PROJECT_DIR=D:\project\spot_micro_rl"
 set "LOG_DIR=%PROJECT_DIR%\logs\rsl_rl\spot_micro_flat"
-set "RUN=2026-04-07_06-21-38"
-set "CHECKPOINT=model_26200.pt"
+set "RUN=2026-04-07_06-45-39"
+set "CHECKPOINT=model_34000.pt"
 set "NUM_ENVS=4096"
-set "MAX_ITER=30000"
+set "MAX_ITER=40000"
 set "MODE=--headless"
 
 if /i "%~1"=="gui" set "MODE=" & shift

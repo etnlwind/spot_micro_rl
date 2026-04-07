@@ -2355,6 +2355,70 @@ def adaptive_phase_diagonal_event_reward(
     return reward * vel_gate
 
 
+def diagonal_pair_separation_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """대각 쌍 간 contact ratio 분리도를 직접 보상.
+
+    |pair_A_cr - pair_B_cr|가 클수록 한 쌍이 stance, 다른 쌍이 swing.
+    per_leg_contact_min/excess_swing이 극단 해를 방지하므로
+    이 보상은 "적절한 범위 내에서 분리도를 높이는" 역할.
+    전진 게이팅으로 정지 상태에서의 보상을 방지.
+    """
+    cr = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )
+    pair_a = (cr[:, 0] + cr[:, 3]) / 2.0  # FL+RR
+    pair_b = (cr[:, 1] + cr[:, 2]) / 2.0  # FR+RL
+    separation = torch.abs(pair_a - pair_b)
+
+    robot = env.scene[asset_cfg.name]
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+    return separation * vel_gate
+
+
+def forward_step_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    min_vel: float = 0.05,
+) -> torch.Tensor:
+    """Swing 중인 발의 전방 속도를 보상.
+
+    단순히 발을 드는 것이 아니라, 들린 발이 실제로 앞으로 이동하는지 보상.
+    swing 중 foot의 body-frame 전방(x) 속도가 양수이면 보상.
+    "제자리 흔들기"가 아닌 "전진형 보행"을 유도.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)
+    swing_mask = ~contacts  # (num_envs, 4)
+
+    # 발의 world-frame velocity
+    asset = env.scene[foot_cfg.name]
+    foot_vel = asset.data.body_vel_w[:, foot_cfg.body_ids, 0]  # x-velocity (num_envs, 4)
+
+    # body-frame 전방 속도 (양수 = 전진)
+    robot = env.scene[asset_cfg.name]
+    body_vel_x = robot.data.root_lin_vel_w[:, 0].unsqueeze(1)  # (num_envs, 1)
+
+    # 발의 상대 전방 속도 (body 기준 전진)
+    relative_fwd = foot_vel - body_vel_x  # 발이 body보다 앞으로 가면 양수
+
+    # swing 중 + 전방 이동인 발만 보상
+    fwd_reward = torch.clamp(relative_fwd, 0.0, 0.5) * swing_mask.float()
+
+    # 전진 게이팅
+    vel_gate = torch.clamp(robot.data.root_lin_vel_b[:, 0] / min_vel, 0.0, 1.0)
+    return fwd_reward.sum(dim=1) * vel_gate
+
+
 def simple_diagonal_coupling_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
