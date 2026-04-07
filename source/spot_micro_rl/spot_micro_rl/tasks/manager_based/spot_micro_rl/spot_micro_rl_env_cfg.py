@@ -4914,8 +4914,6 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "duty_factor": 0.55,
                     "contact_threshold": 1.0,
                     "standing_vel_threshold": 0.08,
-                    "swing_penalty_alpha": 1.5,       # swing phase 접지 적극 감점
-                    "aggregation_mode": "mean_min",   # 1발 희생 방지
                 },
             )
 
@@ -4948,6 +4946,20 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "command_name": "base_velocity",
                     "sensor_cfg": toe_sensor_v61,
                     "threshold": 0.1,
+                },
+            )
+
+            # [핵심] swing phase 접지 penalty — 정적 해 exploit 방지
+            # phase_contact와 독립. 서기(+4.15) 가능 + trot(+10) 유리하게 만듦.
+            self.rewards.swing_violation = RewTerm(
+                func=custom_mdp.swing_contact_penalty,
+                weight=-3.0,
+                params={
+                    "sensor_cfg": toe_sensor_v61,
+                    "frequency": 2.0,
+                    "duty_factor": 0.55,
+                    "contact_threshold": 1.0,
+                    "standing_vel_threshold": 0.08,
                 },
             )
 

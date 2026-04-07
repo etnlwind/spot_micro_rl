@@ -145,6 +145,52 @@ def phase_contact_reward(
     raise ValueError(f"Unsupported phase_contact aggregation_mode={aggregation_mode}")
 
 
+def swing_contact_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    frequency: float = 2.0,
+    duty_factor: float = 0.55,
+    contact_threshold: float = 1.0,
+    standing_vel_threshold: float = 0.08,
+) -> torch.Tensor:
+    """Swing phase에 접지한 다리 수를 penalty. phase_contact와 독립.
+
+    phase_contact는 match 보상만 주고 violation 감점이 없어서
+    "4발 항상 접지"도 55% match로 높은 점수를 받는 exploit이 가능.
+    이 함수는 swing phase에 접지한 다리를 독립적으로 벌함.
+    별도 weight로 조정 가능하므로 서기 학습을 막지 않으면서
+    정적 해의 이점을 줄일 수 있음.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
+    is_contact = (forces > contact_threshold).float()
+
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = 2.0 * math.pi * frequency * t
+
+    fl_phase = base_phase
+    fr_phase = base_phase + math.pi
+    rl_phase = base_phase + math.pi
+    rr_phase = base_phase
+    phases = torch.stack([fl_phase, fr_phase, rl_phase, rr_phase], dim=1)
+
+    phase_norm = phases % (2.0 * math.pi)
+    stance_threshold_val = duty_factor * 2.0 * math.pi
+    expected_contact = (phase_norm < stance_threshold_val).float()
+
+    # Standing command → all-stance (violation 없음)
+    vel_cmd = env.command_manager.get_command("base_velocity")[:, :2]
+    vel_magnitude = vel_cmd.norm(dim=1)
+    is_standing = (vel_magnitude < standing_vel_threshold).unsqueeze(1)
+    expected_contact = torch.where(is_standing.expand_as(expected_contact),
+                                   torch.ones_like(expected_contact),
+                                   expected_contact)
+
+    # swing violation = 접지(1) AND swing phase(expected=0)
+    swing_violation = is_contact * (1.0 - expected_contact)
+    return swing_violation.sum(dim=1)
+
+
 def phase_foot_clearance(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
