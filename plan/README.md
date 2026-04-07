@@ -436,7 +436,7 @@ from-scratch 보행 학습(V60)으로 전환했다.
 
 - **V60.J~M** — quality recovery 시도 (자세 정상화, pair-lock 차단, trailing 방지). GUI에서 비정상 자세 확인(RR trailing, RL 무릎접지, 앞다리 모으기). exploit 패치의 한계에 도달하여 V61 from-scratch로 전환.
 
-- **V61** — **from-scratch + phase clock observation(8차원) + 독립 swing_contact_penalty.** phase timing 학습은 빠르게 성공(iter 300에서 폭발적 전환). 초기 8000 iter에서 "phase-matched 정적 해" exploit 발견. 수정 1차(alpha=1.5 내부)는 서기 학습 사망. 수정 2차: swing violation을 별도 penalty term(-3)으로 분리하여 서기(+4.15) 보장 + trot(+10) 유리하게. **진행 중.**
+- **V61** — **from-scratch + phase clock observation(8차원) + stance propulsion reward.** phase timing 학습은 빠르게 성공(iter 300에서 폭발적 전환). 초기 8000 iter에서 "phase-matched 정적 해" exploit 발견. 수정 1차(swing penalty 내부, 서기 사망) → 수정 2차(별도 penalty) → 수정 3차: "안 들면 벌" 대신 **"밀면 상"(propulsion +5)**으로 전환. 정적 해=0, trot=+5 → 3배 유리. **진행 중.**
 
 ## V60을 읽는 핵심 포인트
 

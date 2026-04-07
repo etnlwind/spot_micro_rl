@@ -424,16 +424,11 @@ score = match - 1.5 * swing_violation
 
 **교훈:** swing penalty를 phase_contact 내부에 넣으면 **서기 학습 자체를 막는다.** reward와 penalty를 같은 함수에 묶으면 weight를 독립 조정할 수 없다.
 
-### V61 수정 2차: swing_contact_penalty를 별도 term으로 분리 (현재)
+### V61 수정 2차: swing_contact_penalty를 별도 term으로 분리
 
 **핵심 아이디어:** phase_contact는 순수 보상(alpha=0)으로 복원하고, swing violation은 **독립 penalty term**으로 분리.
 
-```python
-# phase_contact: 올바른 위상이면 보상 (alpha=0, mean aggregation)
-# swing_contact_penalty: swing phase에 접지한 다리 수 × weight
-```
-
-**왜 이게 되는가 — 수치 검증:**
+**수치 검증 (swing_violation -3):**
 
 | 상태 | phase_contact (+10) | swing_penalty (-3) | 합산 | 서기 가능? |
 |------|--------------------|--------------------|------|----------|
@@ -441,20 +436,53 @@ score = match - 1.5 * swing_violation
 | 완벽한 trot | +10.0 | 0 | **+10.0** | - |
 | 차이 | | | **+5.85** | trot이 2.4배 유리 |
 
-- 정적 해: 양수(+4.15)이므로 **서기 학습 가능** (이전 alpha=1.5에서는 음수 → 즉사)
-- trot: +10으로 정적 해보다 **5.85점 유리** (이전 alpha=0에서는 차이 4.5 → 정적 해가 안전해서 exploit)
+**하지만 근본 의문:** swing_violation은 "발을 안 들면 벌" — 여전히 음수 유도 방식. PPO에서 양수 유도가 더 자연스럽지 않은가?
 
-| | alpha=0 (V61 초기) | alpha=1.5 (수정 1차) | 별도 penalty (수정 2차) |
-|--|-------------------|---------------------|----------------------|
-| 정적 해 | +5.5 (이득) | -1.25 (손해) | +4.15 (이득, 약화) |
-| trot | +10 (이득) | +10 (이득) | +10 (이득) |
-| trot vs 정적 차이 | +4.5 | +11.25 | **+5.85** |
-| 서기 학습 | 가능 | **불가** | 가능 |
-| 정적 해 exploit | **발생** | 불가 | **억제** |
+### V61 수정 3차: stance_propulsion_reward로 전환 (현재)
 
-**변경 파일:**
-- `rewards.py`: `swing_contact_penalty` 함수 추가 (phase_contact와 동일한 phase 계산, swing violation만 반환)
-- `env_cfg.py V61`: phase_contact alpha=0/mean 복원 + `swing_violation` RewTerm(-3.0) 추가
+**사용자 통찰:** "toe가 바닥을 밀어서 추진력이 발생하면 진짜 보행, 아니면 형식적 보행."
+
+이 관점이 swing_violation보다 **근본적으로 나은 해결책**이다.
+
+| 접근 | 방식 | 서기 학습 | 정적 해 | exploit 방지 |
+|------|------|----------|---------|-------------|
+| swing_violation (-3) | "안 들면 벌" | 위험 (음수 유도) | 억제 | 간접적 |
+| **propulsion (+5)** | **"밀면 상"** | **안전 (0 = 보상 없음)** | **자연 억제** | **직접적** |
+
+**왜 propulsion이 더 나은가:**
+
+1. **긍정 유도**: "밀면 상" > "안 들면 벌" — PPO에서 양수 gradient가 더 안정적
+2. **서기 안전**: 서기 시 propulsion=0, 벌이 아닌 보상 없음 → 서기 학습 방해 안 함
+3. **exploit 불가**: 실제 추진 없이는 보상 0 → "형식적 phase 맞추기"로 점수 못 받음
+4. **검증된 코드**: `stance_propulsion_reward` (rewards.py L3794, V18부터 존재)
+
+**작동 원리:**
+```
+stance phase에서 발이 body를 밀면 (상대 속도 음수) → 추진력 발생 → 보상
+정적 접지 (안 움직임) → 상대 속도 = 0 → propulsion = 0 → 보상 없음
+```
+
+**수치 검증:**
+
+| 상태 | phase_contact (+10) | propulsion (+5) | 합산 | 서기 가능? |
+|------|-------------------|----------------|------|----------|
+| 정적 해 (안 움직임) | +5.5 | **0** | **+5.5** | **O** (양수) |
+| 진짜 trot | +10.0 | **+5.0** | **+15.0** | - |
+| 차이 | | | **+9.5** | trot이 **3배** 유리 |
+
+**3개 수정 비교:**
+
+| | alpha=0 (초기) | alpha=1.5 (수정 1차) | swing_viol (수정 2차) | **propulsion (수정 3차)** |
+|--|---------------|---------------------|---------------------|--------------------------|
+| 정적 해 | +5.5 | -1.25 | +4.15 | **+5.5** |
+| trot | +10 | +10 | +10 | **+15** |
+| trot vs 정적 차이 | +4.5 | +11.25 | +5.85 | **+9.5** |
+| 서기 학습 | 가능 | **불가** | 가능 | **가능 (가장 안전)** |
+| 정적 해 exploit | **발생** | 불가 | 억제 | **억제 (가장 자연)** |
+
+**변경:**
+- `swing_violation` RewTerm 제거
+- `stance_propulsion_reward` RewTerm(+5.0) 추가 (기존 함수 재사용)
 
 ### 참고: diagonal_coupling_raw = 0은 측정 버그
 
@@ -464,8 +492,35 @@ V61은 `simple_diagonal_coupling_reward`를 사용하므로 이 값은 항상 0.
 
 ---
 
+## V61 현재 reward 구조 (수정 3차 반영)
+
+### 양수 reward (6개)
+
+| reward | weight | 역할 |
+|--------|--------|------|
+| **phase_contact** | **+10** | 주연: trot 위상 타이밍 |
+| **propulsion** | **+5** | 핵심: 실제 추진력만 보상 |
+| track_lin_vel | +4 | 속도 추종 |
+| forward_velocity | +3 | 전진 |
+| flat_orientation_bonus | +3 | 수평 |
+| feet_air_time | +2 | 발 들기 백업 |
+
+### 음수 penalty (5개)
+
+| penalty | weight | 역할 |
+|---------|--------|------|
+| per_leg_contact_min | -5 | 1발 비사용 방지 |
+| per_leg_excess_swing | -5 | 영구 공중 방지 |
+| pair_lock | -5 | pair 고착 방지 |
+| flat_orientation_l2 | -2 | 수평 |
+| lin_vel_z_l2 | -2 | 바운싱 억제 |
+
+### 제거된 것
+- ~~swing_violation (-3)~~ → propulsion(+5)이 대체
+
+---
+
 ## 한 줄 요약
 
-V61은 **"policy에게 시간 구조를 직접 보여주고, swing phase 접지를 별도 penalty로 독립 벌하여, 서기 학습은 보장하면서 정적 해 exploit을 억제"**하는 설계이다.
-V60 교훈 + V61 초기(phase-matched 정적 해) + V61 수정 1차(서기 학습 사망) 교훈까지 반영하여,
-phase clock observation + 독립 swing_contact_penalty(-3) + from-scratch로 trot 학습을 시도한다.
+V61은 **"phase clock으로 타이밍을 보여주고, 실제 추진력(propulsion)으로 진짜 보행만 보상"**하는 설계이다.
+phase-matched 정적 해는 propulsion=0이므로 자연스럽게 불리해지고, 서기 학습은 방해받지 않는다.
