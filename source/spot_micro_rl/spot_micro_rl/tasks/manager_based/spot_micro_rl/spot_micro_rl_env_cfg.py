@@ -4598,10 +4598,9 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     func=custom_mdp.rear_trailing_penalty,
                     weight=-2.5,
                     params={
-                        "sensor_cfg": toe_sensor_m,
                         "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),
                         "asset_cfg": SceneEntityCfg("robot"),
-                        "contact_threshold": 1.0,
+                        "max_rear_back": 0.06,
                     },
                 )
 
