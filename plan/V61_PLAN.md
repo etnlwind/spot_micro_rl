@@ -169,7 +169,7 @@ V61에서는 policy가 매 step "지금이 어느 위상인지"를 직접 본다
 lin_vel_x = (0.0, 0.25)     # 0부터 자연스럽게 (V60.F의 0.12 최소값 없음)
 lin_vel_y = (0.0, 0.0)      # 횡이동 없음
 ang_vel_z = (0.0, 0.0)      # yaw OFF (직진부터)
-standing_envs = 0.05         # 5%만 서기 (거의 전부 보행)
+standing_envs = 0.0          # 100% 보행 (phase obs와 all-stance reward 모순 방지)
 action_scale = 0.25          # Isaac Lab 표준
 ```
 
@@ -193,6 +193,9 @@ From-scratch에서 yaw까지 넣으면 학습 난이도가 급증한다.
 | `forward_velocity` | +3.0 | `forward_velocity_reward` | 전진 직접 보상 (수평 유지 시에만) |
 | `flat_orientation_bonus` | +3.0 | `flat_orientation_bonus` | 수평 유지 |
 | `feet_air_time` | +2.0 | Isaac Lab 표준 | 발 들기 백업 (threshold=0.1s). phase_contact가 주연이므로 보조만. |
+| **`swing_violation`** | **-3.0** | `swing_contact_penalty` | **핵심 추가 (수정 2차).** swing phase에 접지한 다리 수를 독립 penalty. 정적 해(+4.15)는 양수 유지(서기 가능), trot(+10)이 2.4배 유리. |
+
+> **주의:** `phase_contact_reward` 내부에도 `swing_penalty_alpha` 파라미터가 존재하지만, V61에서는 **alpha=0으로 유지**하고 `swing_violation`을 별도 term으로 사용한다. 둘을 동시에 켜면 double counting이 발생하므로, V61에서는 반드시 alpha=0이어야 한다.
 
 **왜 phase_contact가 +10인가:**
 
