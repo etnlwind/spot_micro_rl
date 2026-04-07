@@ -2528,7 +2528,7 @@ def prolonged_pair_lock_termination(
     # grace 이후 + consecutive 초과 시 termination
     in_grace = env.episode_length_buf < grace_steps
     terminate = (~in_grace) & (env._pair_lock_count >= consecutive_steps)
-    return terminate.float()
+    return terminate
 
 
 def diagonal_pair_separation_reward(
