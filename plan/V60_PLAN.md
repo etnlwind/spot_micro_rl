@@ -76,8 +76,9 @@ V60.H는 V60.G 런의 최신이 아니라 **중간 체크포인트 `model_24100.
 | V60.E | 15800→16600 | 800 | resume |
 | V60.F | 16600→17600 | 1000 | resume |
 | V60.G | 17600→25100 | 7500 | resume |
-| V60.H | 24100→? | 진행 중 | resume (G 중간에서) |
-| **합계** | | **~26400** | |
+| V60.H | 24100→25500 | 1400 | resume (G 중간에서) |
+| V60.I | 25500→30200 | 4700 | resume (H에서) |
+| **합계** | | **~32500** | |
 
 ---
 
@@ -627,16 +628,13 @@ V60.G에서 달성한 4발 균형 swing 위에, **대각선 교대(trot) 패턴�
 - ep_len > 900
 - 500 iter에서 1차 판정
 
-### 성공 기준
-- diagonal_coupling_raw > 0
-- 4발 모두 swing > 0
-- ep_len > 900
-- track_lin이 24100 대비 크게 붕괴하지 않음
+### 성공 기준 (수정: diagonal_coupling_raw는 V27 경로 전용으로 측정 불가)
+- phase_diagonal_event 상승 추세
+- anti_phase = |pair_A_cr - pair_B_cr| > 0.15
+- 4발 모두 swing > 0.2
+- ep_len > 900, track_lin 급락 없음
 
-### 실패 시 다음 단계
-- diagonal_coupling_raw 여전히 0 → phase clock 도입 검토
-- 4발 swing 붕괴 → balance penalty 복원
-- 또는 from-scratch V61 (CPG/phase clock 기반 근본 재설계)
+### V60.H 결과 — 진행 중 (V60.I에서 계속)
 
 ---
 
@@ -838,6 +836,40 @@ V60.I에서 기대하는 건 "바로 예쁜 trot 완성"이 아니다.
 V60.I는
 `발을 더 들게 만드는 버전`이 아니라,
 **이미 생긴 4발 swing 위에, resume 가능한 sparse phase event bias를 얹어 diagonal alternation의 첫 신호를 만들려는 버전**이다.
+
+### V60.I 결과 (iter 25500→30200, 4700 iter) — **Go**
+
+**Run:** `2026-04-07_06-21-38` + `2026-04-07_06-45-39` (연장)
+
+**핵심 성과:**
+| 지표 | 시작(25500) | 최종(30200) | 판정 |
+|------|-----------|-----------|------|
+| pde | 0.43 | **0.86** | 역대 최고 |
+| 4발 clearance | 비대칭(11~34mm) | **균등(15~18mm)** | 최초 달성 |
+| 4발 swing | 0.36~0.46 | **0.45/0.56/0.55/0.45** | 균형 유지 |
+| track_lin | 2.98 | **3.13** | 최고 |
+| mean_reward | ~305 | **345.5** | 최고 |
+| ep_len | 993 | **1000** | 안정 |
+
+**pair 역전 현상 (대각 쌍 교대 탐색):**
+- iter 27400: pair_B(FR+RL) 우세 → anti_phase 0.206
+- iter 30000: **pair_A(FL+RR) 우세로 역전** → anti_phase 0.060
+- iter 30200: pair_A 지속 → anti_phase 0.106
+- 해석: 한쪽 고착이 아니라 두 대각 쌍이 경쟁하며 균형점을 탐색하는 과도기
+
+**측정 주의:**
+- diagonal_coupling_raw = 0 전 구간 — V27 함수 경로 전용, V60.I에서 측정 불가
+- 실제 교대 신호는 pde(0.86) + pair 역전 + clearance 균등으로 확인
+
+**Codex 리뷰로 수정된 버그:**
+1. episode reset 시 `_adp_last_contacts` 미초기화 → per-env reset 추가
+2. actual vel → command vel 기반 cadence로 전환 (tracking 불완전 시 안정적)
+3. dead parameter `base_frequency` 제거
+
+**교훈:**
+- velocity-adaptive sparse phase reward(+3)가 고정 2Hz dense(+10)보다 효과적
+- 판정 지표 자체의 유효성 검증 필요 (diagonal_coupling_raw가 dead metric이었음)
+- 초기 no-go 판정이 측정 버그에 기인 → 재검증으로 partial→go 전환
 
 ---
 

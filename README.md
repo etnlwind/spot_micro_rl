@@ -114,7 +114,8 @@ V59.D에서 확인했듯이, 서기에서 필요한 정적 균형과 보행에�
 | V60.E | rear 전용 clearance + static bias 제거 | no-go: rear swing 미달 (0.007/0.013) |
 | V60.F | 정적 해 구조 전환 + rear air_time 직접 보상 | rear swing 폭발, front 고착 (앞뒤 역전) |
 | V60.G | front/rear pair balance + diagonal coupling | 4발 균형 개선, diagonal_coupling=0 |
-| V60.H | diagonal coupling 8x 강화 + balance 완화 | **진행 중** |
+| V60.H | diagonal coupling 8x 강화 + balance 완화 | 4발 swing 분산 개선 |
+| V60.I | velocity-adaptive phase diagonal event | **Go** — pde 0.86, 4발 clearance 균등, pair 역전 |
 
 현재 해석:
 - `V60.A~C`는 **비대칭 exploit 제거 단계**

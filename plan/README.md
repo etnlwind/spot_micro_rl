@@ -430,7 +430,9 @@ from-scratch 보행 학습(V60)으로 전환했다.
 
 - **V60.G** — front/rear pair balance + diagonal coupling. 4발 swing 균형 개선, 하지만 diagonal_coupling_raw=0 전 구간. balance는 잡히나 교대 패턴은 자동 발생 안 함.
 
-- **V60.H** — diagonal coupling 2→8 강화, balance penalty -5→-2 완화, rear 전용 보상 제거. 대각선 교대 구조 직접 유도. **진행 중.**
+- **V60.H** — diagonal coupling 2→8 강화, balance penalty -5→-2 완화, rear 전용 보상 제거. 4발 swing 분산 개선, diagonal_coupling_raw=0 (측정 불가 문제).
+
+- **V60.I** — velocity-adaptive sparse phase diagonal event reward(+3), command vel 기반 cadence. **Go**: pde 0.86(역대 최고), 4발 clearance 균등(15~18mm), pair 역전 현상(대각 쌍 교대 탐색), mean_reward 345.5, track_lin 3.13.
 
 ## V60을 읽는 핵심 포인트
 
