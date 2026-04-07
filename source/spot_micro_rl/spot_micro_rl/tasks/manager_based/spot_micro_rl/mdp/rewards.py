@@ -2417,6 +2417,120 @@ def stance_width_min_penalty(
     return front_gap + rear_gap
 
 
+def rear_trailing_penalty(
+    env: ManagerBasedRLEnv,
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_rear_back: float = 0.06,
+) -> torch.Tensor:
+    """Penalize rear toes that stay too far behind the body in the body frame.
+
+    This directly targets the GUI-observed pathology where a rear leg trails behind
+    like a tail instead of cycling under the body. Only the rear toes (RL, RR) are
+    considered. The penalty is zero while both rear toes stay within the allowed
+    rearward range, and grows linearly once either toe drifts farther back.
+    """
+    asset = env.scene[foot_cfg.name]
+    robot = env.scene[asset_cfg.name]
+
+    foot_pos_xy = asset.data.body_pos_w[:, foot_cfg.body_ids, :2]
+    root_pos_xy = robot.data.root_pos_w[:, :2].unsqueeze(1)
+    rel_xy = foot_pos_xy - root_pos_xy
+
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    cos_yaw = torch.cos(yaw).unsqueeze(1)
+    sin_yaw = torch.sin(yaw).unsqueeze(1)
+
+    body_x = cos_yaw * rel_xy[:, :, 0] + sin_yaw * rel_xy[:, :, 1]
+    rear_x = body_x[:, 2:4]  # RL, RR
+
+    # rear toe behind body more than max_rear_back -> penalty
+    excess_back = torch.clamp((-rear_x) - max_rear_back, min=0.0)
+    return excess_back.sum(dim=1)
+
+
+def rear_leg_min_swing_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    min_swing_ratio: float = 0.05,
+) -> torch.Tensor:
+    """Penalize rear legs when either RL or RR almost never leaves stance.
+
+    This targets the K2 pathology where RR trailing is reduced, but RL becomes
+    a permanent stance anchor. The penalty is zero once both rear legs achieve
+    at least ``min_swing_ratio`` over the rolling contact-ratio window.
+    """
+    cr = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )
+    rear_swing = 1.0 - cr[:, 2:4]  # RL, RR
+    swing_deficit = torch.clamp(min_swing_ratio - rear_swing, min=0.0)
+    return swing_deficit.sum(dim=1)
+
+
+def diagonal_pair_lock_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    gap_threshold: float = 0.45,
+) -> torch.Tensor:
+    """한 대각 쌍만 영구 swing하는 pair-lock exploit를 penalty.
+
+    pairA_swing = (sw_FL + sw_RR) / 2, pairB_swing = (sw_FR + sw_RL) / 2.
+    |pairA - pairB| > gap_threshold이면 초과분만큼 penalty.
+    작은 차이는 무시 (정상 보행에서도 순간 비대칭 가능).
+    """
+    cr = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )
+    sw = 1.0 - cr  # swing ratio
+    pair_a_swing = (sw[:, 0] + sw[:, 3]) / 2.0  # FL + RR
+    pair_b_swing = (sw[:, 1] + sw[:, 2]) / 2.0  # FR + RL
+    gap = torch.abs(pair_a_swing - pair_b_swing)
+    return torch.clamp(gap - gap_threshold, min=0.0)
+
+
+def prolonged_pair_lock_termination(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    gap_threshold: float = 0.50,
+    grace_steps: int = 50,
+    consecutive_steps: int = 20,
+) -> torch.Tensor:
+    """한 대각 쌍이 지속적으로 lock되면 episode 종료.
+
+    |pairA_swing - pairB_swing| > gap_threshold가 consecutive_steps 연속이면 True.
+    grace_steps 이전에는 판정 안 함.
+    """
+    cr = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )
+    sw = 1.0 - cr
+    pair_a_swing = (sw[:, 0] + sw[:, 3]) / 2.0
+    pair_b_swing = (sw[:, 1] + sw[:, 2]) / 2.0
+    gap = torch.abs(pair_a_swing - pair_b_swing)
+    is_locked = gap > gap_threshold
+
+    if not hasattr(env, "_pair_lock_count"):
+        env._pair_lock_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+
+    # episode reset 처리
+    reset_mask = env.episode_length_buf <= 1
+    env._pair_lock_count = torch.where(reset_mask, torch.zeros_like(env._pair_lock_count), env._pair_lock_count)
+
+    # 연속 카운트
+    env._pair_lock_count = torch.where(is_locked, env._pair_lock_count + 1, torch.zeros_like(env._pair_lock_count))
+
+    # grace 이후 + consecutive 초과 시 termination
+    in_grace = env.episode_length_buf < grace_steps
+    terminate = (~in_grace) & (env._pair_lock_count >= consecutive_steps)
+    return terminate.float()
+
+
 def diagonal_pair_separation_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
