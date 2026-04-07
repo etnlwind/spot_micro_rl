@@ -2393,8 +2393,8 @@ def forward_step_reward(
     """Swing 중인 발의 전방 속도를 보상.
 
     단순히 발을 드는 것이 아니라, 들린 발이 실제로 앞으로 이동하는지 보상.
-    swing 중 foot의 body-frame 전방(x) 속도가 양수이면 보상.
-    "제자리 흔들기"가 아닌 "전진형 보행"을 유도.
+    swing 중 foot의 world x 속도가 body보다 빠르면 보상 (= body 기준 전진).
+    ang_vel_z=0일 때 world x ≈ body forward. "제자리 흔들기"가 아닌 "전진형 보행"을 유도.
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     contacts = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold)
