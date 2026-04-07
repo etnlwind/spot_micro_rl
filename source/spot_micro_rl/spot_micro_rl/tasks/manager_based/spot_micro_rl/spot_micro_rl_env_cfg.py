@@ -4949,17 +4949,19 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 },
             )
 
-            # [핵심] swing phase 접지 penalty — 정적 해 exploit 방지
-            # phase_contact와 독립. 서기(+4.15) 가능 + trot(+10) 유리하게 만듦.
-            self.rewards.swing_violation = RewTerm(
-                func=custom_mdp.swing_contact_penalty,
-                weight=-3.0,
+            # [핵심] stance propulsion reward — 진짜 보행만 보상
+            # stance phase에서 발이 body를 밀면 보상. 정적 해=0, 실제 보행=양수.
+            # swing_violation(-3) 대체: "안 들면 벌"보다 "밀면 상"이 서기 학습에 안전.
+            self.rewards.propulsion = RewTerm(
+                func=custom_mdp.stance_propulsion_reward,
+                weight=5.0,
                 params={
                     "sensor_cfg": toe_sensor_v61,
-                    "frequency": 2.0,
-                    "duty_factor": 0.55,
+                    "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),
+                    "asset_cfg": SceneEntityCfg("robot"),
                     "contact_threshold": 1.0,
-                    "standing_vel_threshold": 0.08,
+                    "target_push_vel": 0.3,
+                    "min_vel": 0.05,
                 },
             )
 
