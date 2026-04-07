@@ -4914,6 +4914,8 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "duty_factor": 0.55,
                     "contact_threshold": 1.0,
                     "standing_vel_threshold": 0.08,
+                    "swing_penalty_alpha": 1.5,       # swing phase 접지 적극 감점
+                    "aggregation_mode": "mean_min",   # 1발 희생 방지
                 },
             )
 

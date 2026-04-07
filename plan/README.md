@@ -434,6 +434,10 @@ from-scratch 보행 학습(V60)으로 전환했다.
 
 - **V60.I** — velocity-adaptive sparse phase diagonal event reward(+3), command vel 기반 cadence. **Go**: pde 0.86(역대 최고), 4발 clearance 균등(15~18mm), pair 역전 현상(대각 쌍 교대 탐색), mean_reward 345.5, track_lin 3.13.
 
+- **V60.J~M** — quality recovery 시도 (자세 정상화, pair-lock 차단, trailing 방지). GUI에서 비정상 자세 확인(RR trailing, RL 무릎접지, 앞다리 모으기). exploit 패치의 한계에 도달하여 V61 from-scratch로 전환.
+
+- **V61** — **from-scratch + phase clock observation(8차원) + swing violation penalty.** phase timing 학습은 빠르게 성공(iter 300에서 폭발적 전환). 하지만 초기 8000 iter에서 "phase-matched 정적 해" exploit 발견 → swing_penalty_alpha=1.5 + mean_min aggregation으로 수정. **진행 중.**
+
 ## V60을 읽는 핵심 포인트
 
 V60은 아래 세 덩어리로 이해하는 것이 가장 쉽다.

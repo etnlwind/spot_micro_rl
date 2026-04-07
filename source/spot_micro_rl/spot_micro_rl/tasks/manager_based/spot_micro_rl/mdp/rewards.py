@@ -67,14 +67,19 @@ def phase_contact_reward(
     aggregation_mode: str = "mean",
     ema_alpha: float = 0.0,
     min_target: float = 0.60,
+    swing_penalty_alpha: float = 0.0,
 ) -> torch.Tensor:
-    """V54: Phase-conditioned contact reward — phase clock의 주연 reward.
+    """Phase-conditioned contact reward with optional swing violation penalty.
 
     stance phase에서 접지, swing phase에서 이탈하면 보상.
     standing command (|vel| < threshold)일 때는 all-stance (4발 접지).
-    V54.4: per-leg EMA + floor aggregation 옵션으로 one-leg sacrifice exploit 억제.
-    범위 [0, 1] — match=1, mismatch=0.
-    V54.3: boot-gate 제거 — curriculum이 weight를 0→20으로 ramp (soft handoff).
+
+    V61 추가: swing_penalty_alpha > 0이면 swing phase에 접지한 다리에
+    적극적 감점을 부여. 이것이 없으면 "4발 항상 접지"도 55% match로
+    높은 점수를 받는 phase-matched 정적 해 exploit이 가능.
+
+    score = stance_match + swing_match - alpha * swing_violation
+    swing_violation = 접지(1) AND swing phase(expected=0) = 잘못된 접촉
     """
     contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
     forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
@@ -102,20 +107,28 @@ def phase_contact_reward(
                                    torch.ones_like(expected_contact),
                                    expected_contact)
 
+    # match = 올바른 상태 (접지 AND stance, 또는 이탈 AND swing)
     match = (is_contact == expected_contact).float()
+
+    # swing violation = swing phase인데 접지 (잘못된 접촉)
+    swing_violation = is_contact * (1.0 - expected_contact)  # (num_envs, 4)
+
+    # score = match - alpha * violation
+    score_per_leg = match - swing_penalty_alpha * swing_violation
+
     if ema_alpha > 0.0:
         if not hasattr(env, "_phase_contact_ema"):
-            env._phase_contact_ema = match.clone()
+            env._phase_contact_ema = score_per_leg.clone()
         else:
             reset_mask = (env.episode_length_buf <= 1).unsqueeze(1)
             env._phase_contact_ema = torch.where(
                 reset_mask,
-                match,
-                ema_alpha * env._phase_contact_ema + (1.0 - ema_alpha) * match,
+                score_per_leg,
+                ema_alpha * env._phase_contact_ema + (1.0 - ema_alpha) * score_per_leg,
             )
         score_src = env._phase_contact_ema
     else:
-        score_src = match
+        score_src = score_per_leg
 
     mean_score = score_src.mean(dim=1)
     if aggregation_mode == "mean":

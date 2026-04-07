@@ -393,9 +393,61 @@ train.cmd gui    # GUI로 확인하며 학습
 
 ---
 
+## V61 초기 결과 및 수정
+
+### V61 초기 결과 (iter 8000)
+
+phase clock observation 덕분에 **phase timing 학습은 빠르게 성공**:
+- iter 300에서 ep_len 56→937 폭발적 전환 (V60.A는 2000+ iter 소요)
+- phase_contact 7.76 (높음)
+- non_toe_contact termination 0.47%로 급감
+
+**하지만 trot은 나오지 않았다:**
+- anti_phase = 0.019 (trot 최소 0.3 필요)
+- FL swing = 0.025 (사실상 안 듦)
+- clearance = 1-2mm (보행 아님)
+
+**원인 진단:** phase_contact_reward가 **"잘 맞으면 보상"만 있고 "swing phase에 붙어 있으면 손해"가 없었다.** duty_factor=0.55이면 4발 항상 접지해도 55%는 stance phase와 일치 → phase_contact ~5.5 기본 확보. 여기에 rear만 약간 들면 7+ 달성. "거의 안 움직이면서 7.76점"이 "제대로 걸으면서 10점"보다 안전하고 순이익이 높았다.
+
+### V61 수정: swing violation penalty
+
+**핵심 수정:** swing phase에 접지하면 적극적으로 감점.
+
+```python
+# 기존: match = (contact == expected), 0 or 1 → 정적 해도 55% 맞음
+# 수정: swing violation = contact AND swing_phase → 감점
+score = match - alpha * swing_violation
+```
+
+수치 검증:
+```
+정적 해 (4발 항상 접지):
+  stance phase(55%): score = 1.0
+  swing phase(45%): score = 0 - 1.5×1 = -1.5
+  per-leg 평균 = 0.55 - 0.675 = -0.125 → 음수! (이전: +0.55)
+
+완벽한 trot:
+  stance phase: contact=1, score = 1.0
+  swing phase: contact=0, score = 1.0 (violation 없음)
+  per-leg 평균 = 1.0 → 양수
+```
+
+**정적 해가 이제 음수, trot이 양수.** 이전에는 둘 다 양수여서 정적 해가 유리했다.
+
+변경 파라미터:
+- `swing_penalty_alpha`: 0 → **1.5** (swing phase 접지 시 감점 1.5배)
+- `aggregation_mode`: "mean" → **"mean_min"** (1발 희생 방지)
+
+### 참고: diagonal_coupling_raw = 0은 측정 버그
+
+`diagonal_coupling_raw`는 V27 함수(`diagonal_coupling_soft_gate_reward`) 경로에서만 업데이트됨.
+V61은 `simple_diagonal_coupling_reward`를 사용하므로 이 값은 항상 0.
+실제 교대 여부는 contact_ratio의 pair 분석(anti_phase)으로 판단해야 함.
+
+---
+
 ## 한 줄 요약
 
-V61은 **"reward를 더 쌓자"가 아니라 "policy에게 시간 구조를 직접 보여주자"**라는 철학의 전환이다.
-V60에서 13버전 동안 배운 모든 exploit 패턴을 초기 설계에 반영하고,
-phase clock observation + 단순 10-reward + termination 기반 exploit 방지로
-from-scratch trot 학습을 시도한다.
+V61은 **"policy에게 시간 구조를 직접 보여주고, swing phase 접지를 적극 감점하여 trot을 강제"**하는 설계이다.
+V60에서 13버전 동안 배운 exploit 패턴 + V61 초기 8000 iter에서 발견한 phase-matched 정적 해 exploit까지 반영하여,
+phase clock observation + swing violation penalty + mean_min aggregation으로 from-scratch trot 학습을 시도한다.
