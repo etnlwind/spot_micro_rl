@@ -3837,10 +3837,16 @@ def diagonal_pair_propulsion_reward(
     normalized_push = torch.clamp(push_magnitude / target_push_vel, 0.0, 1.0)
     per_leg_push = normalized_push * stance_mask  # (num_envs, 4): FL, FR, RL, RR
 
-    # 대각 쌍 propulsion: min(앞, 뒤) — 둘 다 밀어야 보상
+    # 대각 쌍 propulsion: 교대 보너스 — 한 쌍이 밀고 다른 쌍이 swing이어야 보상
     pair_a = torch.min(per_leg_push[:, 0], per_leg_push[:, 3])  # min(FL, RR)
     pair_b = torch.min(per_leg_push[:, 1], per_leg_push[:, 2])  # min(FR, RL)
-    reward = pair_a + pair_b
+
+    # 교대 보너스: push_pair(더 강한 쪽) × swing_pair(약한 쪽이 안 미는 정도)
+    # crawl(동시 밀기): push=1, swing=1-1=0 → bonus=0
+    # trot(교대 밀기): push=1, swing=1-0=1 → bonus=1
+    push_pair = torch.max(pair_a, pair_b)
+    swing_pair = 1.0 - torch.min(pair_a, pair_b)
+    reward = push_pair * swing_pair
 
     # 전진 게이팅
     vel_x = robot.data.root_lin_vel_b[:, 0]
