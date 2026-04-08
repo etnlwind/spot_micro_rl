@@ -3855,6 +3855,154 @@ def diagonal_pair_propulsion_reward(
     return reward * vel_gate
 
 
+def phase_gated_diagonal_propulsion_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_push_vel: float = 0.3,
+    min_vel: float = 0.05,
+    frequency: float = 2.0,
+    duty_factor: float = 0.55,
+    gate_sharpness: float = 5.0,
+) -> torch.Tensor:
+    """Phase-gated 대각 교대 propulsion. late-stance(마지막 ~25%)에서 push-off할 때만 보상.
+
+    V62: diagonal_pair_propulsion_reward에 phase gate를 추가.
+    - stance 0~75%: gate≈0 → 접지만으로는 보상 없음
+    - stance 75~100% (late-stance): gate가 0.5→1.0으로 상승 → push-off 보상
+    - swing phase: stance_mask=0이므로 자동 0
+
+    이것이 drag/crawl exploit을 막는 핵심 메커니즘:
+    - drag: 항상 접지(contact_ratio 90%+) → stance 대부분에서 gate≈0으로 보상 차단
+    - trot: late stance에서 강하게 밀고 바로 swing → gate≈1에서 보상 최대
+
+    gate_sharpness로 전환 폭 조절 (높을수록 날카로운 on/off, 낮을수록 부드러운 전환).
+
+    body 순서: FL(0), FR(1), RL(2), RR(3)
+    """
+    # ── per-leg propulsion 계산 (기존과 동일) ──
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    stance_mask = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()
+
+    foot_asset = env.scene[foot_cfg.name]
+    foot_vel_w = foot_asset.data.body_vel_w[:, foot_cfg.body_ids, :3]
+
+    robot = env.scene[asset_cfg.name]
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    heading_x = 1.0 - 2.0 * (y * y + z * z)
+    heading_y = 2.0 * (x * y + w * z)
+
+    foot_heading_vel = (
+        foot_vel_w[:, :, 0] * heading_x.unsqueeze(1) +
+        foot_vel_w[:, :, 1] * heading_y.unsqueeze(1)
+    )
+    body_vel_w = robot.data.root_lin_vel_w
+    body_heading_vel = body_vel_w[:, 0] * heading_x + body_vel_w[:, 1] * heading_y
+
+    relative_vel = foot_heading_vel - body_heading_vel.unsqueeze(1)
+    push_magnitude = torch.clamp(-relative_vel, min=0.0)
+    normalized_push = torch.clamp(push_magnitude / target_push_vel, 0.0, 1.0)
+    per_leg_push = normalized_push * stance_mask  # (num_envs, 4)
+
+    # ��─ phase gate: late-stance에서만 보상 ──
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = 2.0 * math.pi * frequency * t
+
+    # Trot phases: FL/RR=0, FR/RL=π
+    leg_phases = torch.stack([
+        base_phase,                # FL
+        base_phase + math.pi,     # FR
+        base_phase + math.pi,     # RL
+        base_phase,                # RR
+    ], dim=1)  # (num_envs, 4)
+
+    # phase_norm: 0~2π, stance=0~duty*2π, swing=duty*2π~2π
+    phase_norm = leg_phases % (2.0 * math.pi)
+    stance_end = duty_factor * 2.0 * math.pi  # stance phase 끝 (≈3.46 rad)
+    late_onset = stance_end * 0.75  # late-stance 시작점 (stance의 75%)
+
+    # late_stance_gate: stance 마지막 ~25%에서 gate≈1, 그 전에는 gate≈0
+    # sigmoid(5 * (phase - late_onset)):
+    #   phase=0 (stance 시작): sigmoid(-12.96) ≈ 0    → gate≈0
+    #   phase=2.0 (stance 58%): sigmoid(-2.96) ≈ 0.05 → gate≈0
+    #   phase=2.59 (75%): sigmoid(0) = 0.5             → gate=0.5
+    #   phase=3.0 (87%): sigmoid(2.04) ≈ 0.88          → gate≈0.9
+    #   phase=3.46 (stance 끝): sigmoid(4.32) ≈ 0.99   → gate≈1
+    # swing phase (phase_norm > stance_end)에서는 stance_mask=0이 이미 차단
+    late_gate = torch.sigmoid(gate_sharpness * (phase_norm - late_onset))
+
+    per_leg_push_gated = per_leg_push * late_gate  # (num_envs, 4)
+
+    # ── 대각 쌍 교대 보너스 (V61.C와 동일) ──
+    pair_a = torch.min(per_leg_push_gated[:, 0], per_leg_push_gated[:, 3])  # min(FL, RR)
+    pair_b = torch.min(per_leg_push_gated[:, 1], per_leg_push_gated[:, 2])  # min(FR, RL)
+
+    push_pair = torch.max(pair_a, pair_b)
+    swing_pair = 1.0 - torch.min(pair_a, pair_b)
+    reward = push_pair * swing_pair
+
+    # ── 전진 게이팅 ──
+    vel_x = robot.data.root_lin_vel_b[:, 0]
+    vel_gate = torch.clamp(vel_x / min_vel, 0.0, 1.0)
+
+    # ── KPI logging: 에피소드별 누적 통계 ──
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            num_envs = stance_mask.shape[0]
+
+            # 누적 버퍼 초기화 (최초 호출 또는 에피소드 리셋 시)
+            if not hasattr(env, "_v62_contact_sum"):
+                env._v62_contact_sum = torch.zeros(num_envs, 4, device=stance_mask.device)
+                env._v62_both_pairs_sum = torch.zeros(num_envs, device=stance_mask.device)
+                env._v62_step_count = torch.zeros(num_envs, device=stance_mask.device)
+
+            # 에피소드 리셋 감지 (episode_length_buf <= 1)
+            reset_mask = (env.episode_length_buf <= 1)
+            if reset_mask.any():
+                env._v62_contact_sum[reset_mask] = 0.0
+                env._v62_both_pairs_sum[reset_mask] = 0.0
+                env._v62_step_count[reset_mask] = 0.0
+
+            # 현재 step 누적
+            env._v62_contact_sum += stance_mask  # (num_envs, 4)
+            pair_a_contact = torch.min(stance_mask[:, 0], stance_mask[:, 3])
+            pair_b_contact = torch.min(stance_mask[:, 1], stance_mask[:, 2])
+            env._v62_both_pairs_sum += pair_a_contact * pair_b_contact
+            env._v62_step_count += 1.0
+
+            # 에피소드 내 시간 평균 비율 계산
+            safe_count = env._v62_step_count.clamp(min=1.0)
+            ep_contact_ratio = env._v62_contact_sum / safe_count.unsqueeze(1)  # (num_envs, 4)
+            ep_swing_ratio = 1.0 - ep_contact_ratio
+            ep_both_pairs = env._v62_both_pairs_sum / safe_count
+
+            # 환경 전체 평균 → 텐서보드 로깅
+            cr_mean = ep_contact_ratio.mean(dim=0)  # (4,)
+            env.extras["log_contact_ratio_fl"] = cr_mean[0].item()
+            env.extras["log_contact_ratio_fr"] = cr_mean[1].item()
+            env.extras["log_contact_ratio_rl"] = cr_mean[2].item()
+            env.extras["log_contact_ratio_rr"] = cr_mean[3].item()
+            env.extras["log_mean_swing_ratio"] = ep_swing_ratio.mean().item()
+            env.extras["log_pair_both_stance"] = ep_both_pairs.mean().item()
+
+            sw_mean = ep_swing_ratio.mean(dim=0)
+            env.extras["log_swing_time_fl"] = sw_mean[0].item()
+            env.extras["log_swing_time_fr"] = sw_mean[1].item()
+            env.extras["log_swing_time_rl"] = sw_mean[2].item()
+            env.extras["log_swing_time_rr"] = sw_mean[3].item()
+
+            # 이 두 값은 순간 측정이 적절 (에피소드 누적 불필요)
+            env.extras["log_phase_gated_propulsion"] = (per_leg_push_gated.sum(dim=1) * vel_gate).mean().item()
+            front_prop = (per_leg_push_gated[:, 0] + per_leg_push_gated[:, 1]).mean()
+            rear_prop = (per_leg_push_gated[:, 2] + per_leg_push_gated[:, 3]).mean()
+            env.extras["log_front_rear_prop_diff"] = (front_prop - rear_prop).item()
+
+    return reward * vel_gate
+
+
 def stance_propulsion_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),

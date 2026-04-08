@@ -182,36 +182,41 @@ V61에서는 phase_contact가 "올바른 위상에 stance/swing"을 직접 요�
 From-scratch에서 yaw까지 넣으면 학습 난이도가 급증한다.
 직진 trot이 안정적으로 나온 후 V61.B에서 yaw를 추가하면 된다.
 
-### Rewards (10개)
+### Rewards (15개) — V61.C 기준
 
-#### 양수 reward (5개)
+> **V61.C (2026-04-08~):** V61→V61.B→V61.C로 3회 반복. 아래는 현재 훈련 중인 V61.C 코드 기준.
+> V61.B에서 `stance_propulsion_reward`를 `diagonal_pair_propulsion_reward`로 교체하고 weight 5→8로 상향.
+
+#### 양수 reward (7개)
 
 | reward | weight | 함수 | 역할 |
 |--------|--------|------|------|
 | `phase_contact` | **+10.0** | `phase_contact_reward` | **주연.** stance phase에 접지, swing phase에 이탈하면 보상. frequency=2.0Hz, duty_factor=0.55. standing command 시 all-stance. |
+| **`propulsion`** | **+8.0** | **`diagonal_pair_propulsion_reward`** | **핵심: 대각 교대 추진.** `reward = max(pair_a, pair_b) × (1 - min(pair_a, pair_b))`. crawl=0, trot=1. V61.C에서 alternation bonus로 변경. |
 | `track_lin_vel_xy_exp` | +4.0 | Isaac Lab 표준 | 속도 추종 (std=0.15) |
-| `forward_velocity` | +3.0 | `forward_velocity_reward` | 전진 직접 보상 (수평 유지 시에만) |
+| `forward_velocity` | +3.0 | `forward_velocity_reward` | 전진 직접 보상 |
 | `flat_orientation_bonus` | +3.0 | `flat_orientation_bonus` | 수평 유지 |
-| `feet_air_time` | +2.0 | Isaac Lab 표준 | 발 들기 백업 (threshold=0.1s). phase_contact가 주연이므로 보조만. |
-| **`swing_violation`** | **-3.0** | `swing_contact_penalty` | **핵심 추가 (수정 2차).** swing phase에 접지한 다리 수를 독립 penalty. 정적 해(+4.15)는 양수 유지(서기 가능), trot(+10)이 2.4배 유리. |
-
-> **주의:** `phase_contact_reward` 내부에도 `swing_penalty_alpha` 파라미터가 존재하지만, V61에서는 **alpha=0으로 유지**하고 `swing_violation`을 별도 term으로 사용한다. 둘을 동시에 켜면 double counting이 발생하므로, V61에서는 반드시 alpha=0이어야 한다.
+| `feet_air_time` | +2.0 | Isaac Lab 표준 | 발 들기 백업 (threshold=0.1s) |
+| `track_ang_vel_z_exp` | +1.0 | Isaac Lab 표준 | yaw 추종 (비활성 상태, ang_vel_z=0) |
 
 **왜 phase_contact가 +10인가:**
 
 V60.I에서 reward-only phase(obs 없이)로 +3을 줬을 때 pde 0.86 달성.
 V61에서는 policy가 phase를 직접 보므로 더 강한 신호를 줘도 안전하다.
-+10이면 총 양수 budget ~22 중 45%를 차지 — 명확한 주연.
++10이면 총 양수 budget ~31 중 32%를 차지 — 명확한 주연.
 
-수치 검증:
-- 완벽한 trot (4발 모두 phase 일치): phase_contact = 10.0/step
-- 정적 접지 (standing vel일 때): phase_contact = 10.0/step (all-stance도 맞음)
-- 정적 접지 (walking vel일 때): phase_contact = ~5.0/step (50% mismatch)
-- 1발 exploit: phase_contact = ~7.5/step (3발 맞음 + 1발 틀림)
+**왜 propulsion이 +8인가 (V61.C):**
 
-따라서 완벽한 trot이 정적 접지보다 ~5.0/step 이득 — per_leg_contact_min(-5)과 합치면 exploit보다 trot이 유리.
+V61 초기(propulsion 없음)에서 정적 해 exploit 발생 → V61 수정으로 stance_propulsion +5 추가 →
+V61.B에서 diagonal_pair_propulsion으로 교체(대각 쌍 유도) → 하지만 `reward = pair_a + pair_b`로 crawl이 2배 유리한 버그 발견 →
+V61.C에서 alternation bonus(`max × (1-min)`)로 수정, weight +8로 상향.
 
-#### 음수 penalty (5개)
+수치 검증 (V61.C alternation bonus):
+- crawl (4발 동시 밀기): push=1, swing=1-1=0 → reward = **0**
+- trot (대각 교대): push=1, swing=1-0=1 → reward = **1** (× weight 8 = +8/step)
+- 약한 교대: push=0.8, swing=1-0.2=0.8 → reward = **0.64**
+
+#### 음수 penalty (8개)
 
 | penalty | weight | 함수 | 역할 |
 |---------|--------|------|------|
@@ -220,17 +225,9 @@ V61에서는 policy가 phase를 직접 보므로 더 강한 신호를 줘도 안
 | `pair_lock` | **-5.0** | `diagonal_pair_lock_penalty` | pair 고착 방지 (gap_threshold=0.45) |
 | `flat_orientation_l2` | -2.0 | Isaac Lab 표준 | 수평 penalty |
 | `lin_vel_z_l2` | -2.0 | Isaac Lab 표준 | 수직 바운싱 억제 |
-
-추가 최소 항목:
-- `ang_vel_xy_l2` = -1.0
-- `action_rate_l2` = -0.05
-- `dof_torques_l2` = -0.0001
-
-**왜 penalty가 -5인가:**
-
-V60.B에서 -3이 부족했다 (양수 ~15 대비 부족).
-V61에서 양수 합계 ~22이므로, -5면 양수의 23% — 충분히 경쟁력 있다.
-V60.C에서 -10으로 RR exploit을 100 iter 만에 교정한 경험상, -5는 적절한 시작점.
+| `ang_vel_xy_l2` | -1.0 | Isaac Lab 표준 | 횡방향 회전 억제 |
+| `action_rate_l2` | -0.05 | Isaac Lab 표준 | 행동 smoothness |
+| `dof_torques_l2` | -0.0001 | Isaac Lab 표준 | 토크 최소화 |
 
 #### V60에서 썼지만 V61에서 뺀 것들
 
@@ -364,7 +361,7 @@ train.cmd gui    # GUI로 확인하며 학습
 | 총 버전 | 13 (A~M) | 1 (from-scratch) |
 | 총 iter | ~35,000 | 목표 5,000 |
 | phase 정보 | reward 내부 (policy 못 봄) | **observation으로 제공** |
-| 활성 reward 수 | 15~20개 | **10개** |
+| 활성 reward 수 | 15~20개 | **15개** (양수 7 + 음수 8) |
 | exploit 방지 | penalty 위주 | **termination 위주** |
 | pair 전용 보상 | 있음 (V60.D~F) | **없음** |
 | standing_height | 켰다 껐다 반복 | **없음** |
@@ -495,35 +492,72 @@ V61은 `simple_diagonal_coupling_reward`를 사용하므로 이 값은 항상 0.
 
 ---
 
-## V61 현재 reward 구조 (수정 3차 반영)
+## V61 현재 reward 구조 (V61.C 코드 기준)
 
-### 양수 reward (6개)
+위 "Rewards (15개)" 섹션 참조. 문서-코드 싱크를 위해 reward 구조는 한 곳에서만 관리.
 
-| reward | weight | 역할 |
-|--------|--------|------|
-| **phase_contact** | **+10** | 주연: trot 위상 타이밍 |
-| **propulsion** | **+5** | 핵심: 실제 추진력만 보상 |
-| track_lin_vel | +4 | 속도 추종 |
-| forward_velocity | +3 | 전진 |
-| flat_orientation_bonus | +3 | 수평 |
-| feet_air_time | +2 | 발 들기 백업 |
+### V61 → V61.B → V61.C 경과
 
-### 음수 penalty (5개)
-
-| penalty | weight | 역할 |
-|---------|--------|------|
-| per_leg_contact_min | -5 | 1발 비사용 방지 |
-| per_leg_excess_swing | -5 | 영구 공중 방지 |
-| pair_lock | -5 | pair 고착 방지 |
-| flat_orientation_l2 | -2 | 수평 |
-| lin_vel_z_l2 | -2 | 바운싱 억제 |
+| 버전 | propulsion 함수 | 수식 | crawl | trot | 문제 |
+|------|----------------|------|-------|------|------|
+| V61 | `stance_propulsion_reward` (+5) | 4발 합산 | 높음 | 높음 | crawl exploit 가능 |
+| V61.B | `diagonal_pair_propulsion_reward` (+8) | `pair_a + pair_b` | **2** | **1** | crawl이 2배 유리 (버그) |
+| **V61.C** | `diagonal_pair_propulsion_reward` (+8) | `max(a,b) × (1-min(a,b))` | **0** | **1** | **현재 훈련 중** |
 
 ### 제거된 것
-- ~~swing_violation (-3)~~ → propulsion(+5)이 대체
+- ~~swing_violation (-3)~~ → V61 수정 3차에서 propulsion으로 대체
+- ~~stance_propulsion_reward~~ → V61.B에서 diagonal_pair_propulsion으로 대체
+- ~~pair_a + pair_b~~ → V61.C에서 alternation bonus로 대체
+
+---
+
+## V61.C 훈련 결과 (진행 중)
+
+Run: `2026-04-08_09-07-28_V61` (from-scratch)
+
+| iter | ep_len | reward | propulsion | phase_contact | bad_ori % | timeout % |
+|------|--------|--------|------------|---------------|-----------|-----------|
+| 0 | 46.9 | -11.1 | 0.003 | 0.113 | 11.9% | — |
+| 100 | 14.7 | -0.14 | 0.000 | 0.082 | 0.1% | — |
+| 200 | 114.2 | +4.22 | 0.050 | 0.594 | 58.2% | — |
+| 300 | 413.1 | — | — | — | — | — |
+| **596** | **974.1** | **+359.3** | **6.680** | **7.377** | **0%** | **98.7%** |
+
+**iter 596 판정: 매우 양호**
+- ep_len 974 → iter 300 기준(>500) 대폭 초과
+- propulsion 6.68 → 강한 추진력 학습
+- bad_orientation 0% → 초기(iter 200) 83% 우려 완전 해소
+- timeout 98.7% → 거의 전부 생존
+
+---
+
+## Codex 리뷰 지적사항 (2026-04-08)
+
+### 1. 문서-코드 싱크 불일치 — **수정 완료**
+- ~~swing_violation -3이 핵심~~ → diagonal_pair_propulsion +8이 현재 코드
+- reward 개수 ~~10개~~ → 15개 (양수 7 + 음수 8)
+- 함수명/weight 모두 코드 기준으로 위 테이블 업데이트 완료
+
+### 2. 저속 구간 정적 해 허용 — **가장 큰 구조 리스크**
+- `lin_vel_x = (0.0, 0.25)` + `standing_vel_threshold = 0.08`
+- vel < 0.08 구간(~32% 환경)에서 all-stance = 만점(+10) → 서기가 최적해
+- 현재 propulsion 6.68로 보행 학습은 진행 중이지만, 수렴 후 혼합 정책 가능
+- **대응 옵션:** (A) `lin_vel_x = (0.10, 0.25)`, (B) `standing_vel_threshold = 0.02`, (C) 관찰 후 결정
+
+### 3. 고정 gait timing — **장기 과제**
+- frequency=2.0Hz 고정, 속도 0~0.25 m/s 전체에 동일 리듬 강제
+- 현재 좁은 속도 범위에서는 영향 제한적
+- 속도 확장 시 `frequency = f(vel_cmd)` 필요 → V62+ 과제
+
+### 4. "최소 설계" 표현 vs 실제 hybrid — **표현 수정**
+- V60(15~20개) → V61(15개): "대폭 축소"보다 "구조 정리"가 정확
+- phase_clock + diagonal_pair_propulsion이 이중 대각 유도 신호
+- 다만 V61 초기에 phase만으로 정적 해 발생 → propulsion 추가는 필요에 의한 것
+- V61은 "V60의 교훈을 반영한 더 정리된 hybrid 설계"
 
 ---
 
 ## 한 줄 요약
 
-V61은 **"phase clock으로 타이밍을 보여주고, 실제 추진력(propulsion)으로 진짜 보행만 보상"**하는 설계이다.
-phase-matched 정적 해는 propulsion=0이므로 자연스럽게 불리해지고, 서기 학습은 방해받지 않는다.
+V61은 **"phase clock으로 타이밍을 보여주고, 대각 교대 추진력(alternation bonus)으로 trot만 보상"**하는 설계이다.
+V61.C에서 crawl=0/trot=1 수식으로 crawl exploit을 구조적으로 차단했다.

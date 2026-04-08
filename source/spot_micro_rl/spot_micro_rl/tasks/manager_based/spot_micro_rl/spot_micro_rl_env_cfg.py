@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V61.C"
+TRAIN_VERSION = "V62"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -30,6 +30,7 @@ _IS_V58 = TRAIN_VERSION.startswith("V58")
 _IS_V59 = TRAIN_VERSION.startswith("V59")
 _IS_V60 = TRAIN_VERSION.startswith("V60")
 _IS_V61 = TRAIN_VERSION.startswith("V61")
+_IS_V62 = TRAIN_VERSION.startswith("V62")
 _V59_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V59 and "." in TRAIN_VERSION else ("A" if _IS_V59 else "")
 _V60_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V60 and "." in TRAIN_VERSION else ("A" if _IS_V60 else "")
 _V55_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V55 and "." in TRAIN_VERSION else ("A1" if _IS_V55 else "")
@@ -4913,7 +4914,7 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "frequency": 2.0,
                     "duty_factor": 0.55,
                     "contact_threshold": 1.0,
-                    "standing_vel_threshold": 0.08,
+                    "standing_vel_threshold": 0.02,  # [V61.C fix] 0.08→0.02: 저속 정적 해 exploit 방지 (Codex 리뷰)
                 },
             )
 
@@ -4989,6 +4990,213 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 weight=-5.0,
                 params={
                     "sensor_cfg": toe_sensor_v61,
+                    "contact_threshold": 1.0,
+                    "gap_threshold": 0.45,
+                },
+            )
+
+            # 최소 안정성
+            self.rewards.lin_vel_z_l2.weight = -2.0
+            self.rewards.ang_vel_xy_l2.weight = -1.0
+            self.rewards.action_rate_l2.weight = -0.05
+            self.rewards.dof_torques_l2.weight = -0.0001
+
+        # ══════════════════════════════════════════════════════════
+        # V62: Phase-Gated Trot — drag/shuffle 해 약화 + 진짜 trot 유도
+        # V61.C 기반, 3가지 변경:
+        #   1) lin_vel_x=(0.08, 0.25) — 저속 정적 해 제거
+        #   2) phase_gated_diagonal_propulsion — late-stance에서만 보상
+        #   3) feet_air_time weight 2→4 — swing 품질 강화
+        # Codex + Claude 공동 분석: V61.C의 drag exploit은 propulsion이
+        # phase를 안 보기 때문. phase gate로 "올바른 위상에서 밀어야 상" 연결.
+        # ══════════════════════════════════════════════════════════
+        if _IS_V62:
+            # ── Control (V61과 동일) ──
+            self.action_warmup_steps = 5
+            self.actions.joint_pos.scale = 0.25
+            self.decimation = 4
+            self.episode_length_s = 20.0
+
+            # ── Commands: 저속 정적 해 제거 ──
+            self.commands.base_velocity.heading_command = False
+            self.commands.base_velocity.rel_standing_envs = 0.0
+            self.commands.base_velocity.rel_heading_envs = 0.0
+            self.commands.base_velocity.ranges.lin_vel_x = (0.08, 0.25)  # [V62] 0.0→0.08: 저속 정적 해 제거
+            self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+            self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+
+            # ── Events (V61과 동일) ──
+            self.events.reset_robot_joints.params["position_range"] = (0.9, 1.1)
+            self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
+            self.events.reset_base.params["pose_range"]["x"] = (-0.1, 0.1)
+            self.events.reset_base.params["pose_range"]["y"] = (-0.1, 0.1)
+            self.events.reset_base.params["pose_range"]["yaw"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["x"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["y"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["z"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["roll"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["pitch"] = (0.0, 0.0)
+            self.events.reset_base.params["velocity_range"]["yaw"] = (0.0, 0.0)
+            self.events.add_base_mass = None
+            self.events.base_com = None
+            self.events.base_external_force_torque = None
+            self.events.push_robot = None
+
+            # ── Terminations (V61과 동일) ──
+            self.terminations.min_height.params["min_height"] = 0.14
+            self.terminations.bad_orientation = DoneTerm(
+                func=custom_mdp.bad_orientation_grace,
+                params={
+                    "limit_angle": 0.52,
+                    "grace_steps": 150,
+                    "asset_cfg": SceneEntityCfg("robot"),
+                },
+            )
+            self.terminations.shoulder_splay = None
+            self.terminations.posture_violation = None
+            self.terminations.feet_lifted = None
+            self.terminations.base_contact = DoneTerm(
+                func=isaaclab_mdp.illegal_contact,
+                params={
+                    "sensor_cfg": SceneEntityCfg("contact_forces", body_names="base_link"),
+                    "threshold": 1.0,
+                },
+            )
+            self.terminations.non_toe_contact = DoneTerm(
+                func=isaaclab_mdp.illegal_contact,
+                params={
+                    "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot_link|.*leg_link"),
+                    "threshold": 1.0,
+                },
+            )
+            toe_term_v62 = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            self.terminations.pair_lock = DoneTerm(
+                func=custom_mdp.prolonged_pair_lock_termination,
+                params={
+                    "sensor_cfg": toe_term_v62,
+                    "contact_threshold": 1.0,
+                    "gap_threshold": 0.50,
+                    "grace_steps": 100,
+                    "consecutive_steps": 30,
+                },
+            )
+
+            # ── Curriculum: 없음 ──
+            self.curriculum.reward_weights = None
+
+            # ── Observations: phase clock ON ──
+            self.observations.policy.phase_clock = ObsTerm(
+                func=custom_mdp.phase_clock_obs,
+                params={"frequency": 2.0},
+            )
+
+            # ── Rewards: V61 기반 + phase-gated propulsion ──
+            keep_reward_names = {
+                "track_lin_vel_xy_exp",
+                "track_ang_vel_z_exp",
+                "lin_vel_z_l2",
+                "ang_vel_xy_l2",
+                "action_rate_l2",
+                "flat_orientation_l2",
+                "dof_torques_l2",
+                "flat_orientation_bonus",
+            }
+            for attr in list(vars(self.rewards).keys()):
+                if attr.startswith("_") or attr in keep_reward_names:
+                    continue
+                try:
+                    setattr(self.rewards, attr, None)
+                except Exception:
+                    pass
+
+            # [주연] phase-conditioned contact
+            toe_sensor_v62 = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            self.rewards.phase_contact = RewTerm(
+                func=custom_mdp.phase_contact_reward,
+                weight=10.0,
+                params={
+                    "sensor_cfg": toe_sensor_v62,
+                    "frequency": 2.0,
+                    "duty_factor": 0.55,
+                    "contact_threshold": 1.0,
+                    "standing_vel_threshold": 0.02,  # [V62] 저속 정적 해 방지
+                },
+            )
+
+            # 속도 추종
+            self.rewards.track_lin_vel_xy_exp.weight = 4.0
+            self.rewards.track_lin_vel_xy_exp.params["std"] = 0.15
+            self.rewards.track_ang_vel_z_exp.weight = 1.0
+            self.rewards.track_ang_vel_z_exp.params["std"] = 0.25
+
+            # 전진
+            self.rewards.forward_velocity = RewTerm(
+                func=custom_mdp.forward_velocity_reward,
+                weight=3.0,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+
+            # 수평
+            self.rewards.flat_orientation_bonus = RewTerm(
+                func=custom_mdp.flat_orientation_bonus,
+                weight=3.0,
+                params={"asset_cfg": SceneEntityCfg("robot")},
+            )
+            self.rewards.flat_orientation_l2.weight = -2.0
+
+            # [V62 변경] feet_air_time weight 2→4: swing 품질 강화
+            self.rewards.feet_air_time = RewTerm(
+                func=velocity_mdp.feet_air_time,
+                weight=4.0,  # [V62] 2.0→4.0
+                params={
+                    "command_name": "base_velocity",
+                    "sensor_cfg": toe_sensor_v62,
+                    "threshold": 0.1,
+                },
+            )
+
+            # [V62 핵심] phase-gated 대각 교대 propulsion
+            # late-stance에서만 push-off 보상 → drag/crawl 차단
+            self.rewards.propulsion = RewTerm(
+                func=custom_mdp.phase_gated_diagonal_propulsion_reward,
+                weight=8.0,
+                params={
+                    "sensor_cfg": toe_sensor_v62,
+                    "foot_cfg": SceneEntityCfg("robot", body_names=".*toe_link"),
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "contact_threshold": 1.0,
+                    "target_push_vel": 0.3,
+                    "min_vel": 0.05,
+                    "frequency": 2.0,
+                    "duty_factor": 0.55,
+                    "gate_sharpness": 5.0,
+                },
+            )
+
+            # exploit 방지 penalty
+            self.rewards.per_leg_contact_min = RewTerm(
+                func=custom_mdp.per_leg_contact_min_penalty,
+                weight=-5.0,
+                params={
+                    "sensor_cfg": toe_sensor_v62,
+                    "contact_threshold": 1.0,
+                    "min_contact_ratio": 0.15,
+                },
+            )
+            self.rewards.per_leg_excess_swing = RewTerm(
+                func=custom_mdp.per_leg_excess_swing_penalty,
+                weight=-5.0,
+                params={
+                    "sensor_cfg": toe_sensor_v62,
+                    "contact_threshold": 1.0,
+                    "max_swing_ratio": 0.70,
+                },
+            )
+            self.rewards.pair_lock = RewTerm(
+                func=custom_mdp.diagonal_pair_lock_penalty,
+                weight=-5.0,
+                params={
+                    "sensor_cfg": toe_sensor_v62,
                     "contact_threshold": 1.0,
                     "gap_threshold": 0.45,
                 },
