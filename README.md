@@ -248,26 +248,6 @@ V59.D에서 확인했듯이, 서기에서 필요한 정적 균형과 보행에�
 
 ---
 
-## 11. V59~V60 핵심 교훈
-
-### V59 교훈
-1. **URDF 질량은 반드시 실물 기준 검증** — 원본 5.3kg은 실물 1.7kg의 3배
-2. **merge_fixed_joints=True는 contact reporting을 깨뜨림** — SpotMicro에서는 반드시 False
-3. **contact termination은 consecutive 판정 필수** — 1 step 판정은 진동으로 즉사
-4. **curriculum 복원 버그** — resume 시 저장된 reward weight가 env_cfg를 덮어씀
-
-### V60 교훈
-5. **서기→보행 resume 전환은 비효율** — 정적 균형(서기)과 동적 균형(보행)은 완전히 다른 스킬
-6. **from-scratch가 resume보다 나음** — V60.A가 V59.D보다 훨씬 좋은 결과
-7. **1발 exploit** — feet_air_time이 1발만 들어도 보상 → 최소 비용 exploit 발생
-8. **penalty는 reward budget 대비 수치 검증 필수** — -3.0은 양수 15에 비해 부족, -10 이상 필요
-9. **exploit 교정은 간접(penalty)보다 직접(표적 타격)이 효과적** — rear pair balance가 전체 std보다 정확
-10. **한쪽 pair 전용 보상은 반대쪽 고착 유발** — front만 유도→rear 고착, rear만 유도→front 고착 (V60.D/F)
-11. **balance penalty만으로는 교대 패턴 미발생** — "균형 있는 정지"도 최적해가 됨 (V60.G)
-12. **교대(alternation)는 직접 보상 필요** — diagonal coupling에 anti-phase + swing_gate 조건 필수 (V60.H)
-
----
-
-## 12. 한 줄 요약
+## 11. 한 줄 요약
 
 **spot_micro_rl은 SpotMicro 기반 4족보행 RL 연구 프로젝트이며, 실물 기반 물리 설정 위에서 from-scratch 보행 학습과 exploit 교정을 통해 실기체 배치 가능한 4족 보행 policy를 만드는 것을 목표로 합니다.**

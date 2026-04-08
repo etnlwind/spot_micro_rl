@@ -468,7 +468,7 @@ stance phase에서 발이 body를 밀면 (상대 속도 음수) → 추진력 �
 | 진짜 trot | +10.0 | +5.0 | **+15.0** | - |
 | trot vs crawl 차이 | | | **+7.5~8.5** | trot이 2배+ 유리 |
 
-> **주의 (Codex 리뷰):** propulsion은 "진짜 push-off만" 보상하는 것이 아니라 stance 중 뒤로 미는 모든 전진을 보상한다. 따라서 dragging/준정적 crawl도 일부 보상을 받을 수 있다. 다만 phase_contact(+10)가 trot 타이밍을 강하게 유도하므로, 실제로는 "phase에 맞는 push-off"가 가장 유리할 것으로 예상. 실제 테스트 후 dragging exploit이 나타나면 phase-gated propulsion(late-stance only)으로 보완 예정.
+> **주의:** propulsion은 "진짜 push-off만" 보상하는 것이 아니라 stance 중 뒤로 미는 모든 전진을 보상한다. 따라서 dragging/준정적 crawl도 일부 보상을 받을 수 있다. 다만 phase_contact(+10)가 trot 타이밍을 강하게 유도하므로, 실제로는 "phase에 맞는 push-off"가 가장 유리할 것으로 예상. 실제 테스트 후 dragging exploit이 나타나면 phase-gated propulsion(late-stance only)으로 보완 예정.
 
 **3개 수정 비교:**
 
@@ -531,7 +531,7 @@ Run: `2026-04-08_09-07-28_V61` (from-scratch)
 
 ---
 
-## Codex 리뷰 지적사항 (2026-04-08)
+## 리뷰 지적사항 (2026-04-08)
 
 ### 1. 문서-코드 싱크 불일치 — **수정 완료**
 - ~~swing_violation -3이 핵심~~ → diagonal_pair_propulsion +8이 현재 코드

@@ -2,7 +2,7 @@
 
 > 작성: 2026-04-08
 > 현재 코드 truth 기준 버전: `V62`
-> 기반: V61.C + Codex/Claude 공동 분석
+> 기반: V61.C + 공동 분석
 
 ---
 
@@ -17,7 +17,7 @@ V61.C (iter 1265)는 생존/안정성 완벽(ep_len=1000, reward=401, timeout=10
 | propulsion 분포 | 4발 균등 | 대각쌍 교대 | **drag 패턴** |
 | feet_air_time | -0.019 | 양수 | **학습 실패** |
 
-### 핵심 진단 (Codex + Claude 일치)
+### 핵심 진단
 
 > "trot를 못 배우는 게 아니라, 현재 reward landscape에서 더 쉬운 drag/shuffle 해가 존재한다."
 

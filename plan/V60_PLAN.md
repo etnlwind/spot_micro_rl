@@ -861,7 +861,7 @@ V60.I는
 - diagonal_coupling_raw = 0 전 구간 — V27 함수 경로 전용, V60.I에서 측정 불가
 - 실제 교대 신호는 pde(0.86) + pair 역전 + clearance 균등으로 확인
 
-**Codex 리뷰로 수정된 버그:**
+**리뷰로 수정된 버그:**
 1. episode reset 시 `_adp_last_contacts` 미초기화 → per-env reset 추가
 2. actual vel → command vel 기반 cadence로 전환 (tracking 불완전 시 안정적)
 3. dead parameter `base_frequency` 제거
