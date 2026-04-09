@@ -8,7 +8,9 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 LOGS = Path("/mnt/d/project/spot_micro_rl/logs/rsl_rl/spot_micro_flat")
 
 W_ASYM_TARGET = 5.0
-W_INTRA_SYNC = 4.0
+W_TRUE_TROT = 5.0
+W_CLEARANCE_LIFT = 4.0  # V63.G.2 신규
+W_INTRA_SYNC = 4.0      # V63.G only
 W_PER_LEG_BAL = 2.0
 W_LEG_USAGE_CV = -3.0
 W_PHASE_CT = 4.0
@@ -17,7 +19,8 @@ W_FEET_AIR = 4.0
 
 
 def latest_run() -> Path | None:
-    cands = sorted(glob.glob(str(LOGS / "2026-04-0*_V63.G")), reverse=True)
+    # V63.G, V63.G.1 등 모두 매치 (timestamp 최신 우선)
+    cands = sorted(glob.glob(str(LOGS / "2026-04-0*_V63.G*")), reverse=True)
     return Path(cands[0]) if cands else None
 
 
@@ -81,7 +84,17 @@ def main() -> int:
     _, intra = last(ea, "Episode_Reward/intra_pair_sync")
     intra_raw = intra / W_INTRA_SYNC if intra is not None else None
     if intra_raw is not None:
-        print(f"  intra_pair_sync raw= {intra_raw:+.4f}  (weighted {intra:.4f}) ★ FL-RR/FR-RL 동기")
+        print(f"  intra_pair_sync raw= {intra_raw:+.4f}  (weighted {intra:.4f}) [V63.G only]")
+
+    _, true_trot = last(ea, "Episode_Reward/true_trot_pattern")
+    true_trot_raw = true_trot / W_TRUE_TROT if true_trot is not None else None
+    if true_trot_raw is not None:
+        print(f"  true_trot raw      = {true_trot_raw:+.4f}  (weighted {true_trot:.4f}) ★★ intra×inter")
+
+    _, clift = last(ea, "Episode_Reward/clearance_lift")
+    clift_raw = clift / W_CLEARANCE_LIFT if clift is not None else None
+    if clift_raw is not None:
+        print(f"  clearance_lift raw = {clift_raw:+.4f}  (weighted {clift:.4f}) ★★ V63.G.2 발 높이")
 
     _, plbal = last(ea, "Episode_Reward/per_leg_propulsion_balance")
     plbal_raw = plbal / W_PER_LEG_BAL if plbal is not None else None

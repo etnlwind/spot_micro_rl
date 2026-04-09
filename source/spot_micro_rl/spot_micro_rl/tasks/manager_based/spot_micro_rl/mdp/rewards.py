@@ -3381,6 +3381,394 @@ def asymmetric_joint_target_reward(
     return reward
 
 
+def base_height_target_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_height: float = 0.18,
+    sigma: float = 0.05,
+) -> torch.Tensor:
+    """V63.H.2: Body 자세 높이 target 보상.
+
+    사용자 V63.H.1 GUI 지적: 자세가 너무 낮아서 윗다리 들 공간 없음 → FR 옆으로 벌림.
+
+    수식:
+        base_z = robot.data.root_pos_w[:, 2] - ground_z
+        err = (base_z - target_z) / sigma
+        reward = exp(-err²)
+
+    target_z = 0.18 m (정상 standing 자세)
+    sigma = 0.05 (5cm 오차 허용)
+
+    범위 0~1:
+        - 0.18m: 1.0
+        - 0.15m: 0.78
+        - 0.12m (낮음): 0.30
+        - 0.10m (매우 낮음): 0.05
+    """
+    robot = env.scene[asset_cfg.name]
+    base_z = robot.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    err = (base_z - target_height) / sigma
+    reward = torch.exp(-(err ** 2))
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_base_height"] = base_z.mean().item()
+            env.extras["log_base_height_reward"] = reward.mean().item()
+
+    return reward
+
+
+def anti_pace_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """V63.H.1: Pace gait 직접 차단.
+
+    Pace = 같은 측면 다리 동기 (Left FL+RL 같이, Right FR+RR 같이)
+    Trot = 대각선 동기 (FL+RR 같이, FR+RL 같이)
+
+    험지에서 pace는 좌우 흔들림으로 매우 불안정 → trot 강제 필요.
+
+    수식:
+        pace_a = 1 - |FL - RL|  (왼쪽 측면 동기 정도)
+        pace_b = 1 - |FR - RR|  (오른쪽 측면 동기 정도)
+        penalty = (pace_a + pace_b) / 2
+
+    범위 0~1:
+        - 정상 trot (FL=RR, FR=RL → 좌우 다름): 0
+        - Pure pace (FL=RL, FR=RR): 1.0
+        - Walk: 0.5 정도 (부분적 측면 동기)
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4): FL, FR, RL, RR
+
+    pace_a = 1.0 - torch.abs(contact[:, 0] - contact[:, 2])  # FL-RL
+    pace_b = 1.0 - torch.abs(contact[:, 1] - contact[:, 3])  # FR-RR
+    penalty = (pace_a + pace_b) * 0.5
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_pace_pattern"] = penalty.mean().item()
+            env.extras["log_pace_left"] = pace_a.mean().item()
+            env.extras["log_pace_right"] = pace_b.mean().item()
+
+    return penalty
+
+
+def lateral_balance_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V63.H.1: 좌우 흔들림 (roll velocity) penalty.
+
+    Pace gait은 좌우 분리로 인해 몸체가 좌우 rolling.
+    험지에서 매우 불안정 → roll velocity 직접 penalty.
+
+    수식:
+        roll_vel = root_ang_vel_b[:, 0]  # body frame x-axis (roll)
+        penalty = |roll_vel|
+    """
+    robot = env.scene[asset_cfg.name]
+    roll_vel = robot.data.root_ang_vel_b[:, 0]
+    penalty = roll_vel.abs()
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_roll_vel"] = roll_vel.abs().mean().item()
+
+    return penalty
+
+
+def swing_body_forward_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_speed: float = 0.4,
+) -> torch.Tensor:
+    """V63.H: Swing 중 body forward 진행 (제자리 stepping 차단).
+
+    사용자 V63.G.3 GUI 통찰: trot 본질은 contact 패턴이 아니라 dynamic momentum.
+    "2개 다리 들어 공중에 두고 → body 관성으로 전진 → 새 위치에 착지"
+
+    수식:
+        swing_count = (1 - contact_mask).sum(dim=-1)  # 0~4
+        swing_ratio = swing_count / 4.0
+        body_vel_forward = root_lin_vel_b[:, 0]
+        forward_norm = clamp(body_vel_forward / target_speed, 0, 1)
+        reward = swing_ratio × forward_norm
+
+    범위 0~1:
+        - 정상 trot (swing 0.45, body 0.4 m/s): 0.45 × 1.0 = 0.45
+        - 제자리 stepping (swing 0.45, body 0): 0.45 × 0 = 0 ★ 차단
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_mask = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()
+    swing_count = (1.0 - contact_mask).sum(dim=-1)
+    swing_ratio = swing_count / 4.0
+
+    robot = env.scene[asset_cfg.name]
+    body_vel_forward = robot.data.root_lin_vel_b[:, 0]
+    forward_norm = torch.clamp(body_vel_forward / target_speed, 0.0, 1.0)
+
+    reward = swing_ratio * forward_norm
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_swing_body_forward"] = reward.mean().item()
+            env.extras["log_swing_ratio_avg"] = swing_ratio.mean().item()
+            env.extras["log_body_fwd_avg"] = body_vel_forward.mean().item()
+
+    return reward
+
+
+def effective_stride_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_stride: float = 0.05,
+) -> torch.Tensor:
+    """V63.H: Per-leg effective stride (touchdown 사이 body 전진 거리).
+
+    Touchdown 이벤트(rising edge: contact 0→1) 시 그 다리의 body forward 위치 기록.
+    이전 touchdown 위치 대비 차이 = effective stride.
+
+    Buffer:
+        env._v63h_prev_contact: (N, 4)
+        env._v63h_prev_td_body_x: (N, 4)
+        env._v63h_recent_stride: (N, 4) decay buffer
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_mask = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()
+
+    robot = env.scene[asset_cfg.name]
+    body_x_now = robot.data.root_pos_w[:, 0]
+
+    num_envs = contact_mask.shape[0]
+    device = contact_mask.device
+
+    if not hasattr(env, "_v63h_prev_contact"):
+        env._v63h_prev_contact = torch.zeros(num_envs, 4, device=device)
+        env._v63h_prev_td_body_x = body_x_now.unsqueeze(-1).expand(-1, 4).clone()
+        env._v63h_recent_stride = torch.zeros(num_envs, 4, device=device)
+
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        env._v63h_prev_contact[reset_mask] = 0.0
+        env._v63h_prev_td_body_x[reset_mask] = body_x_now[reset_mask].unsqueeze(-1).expand(-1, 4)
+        env._v63h_recent_stride[reset_mask] = 0.0
+
+    new_touchdown = (contact_mask == 1.0) & (env._v63h_prev_contact == 0.0)
+
+    body_x_per_leg = body_x_now.unsqueeze(-1).expand(-1, 4)
+    stride = (body_x_per_leg - env._v63h_prev_td_body_x).clamp(min=0.0)
+    normalized_stride = torch.clamp(stride / target_stride, 0.0, 1.0)
+
+    env._v63h_recent_stride = torch.where(
+        new_touchdown,
+        normalized_stride,
+        env._v63h_recent_stride * 0.99,
+    )
+
+    env._v63h_prev_td_body_x = torch.where(
+        new_touchdown,
+        body_x_per_leg,
+        env._v63h_prev_td_body_x,
+    )
+
+    env._v63h_prev_contact = contact_mask.clone()
+
+    reward = env._v63h_recent_stride.mean(dim=-1)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_effective_stride"] = reward.mean().item()
+            env.extras["log_stride_fl"] = env._v63h_recent_stride[:, 0].mean().item()
+            env.extras["log_stride_fr"] = env._v63h_recent_stride[:, 1].mean().item()
+            env.extras["log_stride_rl"] = env._v63h_recent_stride[:, 2].mean().item()
+            env.extras["log_stride_rr"] = env._v63h_recent_stride[:, 3].mean().item()
+
+    return reward
+
+
+def shoulder_neutral_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_angle: float = 0.0,
+) -> torch.Tensor:
+    """V63.G.3: 4발 shoulder joint를 target_angle(보통 0=완전 11자)로 강제.
+
+    V63 시리즈 모든 버전에서 shoulder를 자유롭게 두어 학습 중 다리가
+    바깥으로 벌어지는 八자/ㅅ자 자세 발생. 사용자 GUI 두 번 지적.
+
+    수식:
+        err = Σ |shoulder_pos - target_angle|  (4 shoulders)
+        penalty = err
+
+    target_angle=0: 완전 11자 (완벽한 좌우 대칭)
+    target_angle=default(±0.15): URDF 기본 자세
+
+    weight -2.0 가정:
+        - 11자 (0,0,0,0): err 0 → 0
+        - default (±0.15): err 0.6 → -1.2/step
+        - 더 벌어짐 (±0.25): err 1.0 → -2.0/step
+    """
+    robot = env.scene[asset_cfg.name]
+
+    if not hasattr(env, "_v63g3_shoulder_ids"):
+        joint_names = robot.data.joint_names
+        names = [
+            "front_left_shoulder",
+            "front_right_shoulder",
+            "rear_left_shoulder",
+            "rear_right_shoulder",
+        ]
+        env._v63g3_shoulder_ids = torch.tensor(
+            [joint_names.index(n) for n in names],
+            device=robot.data.joint_pos.device,
+            dtype=torch.long,
+        )
+
+    shoulder_pos = robot.data.joint_pos[:, env._v63g3_shoulder_ids]  # (N, 4)
+    err = (shoulder_pos - target_angle).abs().sum(dim=-1)  # (N,)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_shoulder_err"] = err.mean().item()
+            env.extras["log_shoulder_max"] = shoulder_pos.abs().max(dim=-1).values.mean().item()
+            env.extras["log_shoulder_fl"] = shoulder_pos[:, 0].mean().item()
+            env.extras["log_shoulder_fr"] = shoulder_pos[:, 1].mean().item()
+            env.extras["log_shoulder_rl"] = shoulder_pos[:, 2].mean().item()
+            env.extras["log_shoulder_rr"] = shoulder_pos[:, 3].mean().item()
+
+    return err
+
+
+def clearance_lift_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_clearance: float = 0.03,
+) -> torch.Tensor:
+    """V63.G.2: 발 lift 직접 보상 (literal 발 높이 측정).
+
+    Joint target tracking은 간접적이라 policy가 target의 일부만 따라감.
+    이 reward는 **swing 중 발의 실제 world frame z 높이**를 직접 측정해 보상.
+
+    수식:
+        foot_z_world = body_pos_w[foot_ids, 2]
+        ground_z = env.scene.env_origins[:, 2]
+        clearance = max(foot_z_world - ground_z, 0)
+
+        # swing 중인 발만 (stance 발은 0이 정상)
+        swing_mask = 1 - contact_mask
+        swing_clearance = clearance × swing_mask
+
+        # target 대비 normalized
+        reward_per_leg = clamp(swing_clearance / target_clearance, 0, 1)
+
+        # 4발 평균
+        reward = mean(reward_per_leg)
+
+    target_clearance = 0.03 m (3cm) — 정상 trot swing 평균.
+
+    수치:
+        - 발 거의 안 듦 (0.005 m): 0.17/leg → ~0.17
+        - 부분 lift (0.015 m): 0.50/leg → ~0.50
+        - 정상 trot (0.030 m): 1.00/leg → ~1.00 (만점)
+    """
+    robot = env.scene[foot_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # World frame foot z
+    foot_z_w = robot.data.body_pos_w[:, foot_cfg.body_ids, 2]  # (N, 4)
+    ground_z = env.scene.env_origins[:, 2].unsqueeze(1)
+    clearance = torch.clamp(foot_z_w - ground_z, min=0.0)
+
+    # Swing mask
+    contact_mask = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()
+    swing_mask = 1.0 - contact_mask
+
+    # Swing 중인 발의 normalized clearance
+    swing_clearance = clearance * swing_mask
+    reward_per_leg = torch.clamp(swing_clearance / target_clearance, 0.0, 1.0)
+    reward = reward_per_leg.mean(dim=-1)  # (N,)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_clearance_lift_reward"] = reward.mean().item()
+            env.extras["log_clearance_max_per_leg"] = clearance.max(dim=-1).values.mean().item()
+            env.extras["log_swing_clearance_mean"] = (
+                swing_clearance.sum(dim=-1) / swing_mask.sum(dim=-1).clamp(min=1.0)
+            ).mean().item()
+
+    return reward
+
+
+def true_trot_pattern_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """V63.G.1: 진짜 trot 패턴 = intra_pair_sync × inter_pair_anti_phase.
+
+    V63.G의 intra_pair_sync 단독 사용 시 4발 동시 동작(bound/pronk)도 만점.
+    이를 차단하기 위해 inter_pair anti_phase를 곱셈으로 결합.
+
+    Intra-pair sync (쌍 내부):
+        sync_a = 1 - |FL - RR|
+        sync_b = 1 - |FR - RL|
+        intra = (sync_a + sync_b) / 2
+
+    Inter-pair anti-phase (쌍 간 반대):
+        pair_a_avg = (FL + RR) / 2
+        pair_b_avg = (FR + RL) / 2
+        inter_diff = |pair_a_avg - pair_b_avg|
+
+    True trot reward = intra × inter_diff:
+        - 정상 trot (FL=1, FR=0, RL=0, RR=1): intra=1.0, inter=1.0 → 1.0 ★
+        - 4발 동시 stance (1,1,1,1): intra=1.0, inter=0 → 0 ❌ 차단
+        - 4발 동시 swing (0,0,0,0): intra=1.0, inter=0 → 0 ❌ 차단
+        - 한 쌍만 동기 (1,0,0,0): intra=0.5, inter=0.5 → 0.25
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4): FL, FR, RL, RR
+
+    # Intra-pair sync
+    sync_a = 1.0 - torch.abs(contact[:, 0] - contact[:, 3])  # FL-RR
+    sync_b = 1.0 - torch.abs(contact[:, 1] - contact[:, 2])  # FR-RL
+    intra = (sync_a + sync_b) * 0.5  # (N,)
+
+    # Inter-pair anti-phase
+    pair_a_avg = (contact[:, 0] + contact[:, 3]) * 0.5
+    pair_b_avg = (contact[:, 1] + contact[:, 2]) * 0.5
+    inter_diff = torch.abs(pair_a_avg - pair_b_avg)  # (N,)
+
+    # 곱셈: 둘 다 만족해야 1.0
+    true_trot = intra * inter_diff  # (N,)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_true_trot"] = true_trot.mean().item()
+            env.extras["log_intra_sync_only"] = intra.mean().item()
+            env.extras["log_inter_diff_only"] = inter_diff.mean().item()
+
+    return true_trot
+
+
 def intra_pair_sync_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),

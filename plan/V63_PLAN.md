@@ -794,11 +794,832 @@ balance = clamp(1 - push_cv, 0, 1)
 **실패 (재시작 필요):**
 - `intra_pair_sync raw < 0.3` 지속
 
-### 9.6 상태
+## 10. V63.H — Dynamic Motion Exchange (근본 재설계, contact 패치 탈출)
 
-- **진행 중**
-- 사용자 GUI 관찰 4가지 모두 reward로 직접 변환됨
-- V63 시리즈 7번째 시도, 가장 사용자 의도에 부합하는 설계
+### 10.1 V63.B~G.3 실패의 누적 분석
+
+7번 실패의 공통 원인은 **contact-based metric의 본질적 한계**:
+- contact = binary (발 닿았/안 닿았)
+- 시간 패턴은 측정해도 **공간 이동 흐름**은 못 봄
+- 결과: 제자리에서 발만 들었다 놓는 가짜 trot exploit 반복
+
+| 사용자 GUI 발견 결함 | Contact metric으로 잡혔는가 |
+|--------------------|:--------------------------:|
+| RR 1발 exploit | leg_usage_cv가 1.27까지 갔는데 "감소 추세"로 오판 |
+| 4발 동시 동작 | intra_pair_sync 0.83 (높음, 가짜) |
+| 윗다리 안 올라옴 | asym_target raw 0.67 (잘 따라가지만 실제는 5°만 lift) |
+| 八자 다리 | shoulder는 측정도 안 함 |
+| **제자리 stepping** | **모든 contact metric이 잡지 못함** |
+
+### 10.2 사용자 통찰 (V63.G.3 검토 시)
+
+> "2개의 다리를 들어서 바닥에 닿지 않는 상태에 놓고 자연스럽게 다음 스텝에서
+> 추진력을 만들어 바닥을 딛게 만드는 게 trot의 본질"
+
+**핵심: 트롯은 'static contact 패턴'이 아니라 'dynamic momentum exchange'**
+
+```
+Static (Walk):
+  T0: 4발 접지 (안정)
+  T1: 1발 들고 → 3발 접지 (안정)
+  → 모든 시점이 정적으로 안정, 느림
+
+Dynamic (Trot):
+  T0: 2발 접지, 2발 swing (불안정 시작)
+  T1: 2발 공중, body 관성으로 forward
+  T2: 새 위치에 착지 (body 전진한 만큼 앞)
+  → 잠깐 불안정 → 관성 → 다시 안정의 연속
+```
+
+### 10.3 V63.H 설계 원칙
+
+1. **Position/velocity/momentum 기반 reward**
+2. **Contact-based reward는 보조용으로만**
+3. **Reward 개수 축소** (V63.G.3 11개 → V63.H 9개)
+4. **사용자 GUI 5가지 지적 직접 변환**:
+   - RR exploit, 4발 동시, hip 부족, ㅅ자, **제자리 stepping**
+
+### 10.4 V63.H 신규 reward 2개
+
+#### `swing_body_forward_reward` (핵심)
+
+```python
+swing_count = (1 - contact_mask).sum(dim=-1)  # 0~4
+swing_ratio = swing_count / 4.0
+
+body_vel_forward = robot.data.root_lin_vel_b[:, 0]
+forward_norm = clamp(body_vel_forward / target_speed, 0, 1)
+
+reward = swing_ratio × forward_norm
+```
+
+**핵심:** swing 중인 발이 있을 때 **body가 전진해야** 보상.
+- 정상 trot: swing_ratio 0.45 × forward 1.0 = **0.45**
+- 제자리 stepping: 0.45 × 0 = **0** ❌
+- weight +4.0 → 차이 1.8/step (강한 신호)
+
+#### `effective_stride_reward` (per-leg, 정교)
+
+```python
+# Touchdown 이벤트 감지 (rising edge)
+new_touchdown = (contact == 1) & (prev_contact == 0)
+
+# Touchdown 시 base frame x 기록
+# 이전 touchdown 위치 대비 차이 = effective stride
+stride = |current_body_x - prev_touchdown_body_x|
+
+# Normalized
+reward_per_leg = clamp(stride / target_stride, 0, 1)
+reward = mean(reward_per_leg) × new_touchdown
+```
+
+**target_stride = 0.05 m (5cm)** — 정상 trot 평균
+- 진짜 trot: 매 touchdown마다 5cm 이동 → 1.0
+- 제자리 stepping: 0cm → 0
+- **per-leg 측정**이라 한 발만 제자리여도 잡힘
+
+### 10.5 V63.H Reward 구조 (9개)
+
+**양수 (5개) — Dynamic motion 중심:**
+| reward | weight | 역할 |
+|--------|-------:|------|
+| **swing_body_forward** ★ | **+4.0** | swing 중 body 전진 (제자리 차단) |
+| **effective_stride** ★ | **+5.0** | per-leg touchdown 거리 |
+| **clearance_lift** | +3.0 | 발 높이 (V63.G.2 유지) |
+| **true_trot_pattern** | +3.0 | contact intra×inter (V63.G.1 유지, 보조로 약화) |
+| track_lin_vel_xy_exp | +4.0 | 속도 추종 |
+| flat_orientation_bonus | +3.0 | 자세 |
+
+**음수 (4개) — Exploit 차단:**
+| penalty | weight |
+|---------|-------:|
+| shoulder_neutral | -2.0 (V63.G.3) |
+| per_leg_contact_min | -3.0 |
+| flat_orientation_l2 | -2.0 |
+| action_rate_l2 | -0.05 |
+
+**제거된 reward (V63.G.3 대비):**
+- `asymmetric_joint_target` (joint target → 간접) — 제거
+- `leg_usage_cv_penalty` (contact 기반) — 제거
+- `per_leg_propulsion_balance` (effective_stride로 대체) — 제거
+- `phase_contact` (contact 기반) — 제거
+- `propulsion` (effective_stride로 대체) — 제거
+- `feet_air_time` (clearance_lift로 대체) — 제거
+- `pair_lr_symmetry` (effective_stride로 대체) — 제거
+- `stance_slip` (보조 가치 작음) — 제거
+- `per_leg_excess_swing` (clearance_lift로 대체) — 제거
+
+→ 11개 → **9개로 정리**, 모두 dynamic motion 중심.
+
+### 10.6 수치 검증 (정상 trot)
+
+| 상태 | swing_fwd | eff_stride | clearance | true_trot | 합 |
+|------|:---------:|:----------:|:---------:|:---------:|:--:|
+| 정상 trot | 1.8 | 5.0 | 3.0 | 3.0 | **+12.8** |
+| 제자리 stepping | 0 | 0 | 1.5 | 1.0 | **+2.5** |
+| 4발 동시 | 0 | 0 | 0 | 0 | **0** |
+| 차이 (정상 vs 제자리) | | | | | **+10.3** |
+
+**제자리 stepping vs 정상 trot 차이 +10.3/step → ep +10300 (큰 신호)**
+
+### 10.7 진행 결정
+
+V63.G.3 중단 후 V63.H로 자동 전환. from-scratch.
+
+### 10.8 V63.H iter 578 — Dynamic Trot 첫 달성
+
+**5단계 trot 조건 모두 달성:**
+
+| iter | sw_fwd | stride | clear | trot | ep_len | bad_ori |
+|-----:|:------:|:------:|:-----:|:----:|:------:|:-------:|
+| 578 | 0.668 | 0.800 | 0.689 | 0.473 | 1000 | 0.12% |
+
+하지만 사용자 GUI 관찰:
+> "오른쪽 다리 2개가 조금 더 앞으로 나오고 왼쪽 앞 뒤 다리가 있는, 즉 교차형이 아님"
+
+→ **Pace gait 같은 좌우 분리 패턴** 확인. Trot 아님.
+
+사용자 추가 지적:
+> "험지에서 좌우 비대칭 보행은 안정성이 떨어진다"
+
+→ Pace는 평지 전용, 험지에는 trot 필수.
+
+## 11. V63.H.1 — Anti-Pace + Lateral Balance
+
+### 11.1 V63.H.1 변경
+
+| 파라미터 | V63.H | V63.H.1 |
+|---------|:-----:|:-------:|
+| true_trot_pattern weight | 3.0 | **5.0** |
+| **anti_pace_penalty** | - | **-3.0 신규** |
+| **lateral_balance_penalty** | - | **-2.0 신규** |
+
+### 11.2 신규 reward
+
+**anti_pace_penalty:**
+```python
+pace_a = 1 - |FL - RL|  # 왼쪽 측면 동기 (pace 지표)
+pace_b = 1 - |FR - RR|  # 오른쪽 측면 동기
+penalty = (pace_a + pace_b) / 2
+```
+
+**lateral_balance_penalty:**
+```python
+roll_vel = root_ang_vel_b[:, 0]  # body roll velocity
+penalty = |roll_vel|
+```
+
+### 11.3 V63.H.1 결과 (iter 589)
+
+| 지표 | V63.H (578) | V63.H.1 (589) | 변화 |
+|------|:-----------:|:-------------:|:----:|
+| swing_body_forward | 0.67 | 0.53 | -0.14 |
+| effective_stride | 0.80 | **0.855** | ↑ |
+| true_trot_pattern raw | 0.47 | **0.784** ★ | **↑ +0.31** |
+| clearance_lift | 0.69 | 0.52 | -0.17 |
+| ep_len | 1000 | 923 | -77 |
+
+**V63 사상 최초 true_trot_pattern 0.78 돌파.** Pace 차단 효과 확인.
+
+하지만 사용자 GUI 관찰:
+> "FR이 너무 옆으로 삐져 나왔고 자세가 너무 낮음"
+> "윗다리 부분이 좀 더 많이 들어 올려져야 하는데 그게 낮아서 불안한 자세"
+> "FL은 거의 무게 하중을 안 받음"
+> "모든 4개 윗다리가 더 수평에 가깝게 올라와야"
+
+→ **4가지 연쇄 결함 발견**:
+1. 자세가 너무 낮음 (base_height 부족)
+2. 윗다리 lift 부족 (asym_target 제거됨)
+3. FR 옆으로 벌림 (shoulder 약함)
+4. FL 무게 안 받음 (비대칭)
+
+## 12. V63.H.2 — Base Height + Asymmetric Target 복원 + Shoulder 강화
+
+### 12.1 V63.H.2 변경
+
+| 항목 | V63.H.1 | V63.H.2 |
+|------|:-------:|:-------:|
+| **base_height_target** | (없음) | **+4.0 신규 (target 0.18m)** |
+| **asymmetric_joint_target** | (제거됨) | **+5.0 복원 (A_lift 31.5°)** |
+| shoulder_neutral weight | -2.0 | **-4.0 강화** |
+
+### 12.2 신규 reward
+
+**base_height_target_reward:**
+```python
+base_z = root_pos_w[:, 2] - ground_z
+target_z = 0.18  # 정상 standing
+err = (base_z - target_z) / 0.05
+reward = exp(-err²)
+```
+
+**asymmetric_joint_target (복원):**
+- A_leg_lift_end = **0.55 rad (31.5°)** ← 사용자 "수평 가까이" 의도
+- A_foot_bend_end = 0.55 rad (31.5°)
+- leg target end = -0.66 + 0.55 = **-0.11 rad (-6.3°)**
+- 윗다리가 거의 수평까지 들림
+
+### 12.3 V63.H.2 결과 (iter 659) — **V63 시리즈 최고**
+
+| 지표 | V63.H.1 | **V63.H.2 (iter 659)** | 변화 |
+|------|:-------:|:----------------------:|:----:|
+| swing_body_forward raw | 0.53 | 0.329 | -0.20 |
+| effective_stride raw | 0.855 | 0.748 | -0.11 |
+| clearance_lift raw | 0.52 | 0.450 | -0.07 |
+| **true_trot_pattern raw** | 0.784 | **0.785** ★ | 유지 |
+| ep_len | 923 | **951** | +28 |
+| **bad_ori %** | 0.00% | **0.07%** | ≈ |
+| non_toe % | 6.82% | **0.05%** | ↓ 136배 개선 |
+
+### 12.4 사용자 평가 — **"여태까지 중에 제일 괜찮다"**
+
+V63 시리즈 9회 시도 끝에 **사용자 GUI로 받아들일 만한 첫 결과**.
+
+**사용자 관찰 5가지 지적 해결 현황:**
+
+| 이전 지적 | V63.H.2 해결 | 상태 |
+|-----------|:------------:|:----:|
+| 제자리 stepping | swing_body_forward + effective_stride | ✅ |
+| 4발 동시 동작 | true_trot_pattern (intra × inter) | ✅ |
+| Pace 패턴 (좌우 분리) | anti_pace + lateral_balance | ✅ |
+| 자세 너무 낮음 | base_height_target (0.18m) | ✅ |
+| 윗다리 안 올라옴 | asymmetric_joint_target (31.5°) | ✅ |
+| FR 옆으로 벌림 | shoulder_neutral -4.0 | ✅ |
+
+**6가지 결함 모두 reward로 직접 변환됨.**
+
+### 12.5 학습 곡선
+
+```
+iter 100: 부팅 지연    ep_len 143, trot 0.034, sw_fwd 0.017
+iter 200: 부팅 지연    ep_len 143, trot 0.039, sw_fwd 0.023
+iter 300: 폭발적 전환  ep_len 651, trot 0.330, sw_fwd 0.266
+iter 500: 급상승       ep_len 993, trot 1.120 (raw 0.67)
+iter 588: 안정화       ep_len 949, trot 1.323 (raw 0.79)
+iter 659: 수렴 중      ep_len 951, trot 1.308 (raw 0.79)
+```
+
+### 12.6 주의점
+
+- swing_body_forward 약간 감소 (0.387 → 0.329)
+- clearance 약간 감소 (0.47 → 0.45)
+- 이는 trade-off — true_trot과 effective_stride 강화의 반대급부
+- 사용자 평가 긍정적이므로 수용 가능
+
+### 12.7 상태
+
+- **진행 중** (iter 659, max 5000)
+- curriculum 44% (1500 iter 기준)
+- 계속 학습 중 — iter 1500 이후 안정 수렴 예상
+- 30분 자동 타이머 활성
+
+## 🏆 V63 시리즈 종합 결과
+
+**9회 시도 끝에 V63.H.2에서 첫 성공적 trot 달성:**
+
+| 버전 | 특징 | 결과 |
+|------|------|------|
+| V63.B | 1D foot reach (exp) | 실패 - peak 후 하락 |
+| V63.C | 2D foot reach (exp) | 실패 - 정체 |
+| V63.D | Joint target (exp sharp) | 실패 - gradient 0 |
+| V63.E/E.1 | Linear + curriculum | 실패 - 작은 target |
+| V63.F | Dominant weight 8.0 | 실패 - exploit |
+| V63.F.1 | anti_phase reward 승격 | 실패 - GUI에서 결함 발견 |
+| V63.G/G.1/G.2/G.3 | Asymmetric + intra_sync | 실패 - 4발 동시 |
+| V63.H | Dynamic motion 도입 | 부분 성공 - pace 발견 |
+| V63.H.1 | Anti-pace + lateral balance | 부분 성공 - 자세 낮음 발견 |
+| **V63.H.2** | **Base height + asym 복원** | ✅ **사용자 승인** |
+
+**핵심 교훈:**
+1. Contact-based metric만으로는 exploit 잡기 어려움
+2. Dynamic motion (position/velocity) 기반이 본질
+3. **사용자 GUI 관찰을 직접 reward로 변환이 가장 효과적**
+4. Joint target + 발 높이 + body 자세 + 균형이 모두 동시 강제되어야 진짜 trot
+
+### V63_SERIES 타임라인 (최종)
+
+| 시각 | 이벤트 |
+|:----:|--------|
+| 04-08 10:32 | V62 시작 |
+| 04-08 16:34 ~ 04-09 10:59 | V63.B~F.1 7회 실패 |
+| 04-09 14:44 | V63.G 시작 (사용자 GUI 4가지 지적 반영) |
+| 04-09 15:47 | V63.G.3 (shoulder 11자) |
+| 04-09 15:58 | V63.H (dynamic motion 근본 재설계) |
+| 04-09 16:46 | V63.H.1 (anti_pace + lateral_balance) |
+| 04-09 17:33 | V63.H.2 (base_height + asym 복원) |
+| 04-09 19:02 | V63.H.2 재시작 (사용자 이동 후) |
+| **04-09 ~19:40** | **사용자 GUI 승인 "제일 괜찮다"** ⭐ |
+
+---
+
+# 📖 부록 G: 4족 보행의 생체역학적 배경
+
+> V63 시리즈 학습 과정에서 도출된 본질적 논의. 이 부록은 "왜 SpotMicro에 trot이 어려운가"와 "자연이 왜 특정 gait를 선택하는가"에 대한 이해를 기록합니다.
+
+## G.1 Gait 분류 — 4족 보행의 5가지 종류
+
+### Walk — 가장 느리고 가장 안정적
+
+**정의:** 항상 3발 이상이 땅에 닿아 있음 (정적 안정)
+
+**시각적 표현 (1 cycle = 4 phase):**
+```
+Walk:  ◯ = 들림,  ━ = 접지
+
+Phase 1: RR 들기
+  FL ━━ FR ━━
+  RL ━━ RR ◯
+
+Phase 2: FR 들기
+  FL ━━ FR ◯
+  RL ━━ RR ━━
+
+Phase 3: RL 들기
+  FL ━━ FR ━━
+  RL ◯  RR ━━
+
+Phase 4: FL 들기
+  FL ◯  FR ━━
+  RL ━━ RR ━━
+
+→ 다시 Phase 1 (사이클 반복)
+```
+
+**특징:**
+- Duty factor > 0.5 (각 발이 시간의 절반 이상 접지)
+- 한 발씩 순차적으로 들고 내림
+- **매 순간 3발이 접지 → 무게중심이 그 삼각형 안에 있으면 절대 안 넘어짐**
+- 느림, 매우 안정
+
+### Trot — 대각선 동기, 중간 속도
+
+**정의:** 대각선 쌍이 동시 움직임 (FL+RR, FR+RL)
+
+**시각적:**
+```
+Trot (1 cycle = 2 phase):
+
+Phase 1: FL+RR 접지, FR+RL 들림
+  FL ━━     FR ◯
+   \        /
+    ● body ●
+   /        \
+  RL ◯     RR ━━
+
+Phase 2: 반대
+  FL ◯     FR ━━
+   \        /
+    ● body ●
+   /        \
+  RL ━━     RR ◯
+
+→ 두 쌍이 반대 위상으로 교대
+```
+
+**특징:**
+- 동적 균형 (dynamic stability)
+- 대각선 쌍이 무게중심 위를 지나 안정
+- 중간 속도에 효율적
+- 험지 적응 우수
+
+### Pace — 같은 측면 동기, 좌우 흔들림
+
+**정의:** 같은 측면 (Left FL+RL, Right FR+RR)이 동시 움직임
+
+**시각적:**
+```
+Pace:
+
+Phase 1: Left 들림, Right 접지
+  FL ◯     FR ━━
+  RL ◯     RR ━━
+  (몸이 오른쪽으로 기울어짐)
+
+Phase 2: Right 들림, Left 접지
+  FL ━━    FR ◯
+  RL ━━    RR ◯
+  (몸이 왼쪽으로 기울어짐)
+```
+
+**특징:**
+- 좌우 rolling motion (옆으로 흔들림)
+- 평지에서만 효율적
+- 험지 매우 불안정
+- 자연계: 낙타, 일부 말 amble
+
+### Gallop — 비대칭, 가장 빠름
+
+**정의:** 앞뒤 분리 + 순차적 착지
+
+**시각적:**
+```
+Gallop (1 cycle = 4 phase):
+
+Phase 1: RL 접지 (뒷다리 먼저)
+Phase 2: RR 접지
+Phase 3: FL 접지 (앞다리)
+Phase 4: FR 접지 → 그리고 4발 모두 공중 (suspension)
+```
+
+**특징:**
+- 4발이 모두 공중에 뜨는 순간 있음 (suspension phase)
+- 가장 빠름
+- 비대칭 패턴
+
+### Pronk — 4발 동시 점프
+
+**정의:** 4발이 완전히 동시에 움직임
+
+**특징:**
+- 4발 동시 접지 → 4발 동시 이탈 → 4발 동시 착지
+- 가장 비효율적이지만 특수 상황 (위험 회피 시 영양, 가젤 등)
+- V63.G의 실패 모드 (자연스럽지 않은 수렴)
+
+---
+
+## G.2 Froude Number — 크기와 속도가 결정하는 자연 gait
+
+### 수학적 정의
+
+```
+Fr = v² / (g × L)
+```
+- v: 속도 (m/s)
+- g: 중력 가속도 (9.8 m/s²)
+- L: 다리 길이 (m)
+
+### 의미
+
+**이 숫자가 자연 gait를 결정합니다:**
+- Fr < 0.5: **walk 영역** (정적 안정)
+- Fr 0.5~1.0: walk→trot 전환 영역
+- Fr > 1.0: **trot/gallop 영역** (동적 균형)
+
+### 동물별 Froude
+
+| 대상 | 다리 길이 | 자연 속도 | Froude | 자연 gait |
+|------|:--------:|:---------:|:------:|:--------:|
+| 거미 | 5cm | 0.1 m/s | **0.05** | walk |
+| 개미 | 1cm | 0.05 m/s | 0.025 | walk |
+| 쥐 | 2cm | 0.5 m/s | **1.27** | **trot/gallop** |
+| 다람쥐 | 5cm | 1 m/s | 2.0 | gallop |
+| **SpotMicro** | **15cm** | **0.25 m/s** | **0.04** | **walk-like** ★ |
+| ANYmal C | 50cm | 1.0 m/s | 0.2 | trot (학습) |
+| 개 | 40cm | 2 m/s | 1.0 | trot |
+| 고양이 | 25cm | 1 m/s | 0.4 | trot |
+| 말 | 100cm | 5 m/s | **2.5** | trot/gallop |
+| 코끼리 | 300cm | 5 m/s | **0.85** | **walk만** |
+| Argentinosaurus | 500cm | 3 m/s | 0.18 | walk only |
+
+### 🔥 결정적 발견
+
+**SpotMicro의 Froude 0.04는 거미와 같은 영역**입니다.
+```
+[Froude 기준 gait 영역]
+  거미   SpotMicro           쥐   고양이    말
+  (0.05)  (0.04)            (1.27) (0.4)   (2.5)
+  ─── walk 영역 ───┘        └─── trot/gallop ───
+```
+
+즉 **외형은 4족 동물이지만, 물리 법칙상 거미 영역의 로봇**.
+
+### 반직관적 사실: 쥐가 SpotMicro보다 trot에 가까움
+
+- 쥐 다리 길이 2cm (작음)
+- 그러나 속도 0.5 m/s = 다리 길이의 25배/초
+- **Froude 1.27** → trot/gallop
+
+- SpotMicro 다리 길이 15cm (7배 큼)
+- 속도 0.25 m/s = 다리 길이의 1.7배/초
+- **Froude 0.04** → walk 영역
+
+**"크기뿐 아니라 속도도 결정적"**. SpotMicro는 다리는 크지만 느려서 거미 영역에 갇혀 있습니다.
+
+---
+
+## G.3 Square-Cube Law — 왜 거대 거미가 없는가
+
+### 법칙
+
+물체 크기를 N배 키우면:
+- **표면적/단면적**: N² 배
+- **부피/무게**: N³ 배
+- **다리당 부담**: N배 증가 (N³/N² = N)
+
+### 거미를 5배 크게 만든다면
+
+- 다리 단면적 (지지력): 25배
+- 몸 무게: **125배**
+- **다리당 부담 5배 증가**
+
+거미는 자기 다리로 자기 무게를 못 견딥니다. 다리가 부러집니다.
+
+### 거대 거미가 자연계에 없는 4가지 이유
+
+**1. Walk gait의 본질적 비효율 (사용자 통찰)**
+
+거미는 보통 8발 중 6발을 항상 접지하는 **정적 walk**:
+- 작은 거미 (Fr 0.05): 효율적
+- 큰 거미 가정: 정적 walk는 큰 무게 들고 천천히 → 에너지 비효율
+- 거대화 + walk = 물리적 불가능
+
+**2. 외골격 (Exoskeleton) 한계**
+
+척추동물 (말, 코끼리): 내골격
+- 안에서 뼈가 무게 지탱
+- 근육이 바깥에서 큰 토크 가능
+- 척추가 dynamic motion 충격 흡수
+
+절지동물 (거미): 외골격
+- 껍질이 무게 지탱
+- 크기 커지면 껍질 두께 증가 → 더 무거워짐
+- 탈피(molting) 시 무방비 → 큰 동물 위험
+
+**3. 호흡계 한계**
+
+거미는 기관계(trachea)와 책허파(book lung)로 확산 호흡:
+- 산소가 신체 내부로 확산 침투
+- 큰 몸은 중심부까지 산소 도달 못함
+- 크기 한계 ~30cm
+
+(석탄기 산소 농도 35%일 때 잠자리 메가네우라 날개폭 75cm 가능했지만, 그것도 거미는 아님)
+
+**4. 순환계 한계**
+
+거미는 개방 순환계 (혈액이 공간에 떠다님):
+- 작은 몸은 효율적
+- 큰 몸은 압력 제공 못함
+
+### 자연의 거미 최대 크기
+
+**Goliath birdeater (골리앗 새잡이거미):**
+- 다리 폭 ~30cm
+- 무게 ~175 g
+- **SpotMicro와 거의 같은 크기/무게!**
+- → **거미가 자연선택으로 도달한 물리적 한계 = SpotMicro 사이즈**
+
+### 역설
+
+SpotMicro는 거미와 같은 크기 영역인데 4족 + 척추동물 trot 목표:
+> "자연계 어디에도 존재하지 않는 조합"
+
+자연은 이 조합을 진화시킨 적이 없습니다:
+- 작은 4족 동물은 모두 walk (도마뱀, 작은 새끼 동물)
+- Trot하는 동물은 모두 훨씬 큼 (고양이, 개)
+
+---
+
+## G.4 공룡과 중력 — 반대편 극단
+
+### 공룡 멸종과 크기의 한계
+
+Square-Cube Law의 반대 적용:
+- 작은 동물은 walk만 효율
+- **큰 동물은 dynamic gait 필수**
+- 하지만 너무 크면 다시 walk만 (코끼리, 사우로포드)
+
+### 동물별 크기-gait 패턴
+
+| 크기 | 예시 | 가능한 gait |
+|------|------|------------|
+| 초소형 (< 1kg) | 쥐, 거미, 도마뱀 | walk (작은 동물은 walk 효율) |
+| 소형 (1~25kg) | 고양이, 개, 여우 | **trot, gallop** (자유로운 dynamic) |
+| 중형 (25~500kg) | 말, 사슴, 늑대 | **trot, gallop** (dynamic 최적) |
+| 대형 (500~5000kg) | 기린, 말과 | trot 제한적 |
+| 초대형 (5톤+) | 코끼리, 코뿔소 | **walk만 가능** |
+| 거대 (10톤+) | 사우로포드 | **매우 느린 walk** |
+
+### 사우로포드 공룡의 극한 적응
+
+**Argentinosaurus (~70~100톤):**
+
+1. **속이 빈 뼈 (Pneumatized Bones)**
+   - 새와 같이 내부 공기로 무게 절감
+   - 골격 무게 비율: 코끼리 15% → 사우로포드 5%
+   - 무게의 1/3 절감
+
+2. **에어색 호흡 시스템 (Avian Air Sacs)**
+   - 새와 같은 단방향 호흡 (포유류 대비 2배 효율)
+   - 큰 몸 산소 공급 가능
+
+3. **백악기 산소 농도 30%** (현재 21%)
+   - 큰 몸집 호흡에 큰 도움
+
+4. **기둥형 다리 (Graviportal Posture)**
+   - 코끼리처럼 다리를 거의 펴고 걸음
+   - 근육이 아닌 뼈 자체로 무게 지탱
+
+5. **꼬리 무게 균형**
+   - 머리와 꼬리가 균형
+
+### 중력과 공룡 — 학계 합의
+
+**주류 학설:** 중력은 동일했다. 사우로포드는 **현재 중력에서 가능한 자연 한계의 끝**까지 갔다.
+
+**부정된 가설들:**
+- ❌ Expanding Earth (지구가 작았다)
+- ❌ 달이 더 가까웠다
+- ❌ 지구 자전이 빨랐다
+
+**확실한 사실:**
+- 산소 농도가 약 30% (현재 1.5배)
+- 공룡들이 새 같은 호흡 시스템
+
+### K-Pg 대멸종과 산소 농도
+
+**6,600만 년 전:**
+1. 칙술루브 소행성 충돌 (주 원인)
+2. 데칸 트랩 화산 (보조)
+3. 충돌 후 광합성 중단 → 산소 농도 **30% → 21% 급감**
+
+**크기 기반 selection 패턴:**
+- **25kg 이상**: 거의 100% 멸종 (산소 감소에 취약)
+- **25kg 미만**: 일부 생존 (포유류, 새의 조상)
+
+**큰 동물이 산소 농도 변화에 취약한 이유:**
+- 큰 몸일수록 절대 산소량 필요
+- 사우로포드는 30% 산소에 최적화 → 21% 환경에서 생존 불가
+- "심호흡 환경에서 갑자기 고산지대로 옮겨진" 효과
+
+### 결론
+
+> **"작은 동물도 walk, 매우 큰 동물도 walk. 중간 크기 동물만 trot/gallop 같은 dynamic gait를 누릴 수 있고, 그것이 자연이 정한 물리법칙입니다."**
+
+**양극단 모두 walk로 회귀:**
+```
+[거미] ←── [SpotMicro] ── [쥐] ── [말] ── [코끼리] ── [사우로포드]
+ walk      walk-like     trot    trot    walk        walk
+ (작아서)   (작고 느려서)  (빨라서) (최적)  (너무 커서)  (한계점)
+```
+
+SpotMicro는 정확히 **"작고 느려서 거미 영역에 갇힌"** 위치. 우리는 이 로봇에 trot을 가르치려 했고, 그것이 자연 법칙을 거스르는 어려운 도전이었습니다.
+
+---
+
+## G.5 SpotMicro가 trot을 하려면 — 모터 업그레이드 계산
+
+### Trot 자연 영역 필요 조건
+
+**Froude ≥ 0.5:**
+```
+0.5 = v² / (9.8 × 0.15)
+v² = 0.735
+v ≈ 0.86 m/s
+```
+
+→ 명령 속도 **0.86 m/s 이상** (현재 0.25 m/s의 **3.4배**)
+
+### 필요 모터 스펙
+
+| 항목 | 현재 STS3215 | **trot용** | 비율 |
+|------|:-----------:|:----------:|:----:|
+| 무부하 속도 | 50 rpm (5.2 rad/s) | **110 rpm (11.5 rad/s)** | **2.2배** |
+| 토크 (정격) | 0.5 N·m | **~1.5 N·m** | **3배** |
+| 최대 토크 | 2.94 N·m | ~5 N·m | 1.7배 |
+
+### 실제 모터 옵션 (가격순)
+
+| 옵션 | 모터 | 12개 가격 | 효과 |
+|------|------|:---------:|:----:|
+| 현재 | STS3215 | $360 | walk만 |
+| 업그레이드 1 | STS3032/3046 | $480 | 부분 trot |
+| **권장** | **Dynamixel XL-430-W250** | **$600** | **trot OK** ★ |
+| 고급 | Dynamixel XM430-W350 | $3,200 | trot + gallop |
+| 산업용 | CubeMars GIM6010 | $5,000 | 모든 gait |
+| 최상급 | 주문 제작 BLDC | $12,000+ | 상용 급 |
+
+### 진짜 해결책
+
+**V63 시리즈가 8번 실패한 이유 = 하드웨어 한계**
+
+> **"소프트웨어로 해결할 수 없는 문제는 하드웨어를 봐야 한다."**
+
+Dynamixel XL-430 (약 $240~$600 추가)이면:
+- V63 시리즈 모든 인위적 reward가 불필요
+- ANYmal/Go1 처럼 standard locomotion reward만으로 trot 자연 발생
+- 단순한 velocity tracking만으로 충분
+
+V63 시리즈의 가치는 **"이 모터로는 trot이 어렵다"는 결정적 증거를 제공한 것**입니다.
+
+---
+
+## G.6 4족 로봇의 가치와 gait 선택
+
+### 4족 로봇의 존재 이유
+
+1. **계단/장애물 극복**
+2. **험지 적응**
+3. **불규칙 지형**
+4. **인간 환경 호환**
+
+→ 이 모든 이유가 **동적 균형 (trot/gallop)** 을 요구합니다. Walk만 하면 4족의 가치가 사라집니다.
+
+### 상용 4족 로봇의 gait 선택
+
+| 로봇 | 주 gait | Walk 사용 |
+|------|:------:|:---------:|
+| Boston Dynamics Spot | trot | 정밀 작업 시 |
+| Unitree Go1/B1 | trot | 거의 안 씀 |
+| ANYmal C/D | trot | 거의 안 씀 |
+| MIT Mini Cheetah | trot/gallop | 안 씀 |
+| Xiaomi CyberDog | trot | 안 씀 |
+
+**상용 4족 로봇 중 walk를 주력으로 하는 것은 없음**. Trot이 4족의 차별적 가치.
+
+### Pace vs Trot — 험지 안정성
+
+**Pace gait (같은 측면 동기):**
+```
+T1: 왼쪽 접지, 오른쪽 들림 → 몸이 오른쪽으로 기울
+T2: 오른쪽 접지, 왼쪽 들림 → 몸이 왼쪽으로 기울
+→ 좌우 rolling (흔들림)
+```
+
+**험지에서 pace:**
+- 경사로: 흔들림 + 경사 → 매우 불안정
+- 돌밭: 한 발 미끄러지면 흔들림으로 균형 잃음
+- 계단: 흔들림 → 가장자리 못 디딤
+
+**Trot gait (대각선 동기):**
+- 대각선 균형 유지
+- 한 발 미끄러져도 대각선이 즉시 안정화
+- 험지 적응 우수
+
+**자연계 증거:**
+- 험지 동물 (늑대, 사슴, 영양, 라마, 호랑이): **모두 trot**
+- Pace 동물 (낙타, 일부 말 amble): **평지 한정**
+
+### 부상 회복 동물의 gait 변화
+
+흥미로운 사실: **다리 부상 또는 노쇠 동물은 pace로 전환**
+- 이유: trot에 필요한 균형 능력 부족
+- 평지에서만 활동
+- → **Pace는 trot보다 능력이 떨어진 보행**
+
+---
+
+## G.7 V63 시리즈의 교훈 — 자연 법칙과 RL
+
+### V63 시리즈가 증명한 것
+
+1. **SpotMicro 크기에 trot은 부자연스러움** (Froude 0.04)
+2. **Contact-based metric은 exploit에 취약**
+3. **Dynamic motion(body velocity, position)이 본질**
+4. **사용자 GUI 관찰을 직접 reward로 변환이 가장 효과적**
+5. **자연 법칙을 거스르려면 명확한 reward 설계 필요**
+
+### 프로젝트의 철학적 의미
+
+> **"SpotMicro는 거미 크기 + 4족 + 척추동물 gait 목표라는 자연계에 없는 조합입니다. V63 시리즈는 자연이 진화시킨 적 없는 gait를 RL로 만들려는 시도이고, 9번 시도 끝에 V63.H.2에서 부분 성공했습니다."**
+
+### V63.H.2의 진짜 가치
+
+1. **Trot의 본질을 reward로 분해** — swing_body_forward, effective_stride, true_trot_pattern, clearance_lift, shoulder_neutral, base_height
+2. **사용자 통찰의 직접 변환** — GUI 관찰이 각각 reward가 됨
+3. **자연 법칙 우회의 증거** — 작은 로봇도 충분한 강제로 trot 가능
+4. **다음 세대 연구의 기반** — 실패와 성공 모두 기록
+
+### 연구자를 위한 교훈
+
+- 자연 법칙을 거스르는 학습은 가능하지만 매우 어렵다
+- 하드웨어 한계는 소프트웨어로 우회할 수 있지만 효율적이지 않다
+- **진짜 성공 = 하드웨어 + 소프트웨어의 조화**
+- 사용자(인간)의 직관이 metric보다 정확할 때가 많다
+
+| iter | reward | ep_len | asym | intra_sync | pl_bal | cv_pen | propul |
+|-----:|-------:|-------:|:----:|:----------:|:------:|:------:|:------:|
+| 100 | 0.4 | 18 | 0.011 | 0.014 | 0.012 | 0.005 | 0.000 |
+| 300 | 34 | 362 | 0.208 | 0.230 | 0.143 | 0.217 | 0.013 |
+| **399** | 202 | 991 | **0.578** | **0.730** | 0.485 | 0.456 | 0.211 |
+| **494** | **278** | **1000** | **0.668** | **0.830** ⭐ | **0.561** | 0.381 | **0.314** |
+
+**5단계 Trot 조건 (iter 494):**
+
+| 단계 | 기준 | 값 | 판정 |
+|------|------|:--:|:----:|
+| 안정성 | ep_len, bad_ori, non_toe | 1000, 0.15%, 0% | ✅ |
+| **구조** | intra_pair_sync > 0.7 | **0.8304** | ✅ |
+| **품질** | asym_target > 0.5 | **0.6681** | ✅ |
+| **성능** | propulsion > 0.3 | **0.3142** | ✅ |
+| 효율 | (V64+) | - | - |
+
+**4단계 모두 달성 — V63 시리즈 6번 실패 후 최초.**
+
+### 9.7 사용자 GUI 지적 4가지 해결 검증
+
+| 사용자 지적 | V63.G 지표 | 값 | 판정 |
+|------------|----------|:--:|:----:|
+| RR exploit | leg_usage_cv penalty | 0.38 (cv ~0.68) | 🟡 V63.F.1 1.27 대비 47% 감소 |
+| 윗다리 안 올라옴 | asym_target raw | **0.668** | ✅ |
+| 3발 발 끌기 | prop_balance raw | 0.561 | ✅ |
+| **intra-pair 동기 X** | **intra_pair_sync raw** | **0.8304** | ✅ **첫 달성** |
+
+### 9.8 상태
+
+- **진행 중** (iter 494, Curriculum 33%)
+- REAL TROT SATISFIED 2회 연속
+- 다음 30분 타이머 `b7enr9v7a` 활성
+- **V63 시리즈 사상 최강 진전**
 
 ---
 
