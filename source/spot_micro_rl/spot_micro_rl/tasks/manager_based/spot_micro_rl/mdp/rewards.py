@@ -2732,6 +2732,574 @@ def per_leg_excess_swing_penalty(
     return excess.sum(dim=1)  # 여러 다리가 동시에 초과하면 누적
 
 
+def pair_lr_symmetry_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    cr_weight: float = 0.5,
+) -> torch.Tensor:
+    """V63.B: pair 내 L/R 대칭 penalty. front+rear 동시.
+
+    수식:
+        front_lr_diff = |sw_FL - sw_FR| + cr_weight * |cr_FL - cr_FR|
+        rear_lr_diff  = |sw_RL - sw_RR| + cr_weight * |cr_RL - cr_RR|
+        penalty = front_lr_diff + rear_lr_diff
+
+    front-only가 아닌 합산 설계로 V60.D 교훈("한쪽 pair 전용 보상→반대쪽 고착") 회피.
+    pair 간 대칭은 기존 pair_lock이 담당, 이 penalty는 pair 내 L/R만 본다.
+
+    body 순서: FL(0), FR(1), RL(2), RR(3)
+    """
+    contact_ratio = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )  # (num_envs, 4)
+    swing_ratio = 1.0 - contact_ratio
+
+    # front pair: FL(0) vs FR(1)
+    front_sw_diff = torch.abs(swing_ratio[:, 0] - swing_ratio[:, 1])
+    front_cr_diff = torch.abs(contact_ratio[:, 0] - contact_ratio[:, 1])
+    front_lr = front_sw_diff + cr_weight * front_cr_diff
+
+    # rear pair: RL(2) vs RR(3)
+    rear_sw_diff = torch.abs(swing_ratio[:, 2] - swing_ratio[:, 3])
+    rear_cr_diff = torch.abs(contact_ratio[:, 2] - contact_ratio[:, 3])
+    rear_lr = rear_sw_diff + cr_weight * rear_cr_diff
+
+    # KPI logging
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_front_contact_diff"] = front_cr_diff.mean().item()
+            env.extras["log_front_swing_diff"] = front_sw_diff.mean().item()
+            env.extras["log_rear_contact_diff"] = rear_cr_diff.mean().item()
+            env.extras["log_rear_swing_diff"] = rear_sw_diff.mean().item()
+
+    return front_lr + rear_lr
+
+
+def phase_foot_reach_reward(
+    env: ManagerBasedRLEnv,
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    frequency: float = 2.0,
+    reach_amplitude: float = 0.05,
+    lift_amplitude: float = 0.0,
+    duty_factor: float = 0.55,
+    std: float = 0.035,
+) -> torch.Tensor:
+    """V63.B/V63.C: phase별 base-frame foot (x, z) 위치 직접 추적.
+
+    V63.B 원안은 x만 추적했으나 drag-with-timing 해에 취약했다.
+    V63.C는 lift_amplitude > 0으로 z 차원을 추가해 2D 궤적으로 확장.
+
+    X target (전후):
+        target_x = reach_amplitude * cos(leg_phase)
+        - phase=0 (stance 시작): +A (발이 body 앞쪽)
+        - phase=π: -A (발이 body 뒤쪽)
+        - phase=2π (cycle end): +A
+
+    Z target (높이, lift_amplitude > 0일 때만):
+        stance 구간 (0 ~ duty*2π): target_z = 0
+        swing 구간: parabolic arc
+            swing_progress = (phase - stance_end) / (swing_duration)
+            target_z = lift_amplitude * sin(swing_progress * π)
+        → swing 시작/끝: 0, swing 중간: lift_amplitude (최대)
+
+    FL/RR = base_phase, FR/RL = base_phase + π → 두 쌍이 정반대 위상으로 교대.
+
+    nominal (x, z)는 episode 시작 시점에 자동 측정 (base-frame).
+    err² = (x_err)² + (z_err)²
+    reward = exp(-err² / std²)
+
+    V63.B (lift_amplitude=0): x만 추적, 기존 동작과 동일
+    V63.C (lift_amplitude=0.04): x + z 2D 추적
+    """
+    robot = env.scene[asset_cfg.name]
+
+    # 1. base_phase
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = 2.0 * math.pi * frequency * t  # (num_envs,)
+
+    # 2. per-leg phase: FL(0)/RR(3) = base, FR(1)/RL(2) = base + π
+    leg_phases = torch.stack([
+        base_phase,
+        base_phase + math.pi,
+        base_phase + math.pi,
+        base_phase,
+    ], dim=1)  # (num_envs, 4)
+
+    # 3. target_x = A * cos(phase)
+    target_x = reach_amplitude * torch.cos(leg_phases)  # (num_envs, 4)
+
+    # 4. target_z (swing phase에만 양수, parabolic)
+    if lift_amplitude > 0.0:
+        phase_norm = leg_phases % (2.0 * math.pi)
+        stance_end = duty_factor * 2.0 * math.pi
+        swing_duration = 2.0 * math.pi - stance_end
+        in_swing = (phase_norm > stance_end).float()
+        swing_progress = torch.clamp(
+            (phase_norm - stance_end) / (swing_duration + 1e-6), 0.0, 1.0
+        )
+        target_z = in_swing * lift_amplitude * torch.sin(swing_progress * math.pi)
+    else:
+        target_z = torch.zeros_like(target_x)
+
+    # 5. base-frame foot (x, z) position
+    foot_pos_w = robot.data.body_pos_w[:, foot_cfg.body_ids, :3]  # (num_envs, 4, 3)
+    body_pos_w = robot.data.root_pos_w  # (num_envs, 3)
+    rel_xyz = foot_pos_w - body_pos_w.unsqueeze(1)  # (num_envs, 4, 3)
+
+    heading_x, heading_y = _compute_heading_xy(robot.data.root_quat_w)
+    # x in base frame (body forward direction)
+    foot_x_base = (
+        heading_x.unsqueeze(1) * rel_xyz[:, :, 0]
+        + heading_y.unsqueeze(1) * rel_xyz[:, :, 1]
+    )  # (num_envs, 4)
+    # z in base frame (world z, body roll/pitch은 거의 0이라 근사)
+    foot_z_base = rel_xyz[:, :, 2]  # (num_envs, 4)
+
+    # 6. nominal (x, z) — episode reset 마다 갱신
+    if not hasattr(env, "_v63_nominal_foot_x"):
+        env._v63_nominal_foot_x = torch.zeros(env.num_envs, 4, device=foot_x_base.device)
+        env._v63_nominal_foot_z = torch.zeros(env.num_envs, 4, device=foot_z_base.device)
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        env._v63_nominal_foot_x[reset_mask] = foot_x_base[reset_mask].detach()
+        env._v63_nominal_foot_z[reset_mask] = foot_z_base[reset_mask].detach()
+
+    # 7. deviation from phase-target
+    actual_x_offset = foot_x_base - env._v63_nominal_foot_x
+    actual_z_offset = foot_z_base - env._v63_nominal_foot_z
+    x_err = actual_x_offset - target_x
+    z_err = actual_z_offset - target_z
+
+    err_sq = x_err ** 2 + z_err ** 2  # (num_envs, 4)
+
+    # 8. exponential reward per leg
+    reward_per_leg = torch.exp(-err_sq / (std ** 2))
+
+    # KPI logging
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_foot_reach_reward"] = reward_per_leg.mean().item()
+            env.extras["log_foot_x_abs_offset_fl"] = actual_x_offset[:, 0].abs().mean().item()
+            env.extras["log_foot_x_abs_offset_fr"] = actual_x_offset[:, 1].abs().mean().item()
+            env.extras["log_foot_z_abs_offset_fl"] = actual_z_offset[:, 0].abs().mean().item()
+            env.extras["log_foot_z_abs_offset_fr"] = actual_z_offset[:, 1].abs().mean().item()
+            env.extras["log_foot_x_err_mean"] = x_err.abs().mean().item()
+            env.extras["log_foot_z_err_mean"] = z_err.abs().mean().item()
+
+    return reward_per_leg.mean(dim=-1)
+
+
+def phase_joint_target_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    frequency: float = 2.0,
+    duty_factor: float = 0.55,
+    A_leg: float = 0.25,
+    A_foot: float = 0.35,
+    std: float = 0.3,
+) -> torch.Tensor:
+    """V63.D: Joint-level reference motion tracking.
+
+    V63.B/C의 foot 위치 target이 학습 불가능했던 것을 해결: joint 각도를
+    직접 target으로 삼아 action → reward gradient를 짧게 만든다.
+
+    Reference motion:
+        leg_target  = default_leg  + A_leg × cos(leg_phase)            # hip pitch swing
+        foot_target = default_foot - A_foot × in_swing × sin(s_prog × π)  # knee bend during swing
+
+    Phase 할당:
+        FL/RR = base_phase, FR/RL = base_phase + π   (trot)
+
+    왜 foot joint는 -A_foot? URDF에서 foot angle이 positive=stretched,
+    lower=bent. 발을 들려면 angle을 낮춰야 함.
+
+    Shoulder joint는 target 없음 (V60~62 관찰: trot에서 shoulder는 거의 안 움직임).
+
+    수치 검증:
+        완벽 trot: err=0 → reward=1.0
+        정지:     err≈0.18 → reward≈0.135
+        차이:     +0.865/step → ep +865 (dominant 신호)
+    """
+    robot = env.scene[asset_cfg.name]
+
+    # 1. Joint indices 캐싱 (첫 호출 시)
+    if not hasattr(env, "_v63d_leg_ids"):
+        joint_names = robot.data.joint_names
+        leg_names = [
+            "front_left_leg",
+            "front_right_leg",
+            "rear_left_leg",
+            "rear_right_leg",
+        ]
+        foot_names = [
+            "front_left_foot",
+            "front_right_foot",
+            "rear_left_foot",
+            "rear_right_foot",
+        ]
+        env._v63d_leg_ids = torch.tensor(
+            [joint_names.index(n) for n in leg_names],
+            device=robot.data.joint_pos.device,
+            dtype=torch.long,
+        )
+        env._v63d_foot_ids = torch.tensor(
+            [joint_names.index(n) for n in foot_names],
+            device=robot.data.joint_pos.device,
+            dtype=torch.long,
+        )
+        # Default joint positions (first env, same for all)
+        env._v63d_leg_defaults = robot.data.default_joint_pos[0, env._v63d_leg_ids].clone()
+        env._v63d_foot_defaults = robot.data.default_joint_pos[0, env._v63d_foot_ids].clone()
+
+    # 2. Base phase
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = 2.0 * math.pi * frequency * t  # (N,)
+
+    # 3. Per-leg phase: FL(0)/RR(3) = base, FR(1)/RL(2) = base + π
+    leg_phases = torch.stack([
+        base_phase,
+        base_phase + math.pi,
+        base_phase + math.pi,
+        base_phase,
+    ], dim=1)  # (N, 4)
+
+    # 4. Leg target (hip pitch): continuous cosine swing
+    leg_target = env._v63d_leg_defaults.unsqueeze(0) + A_leg * torch.cos(leg_phases)  # (N, 4)
+
+    # 5. Foot target (knee): parabolic bend during swing phase only
+    phase_norm = leg_phases % (2.0 * math.pi)
+    stance_end = duty_factor * 2.0 * math.pi
+    swing_dur = 2.0 * math.pi - stance_end
+    in_swing = (phase_norm > stance_end).float()
+    swing_progress = torch.clamp(
+        (phase_norm - stance_end) / (swing_dur + 1e-6), 0.0, 1.0
+    )
+    foot_bend = A_foot * in_swing * torch.sin(swing_progress * math.pi)
+    foot_target = env._v63d_foot_defaults.unsqueeze(0) - foot_bend  # (N, 4)
+
+    # 6. Actual joint positions
+    leg_actual = robot.data.joint_pos[:, env._v63d_leg_ids]   # (N, 4)
+    foot_actual = robot.data.joint_pos[:, env._v63d_foot_ids]  # (N, 4)
+
+    # 7. Per-joint squared error, sum over 8 joints
+    leg_err = (leg_actual - leg_target) ** 2  # (N, 4)
+    foot_err = (foot_actual - foot_target) ** 2  # (N, 4)
+    err_sum = leg_err.sum(dim=-1) + foot_err.sum(dim=-1)  # (N,)
+
+    # 8. Exponential reward
+    reward = torch.exp(-err_sum / (std ** 2))
+
+    # KPI logging
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_joint_target_reward"] = reward.mean().item()
+            env.extras["log_joint_err_leg_mean"] = leg_err.mean().item()
+            env.extras["log_joint_err_foot_mean"] = foot_err.mean().item()
+            env.extras["log_joint_err_total"] = err_sum.mean().item()
+            # Per-leg error (to detect asymmetry)
+            env.extras["log_joint_err_fl"] = (leg_err[:, 0] + foot_err[:, 0]).mean().item()
+            env.extras["log_joint_err_fr"] = (leg_err[:, 1] + foot_err[:, 1]).mean().item()
+            env.extras["log_joint_err_rl"] = (leg_err[:, 2] + foot_err[:, 2]).mean().item()
+            env.extras["log_joint_err_rr"] = (leg_err[:, 3] + foot_err[:, 3]).mean().item()
+
+    return reward
+
+
+def phase_joint_target_linear_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    frequency: float = 2.0,
+    duty_factor: float = 0.55,
+    A_leg_start: float = 0.05,
+    A_leg_end: float = 0.25,
+    A_foot_start: float = 0.10,
+    A_foot_end: float = 0.35,
+    curriculum_iters: int = 1500,
+    err_max: float = 1.5,
+) -> torch.Tensor:
+    """V63.E: Linear clamp + curriculum joint target tracking.
+
+    V63.D의 sharp exp(-err/std²)는 초기 err가 커서 reward ≈ 0 → gradient ≈ 0.
+    V63.E는 linear clamp로 초기 stationary 상태에서도 non-zero reward 제공.
+
+    Reward:
+        err_total = Σ_8_joints |actual - target|
+        reward = clamp(1.0 - err_total / err_max, 0, 1)
+
+    Curriculum (amplitude 점진 확대):
+        iter 0:    A_leg=A_leg_start, A_foot=A_foot_start   (쉬운 target)
+        iter 1500: A_leg=A_leg_end,   A_foot=A_foot_end     (최종 target)
+
+    Target:
+        leg_target  = default + A_leg × cos(leg_phase)
+        foot_target = default - A_foot × in_swing × sin(swing_progress × π)
+
+    수치 검증:
+    - 초기 stationary (A_leg=0.05): err ~0.24 → reward 0.84 (non-zero!)
+    - 후기 stationary (A_leg=0.25): err ~1.04 → reward 0.31
+    - 완벽 trot: err=0 → reward 1.0
+    """
+    robot = env.scene[asset_cfg.name]
+
+    # 1. Joint indices 캐싱
+    if not hasattr(env, "_v63e_leg_ids"):
+        joint_names = robot.data.joint_names
+        leg_names = [
+            "front_left_leg", "front_right_leg",
+            "rear_left_leg", "rear_right_leg",
+        ]
+        foot_names = [
+            "front_left_foot", "front_right_foot",
+            "rear_left_foot", "rear_right_foot",
+        ]
+        env._v63e_leg_ids = torch.tensor(
+            [joint_names.index(n) for n in leg_names],
+            device=robot.data.joint_pos.device,
+            dtype=torch.long,
+        )
+        env._v63e_foot_ids = torch.tensor(
+            [joint_names.index(n) for n in foot_names],
+            device=robot.data.joint_pos.device,
+            dtype=torch.long,
+        )
+        env._v63e_leg_defaults = robot.data.default_joint_pos[0, env._v63e_leg_ids].clone()
+        env._v63e_foot_defaults = robot.data.default_joint_pos[0, env._v63e_foot_ids].clone()
+
+    # 2. Curriculum: iter-based amplitude scaling
+    #    env.common_step_counter가 있으면 사용, 없으면 자체 카운터
+    step_count = getattr(env, "common_step_counter", None)
+    if step_count is None:
+        if not hasattr(env, "_v63e_step_counter"):
+            env._v63e_step_counter = 0
+        env._v63e_step_counter += 1
+        step_count = env._v63e_step_counter
+
+    # num_steps_per_env=24 (Isaac Lab 표준 rollout size)
+    iter_approx = float(step_count) / 24.0
+    frac = min(iter_approx / float(curriculum_iters), 1.0)
+    A_leg = A_leg_start + (A_leg_end - A_leg_start) * frac
+    A_foot = A_foot_start + (A_foot_end - A_foot_start) * frac
+
+    # 3. Base phase
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = 2.0 * math.pi * frequency * t  # (N,)
+
+    # 4. Per-leg phase: FL/RR = base, FR/RL = base + π
+    leg_phases = torch.stack([
+        base_phase,
+        base_phase + math.pi,
+        base_phase + math.pi,
+        base_phase,
+    ], dim=1)  # (N, 4)
+
+    # 5. Leg target (hip pitch)
+    leg_target = env._v63e_leg_defaults.unsqueeze(0) + A_leg * torch.cos(leg_phases)
+
+    # 6. Foot target (knee, swing phase에만 접힘)
+    phase_norm = leg_phases % (2.0 * math.pi)
+    stance_end = duty_factor * 2.0 * math.pi
+    swing_dur = 2.0 * math.pi - stance_end
+    in_swing = (phase_norm > stance_end).float()
+    swing_progress = torch.clamp(
+        (phase_norm - stance_end) / (swing_dur + 1e-6), 0.0, 1.0
+    )
+    foot_bend = A_foot * in_swing * torch.sin(swing_progress * math.pi)
+    foot_target = env._v63e_foot_defaults.unsqueeze(0) - foot_bend
+
+    # 7. Actual joint positions
+    leg_actual = robot.data.joint_pos[:, env._v63e_leg_ids]
+    foot_actual = robot.data.joint_pos[:, env._v63e_foot_ids]
+
+    # 8. L1 error total (sum of absolute errors)
+    leg_err_abs = (leg_actual - leg_target).abs()   # (N, 4)
+    foot_err_abs = (foot_actual - foot_target).abs()  # (N, 4)
+    err_total = leg_err_abs.sum(dim=-1) + foot_err_abs.sum(dim=-1)  # (N,)
+
+    # 9. Linear clamp reward
+    reward = torch.clamp(1.0 - err_total / err_max, 0.0, 1.0)
+
+    # KPI logging
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_joint_target_reward"] = reward.mean().item()
+            env.extras["log_joint_err_total"] = err_total.mean().item()
+            env.extras["log_joint_err_leg_mean"] = leg_err_abs.mean().item()
+            env.extras["log_joint_err_foot_mean"] = foot_err_abs.mean().item()
+            env.extras["log_curriculum_A_leg"] = float(A_leg)
+            env.extras["log_curriculum_A_foot"] = float(A_foot)
+            env.extras["log_curriculum_frac"] = float(frac)
+            # per-leg err (비대칭 감지)
+            env.extras["log_joint_err_fl"] = (leg_err_abs[:, 0] + foot_err_abs[:, 0]).mean().item()
+            env.extras["log_joint_err_fr"] = (leg_err_abs[:, 1] + foot_err_abs[:, 1]).mean().item()
+            env.extras["log_joint_err_rl"] = (leg_err_abs[:, 2] + foot_err_abs[:, 2]).mean().item()
+            env.extras["log_joint_err_rr"] = (leg_err_abs[:, 3] + foot_err_abs[:, 3]).mean().item()
+
+    return reward
+
+
+def metric_clearance_mean_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """V63.F Metric: 4발 평균 foot clearance (world frame z).
+
+    feet_air_time은 reward proxy라 literal 체공시간 모름. 이 metric은
+    실제로 발이 지면에서 얼마나 떠있는지 직접 측정.
+
+    Tier: Metric only (weight 1e-4로 주입, 학습 영향 무시 수준)
+
+    Log:
+        - log_clearance_mean         : 4발 평균 (모든 순간)
+        - log_clearance_swing_only   : swing 중인 발만 평균
+        - log_clearance_fl/fr/rl/rr  : per-leg
+    """
+    robot = env.scene[foot_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # World frame foot z
+    foot_z_w = robot.data.body_pos_w[:, foot_cfg.body_ids, 2]  # (N, 4)
+    ground_z = env.scene.env_origins[:, 2].unsqueeze(1)  # (N, 1)
+    clearance = (foot_z_w - ground_z).clamp(min=0.0)  # (N, 4)
+
+    # Swing mask (contact 중이 아닌 발만)
+    contact_mask = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4)
+    swing_mask = 1.0 - contact_mask
+
+    clearance_all_mean = clearance.mean(dim=-1)  # (N,) 4발 평균
+    swing_count = swing_mask.sum(dim=-1).clamp(min=1.0)
+    clearance_swing_only = (clearance * swing_mask).sum(dim=-1) / swing_count
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_clearance_mean"] = clearance_all_mean.mean().item()
+            env.extras["log_clearance_swing_only"] = clearance_swing_only.mean().item()
+            env.extras["log_clearance_fl"] = clearance[:, 0].mean().item()
+            env.extras["log_clearance_fr"] = clearance[:, 1].mean().item()
+            env.extras["log_clearance_rl"] = clearance[:, 2].mean().item()
+            env.extras["log_clearance_rr"] = clearance[:, 3].mean().item()
+
+    # Return clearance_mean (weight 1e-4 곱해져 Episode_Reward에 기록)
+    return clearance_all_mean
+
+
+def metric_anti_phase_contact_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """V63.F Metric: 대각 쌍의 anti-phase 정도 측정.
+
+    phase_contact는 timing match만 측정하므로 4발 동시 접지 crawl과 구분 못함.
+    이 metric은 **대각 쌍이 얼마나 반대 위상으로 움직이는지** 직접 측정.
+
+    pair_a = (FL + RR) / 2  # 0, 0.5, 1
+    pair_b = (FR + RL) / 2
+    anti_phase_score = |pair_a - pair_b|
+
+    - 0: 4발 동시 상태 (drag/bound)
+    - 0.5~1.0: 정상 trot (pair_a 접지 시 pair_b swing)
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4) FL, FR, RL, RR
+
+    pair_a = (contact[:, 0] + contact[:, 3]) * 0.5
+    pair_b = (contact[:, 1] + contact[:, 2]) * 0.5
+    anti_phase = torch.abs(pair_a - pair_b)  # (N,)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_anti_phase_contact"] = anti_phase.mean().item()
+            env.extras["log_pair_a_contact"] = pair_a.mean().item()
+            env.extras["log_pair_b_contact"] = pair_b.mean().item()
+
+    return anti_phase
+
+
+def metric_leg_usage_cv_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """V63.F Metric: 4발 사용 균형의 변동계수 (coefficient of variation).
+
+    CV = std(swing_ratio) / mean(swing_ratio)
+
+    한 발만 과/과소 사용하는 병변을 한 숫자로 감지:
+    - CV < 0.1: 4발 균형 (정상)
+    - CV 0.1~0.3: 약간 편향
+    - CV > 0.3: 명백한 병변 (V60.A RR exploit 등)
+
+    구현: contact_ratio (에피소드 내 평균) 기반.
+    """
+    contact_ratio = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )  # (N, 4)
+    swing_ratio = 1.0 - contact_ratio
+
+    mean_sw = swing_ratio.mean(dim=-1)  # (N,)
+    # 분산 기반 std (unbiased=False로 N으로 나눔)
+    std_sw = swing_ratio.std(dim=-1, unbiased=False)  # (N,)
+    cv = std_sw / (mean_sw + 1e-6)  # (N,)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_leg_usage_cv"] = cv.mean().item()
+            env.extras["log_swing_ratio_min"] = swing_ratio.min(dim=-1).values.mean().item()
+            env.extras["log_swing_ratio_max"] = swing_ratio.max(dim=-1).values.mean().item()
+            env.extras["log_swing_ratio_mean"] = mean_sw.mean().item()
+
+    return cv
+
+
+def stance_slip_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """V63.B: stance 중 발의 world-frame 수평 속도 = slip. drag/skate 추진 직접 억제.
+
+    수식:
+        slip_per_leg = contact_mask * ||foot_vel_xy_world||
+        penalty = mean(slip_per_leg)
+
+    핵심: foot velocity는 **world frame**. body velocity를 빼지 않음.
+    이상적 stance는 발이 world에서 정지해야 하므로 0이 목표.
+    drag 상태에서는 body 전진 속도가 발에 일부 전달되어 양수.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_mask = _contact_state(contact_sensor, sensor_cfg.body_ids, contact_threshold).float()
+
+    foot_asset = env.scene[foot_cfg.name]
+    # WORLD FRAME foot velocity (body_vel_w returns linear+angular world velocity)
+    foot_vel_w = foot_asset.data.body_vel_w[:, foot_cfg.body_ids, :3]  # (num_envs, 4, 3)
+    foot_speed_xy = torch.norm(foot_vel_w[:, :, :2], dim=-1)  # (num_envs, 4)
+
+    slip_per_leg = contact_mask * foot_speed_xy  # (num_envs, 4)
+
+    # KPI logging
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_stance_slip_mean"] = slip_per_leg.mean().item()
+            env.extras["log_stance_slip_front"] = slip_per_leg[:, :2].mean().item()
+            env.extras["log_stance_slip_rear"] = slip_per_leg[:, 2:].mean().item()
+            # per-leg
+            env.extras["log_stance_slip_fl"] = slip_per_leg[:, 0].mean().item()
+            env.extras["log_stance_slip_fr"] = slip_per_leg[:, 1].mean().item()
+            env.extras["log_stance_slip_rl"] = slip_per_leg[:, 2].mean().item()
+            env.extras["log_stance_slip_rr"] = slip_per_leg[:, 3].mean().item()
+
+    return slip_per_leg.mean(dim=-1)
+
+
 def rear_left_right_balance_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),

@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V62"
+TRAIN_VERSION = "V63.F"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -31,6 +31,14 @@ _IS_V59 = TRAIN_VERSION.startswith("V59")
 _IS_V60 = TRAIN_VERSION.startswith("V60")
 _IS_V61 = TRAIN_VERSION.startswith("V61")
 _IS_V62 = TRAIN_VERSION.startswith("V62")
+_IS_V63B = TRAIN_VERSION.startswith("V63.B")
+_IS_V63C = TRAIN_VERSION.startswith("V63.C")
+_IS_V63D = TRAIN_VERSION.startswith("V63.D")
+_IS_V63E = TRAIN_VERSION.startswith("V63.E")  # V63.E, V63.E.1 등 모두 포함
+_IS_V63F = TRAIN_VERSION.startswith("V63.F")  # V63.F, V63.F.1 등
+# V63.B/C/D/E/F 모두 V62 reward 구조를 베이스로 사용. V62 블록을 그대로 활성화.
+if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F:
+    _IS_V62 = True
 _V59_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V59 and "." in TRAIN_VERSION else ("A" if _IS_V59 else "")
 _V60_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V60 and "." in TRAIN_VERSION else ("A" if _IS_V60 else "")
 _V55_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V55 and "." in TRAIN_VERSION else ("A1" if _IS_V55 else "")
@@ -5207,6 +5215,340 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.rewards.ang_vel_xy_l2.weight = -1.0
             self.rewards.action_rate_l2.weight = -0.05
             self.rewards.dof_torques_l2.weight = -0.0001
+
+        # ══════════════════════════════════════════════════════════
+        # V63.B: Symmetric Efficient Trot (V62 resume 보강)
+        # V62 reward 구조 그대로 + 3개 항목 추가:
+        #   1) pair_lr_symmetry_penalty (-0.3): pair 내 L/R 대칭, front+rear 동시
+        #   2) stance_slip_penalty (-0.05): world frame foot slip 억제
+        #   3) phase_foot_reach_reward (+1.0): phase별 base-frame foot x 직접 추적
+        #      → stationary tapping 차단 (가장 확실한 방법)
+        # observation/action 차원 동일 → V62 체크포인트 resume 가능.
+        # 수치 검증: plan/V63.B_PLAN.md
+        # ══════════════════════════════════════════════════════════
+        if _IS_V63B:
+            toe_sensor_v63b = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            foot_cfg_v63b = SceneEntityCfg("robot", body_names=".*toe_link")
+
+            self.rewards.pair_lr_symmetry = RewTerm(
+                func=custom_mdp.pair_lr_symmetry_penalty,
+                weight=-0.3,
+                params={
+                    "sensor_cfg": toe_sensor_v63b,
+                    "contact_threshold": 1.0,
+                    "cr_weight": 0.5,
+                },
+            )
+            self.rewards.stance_slip = RewTerm(
+                func=custom_mdp.stance_slip_penalty,
+                weight=-0.05,
+                params={
+                    "sensor_cfg": toe_sensor_v63b,
+                    "foot_cfg": foot_cfg_v63b,
+                    "contact_threshold": 1.0,
+                },
+            )
+            # [V63.B 핵심] phase별 foot 위치 직접 추적 → stationary tapping 차단
+            self.rewards.phase_foot_reach = RewTerm(
+                func=custom_mdp.phase_foot_reach_reward,
+                weight=1.0,
+                params={
+                    "foot_cfg": foot_cfg_v63b,
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "frequency": 2.0,
+                    "reach_amplitude": 0.05,
+                    "lift_amplitude": 0.0,  # V63.B: x만
+                    "duty_factor": 0.55,
+                    "std": 0.04,
+                },
+            )
+
+        # ══════════════════════════════════════════════════════════
+        # V63.C: Full-Trajectory Trot (V63.B 재설계)
+        # V63.B 실패 원인:
+        #   1) phase_foot_reach가 x만 추적 → drag-with-timing 해 허용
+        #   2) weight +1.0이 phase_contact(10)+propulsion(8) 대비 약함
+        #   3) feet_air_time -0.11 (발 거의 안 뜸)
+        # V63.C 변경:
+        #   1) phase_foot_reach를 (x, z) 2D로 확장 (lift_amplitude=0.04)
+        #   2) weight 재균형:
+        #      phase_contact 10→6, propulsion 8→4, feet_air 4→6, foot_reach 1→5
+        #   3) from-scratch (V63.B 편향 회피)
+        # 수치 검증: plan/V63.C_PLAN.md
+        # ══════════════════════════════════════════════════════════
+        if _IS_V63C:
+            toe_sensor_v63c = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            foot_cfg_v63c = SceneEntityCfg("robot", body_names=".*toe_link")
+
+            # ── V63.C weight 재균형 ──
+            # phase_contact: 10 → 6 (foot_reach가 timing도 암묵 인코딩)
+            self.rewards.phase_contact.weight = 6.0
+            # propulsion: 8 → 4 (foot_reach와 경쟁 완화)
+            self.rewards.propulsion.weight = 4.0
+            # feet_air_time: 4 → 6 (발 들기 직접 보상 강화)
+            self.rewards.feet_air_time.weight = 6.0
+
+            # ── V63.C 2D foot_reach (dominant) ──
+            self.rewards.phase_foot_reach = RewTerm(
+                func=custom_mdp.phase_foot_reach_reward,
+                weight=5.0,  # V63.B +1.0 → V63.C +5.0 (5배 강화)
+                params={
+                    "foot_cfg": foot_cfg_v63c,
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "frequency": 2.0,
+                    "reach_amplitude": 0.05,  # x 전후 stride
+                    "lift_amplitude": 0.04,   # z 높이 (V63.C 신규)
+                    "duty_factor": 0.55,
+                    "std": 0.035,
+                },
+            )
+
+            # ── V63.B에서 이어받은 penalty 2개 (V63.C에서도 유지) ──
+            self.rewards.pair_lr_symmetry = RewTerm(
+                func=custom_mdp.pair_lr_symmetry_penalty,
+                weight=-0.3,
+                params={
+                    "sensor_cfg": toe_sensor_v63c,
+                    "contact_threshold": 1.0,
+                    "cr_weight": 0.5,
+                },
+            )
+            self.rewards.stance_slip = RewTerm(
+                func=custom_mdp.stance_slip_penalty,
+                weight=-0.05,
+                params={
+                    "sensor_cfg": toe_sensor_v63c,
+                    "foot_cfg": foot_cfg_v63c,
+                    "contact_threshold": 1.0,
+                },
+            )
+
+        # ══════════════════════════════════════════════════════════
+        # V63.D: Joint-Level Reference Motion
+        # V63.B (1D foot_reach) / V63.C (2D foot_reach) 모두 실패:
+        #   - foot 위치 target이 FK 경유로 학습 어려움
+        #   - feet_air_time 음수 지속 (발 거의 안 듦)
+        #   - PPO가 발 들기 exploration 못함 (생존 trade-off)
+        # V63.D 해결:
+        #   - Foot 위치 대신 **joint 각도 직접 target**
+        #   - leg (hip pitch) = cos(phase) 연속 왕복
+        #   - foot (knee) = swing phase에만 parabolic 접힘
+        #   - gradient chain 짧음 (action → joint → reward)
+        #   - dominant weight +10.0
+        # 수치 검증: plan/V63.D_PLAN.md
+        # ══════════════════════════════════════════════════════════
+        if _IS_V63D:
+            toe_sensor_v63d = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            foot_cfg_v63d = SceneEntityCfg("robot", body_names=".*toe_link")
+
+            # ── V63.D weight 재배치 ──
+            # phase_contact: V62 10 → 4 (joint_target이 dominant)
+            self.rewards.phase_contact.weight = 4.0
+            # propulsion: V62 8 → 4 (경쟁 완화)
+            self.rewards.propulsion.weight = 4.0
+            # feet_air_time: V62 4 유지
+            self.rewards.feet_air_time.weight = 4.0
+
+            # V63.B/C의 phase_foot_reach 제거 (V63.D에서 joint_target이 대체)
+            if hasattr(self.rewards, "phase_foot_reach"):
+                self.rewards.phase_foot_reach = None
+
+            # ── V63.D 핵심: joint-level reference motion ──
+            self.rewards.phase_joint_target = RewTerm(
+                func=custom_mdp.phase_joint_target_reward,
+                weight=10.0,  # dominant
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "frequency": 2.0,
+                    "duty_factor": 0.55,
+                    "A_leg": 0.25,   # 14° hip pitch swing
+                    "A_foot": 0.35,  # 20° knee bend during swing
+                    "std": 0.3,
+                },
+            )
+
+            # ── V63.B에서 이어받은 penalty 2개 (V63.D에서도 유지) ──
+            self.rewards.pair_lr_symmetry = RewTerm(
+                func=custom_mdp.pair_lr_symmetry_penalty,
+                weight=-0.3,
+                params={
+                    "sensor_cfg": toe_sensor_v63d,
+                    "contact_threshold": 1.0,
+                    "cr_weight": 0.5,
+                },
+            )
+            self.rewards.stance_slip = RewTerm(
+                func=custom_mdp.stance_slip_penalty,
+                weight=-0.05,
+                params={
+                    "sensor_cfg": toe_sensor_v63d,
+                    "foot_cfg": foot_cfg_v63d,
+                    "contact_threshold": 1.0,
+                },
+            )
+
+        # ══════════════════════════════════════════════════════════
+        # V63.E: Linear Reward + Curriculum (V63.B/C/D 세 번 실패 후 근본 전환)
+        # V63.B/C/D 공통 실패 원인: Sharp exp reward → 초기 gradient 0
+        # V63.E 해결:
+        #   1) Linear clamp reward (모든 구간에서 non-zero, dense gradient)
+        #   2) Amplitude curriculum: A_leg 3°→14°, A_foot 6°→20° (iter 0→1500)
+        #   3) Balanced weight 3.0 (dominant 아님)
+        #   4) phase_contact 6.0 (생존), propulsion 2.0 (drag 유인 약화)
+        # 수치 검증: plan/V63.E_PLAN.md, 실험 로그: plan/V63_SERIES_LOG.md
+        # ══════════════════════════════════════════════════════════
+        if _IS_V63E:
+            toe_sensor_v63e = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            foot_cfg_v63e = SceneEntityCfg("robot", body_names=".*toe_link")
+
+            # ── V63.E weight 재배치 ──
+            self.rewards.phase_contact.weight = 6.0  # V62 10 → 6 (생존 안정)
+            self.rewards.propulsion.weight = 2.0     # V62 8 → 2 (drag 유인 약화)
+            self.rewards.feet_air_time.weight = 4.0  # V62 동일
+
+            # V63.B/C의 phase_foot_reach 제거
+            if hasattr(self.rewards, "phase_foot_reach"):
+                self.rewards.phase_foot_reach = None
+            # V63.D의 phase_joint_target 제거
+            if hasattr(self.rewards, "phase_joint_target"):
+                self.rewards.phase_joint_target = None
+
+            # ── V63.E.1 조정: err_max 완화 + 더 느린 curriculum + 더 작은 초기 amplitude ──
+            # V63.E 실패 원인: err_total이 err_max(1.5) 꽉 참 → reward 0 근접 → gradient 약함
+            # V63.E.1: err_max 1.5→3.0 (관대), curriculum 1500→2500 (느림),
+            #          A_start 더 작게 (초기 학습 신호 확보)
+            self.rewards.phase_joint_target_linear = RewTerm(
+                func=custom_mdp.phase_joint_target_linear_reward,
+                weight=3.0,  # balanced
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "frequency": 2.0,
+                    "duty_factor": 0.55,
+                    "A_leg_start": 0.03,    # V63.E 0.05 → 0.03 (1.7°, 더 쉬움)
+                    "A_leg_end": 0.25,      # 14° (최종 동일)
+                    "A_foot_start": 0.05,   # V63.E 0.10 → 0.05 (2.9°, 더 쉬움)
+                    "A_foot_end": 0.35,     # 20° (최종 동일)
+                    "curriculum_iters": 2500,  # V63.E 1500 → 2500 (더 천천히)
+                    "err_max": 3.0,         # V63.E 1.5 → 3.0 (2배 관대)
+                },
+            )
+
+            # ── V63.B에서 이어받은 penalty 2개 (V63.E에서도 유지) ──
+            self.rewards.pair_lr_symmetry = RewTerm(
+                func=custom_mdp.pair_lr_symmetry_penalty,
+                weight=-0.3,
+                params={
+                    "sensor_cfg": toe_sensor_v63e,
+                    "contact_threshold": 1.0,
+                    "cr_weight": 0.5,
+                },
+            )
+            self.rewards.stance_slip = RewTerm(
+                func=custom_mdp.stance_slip_penalty,
+                weight=-0.05,
+                params={
+                    "sensor_cfg": toe_sensor_v63e,
+                    "foot_cfg": foot_cfg_v63e,
+                    "contact_threshold": 1.0,
+                },
+            )
+
+        # ══════════════════════════════════════════════════════════
+        # V63.F: Dominant Weight + 관대한 err_max + 3 Metrics
+        # V63.E.1 실패 (peak 0.141 후 하락) 분석:
+        #   - weight 3.0은 budget 13%로 dominant 아님
+        #   - curriculum 40%에서 정체 → 남은 60% 하락 예상
+        # V63.F 해결:
+        #   1) weight 3→8 (dominant, 35% budget)
+        #   2) phase_contact 6→3, propulsion 2→1 (경쟁 약화)
+        #   3) err_max 3→4 (더 관대)
+        #   4) A_end 완화 (0.25→0.20, 0.35→0.28)
+        #   5) curriculum 2500→3500 (느리게)
+        #   6) metric 3개 추가 (clearance, anti_phase, leg_usage_cv)
+        # 수치 검증: plan/V63.F_PLAN.md
+        # ══════════════════════════════════════════════════════════
+        if _IS_V63F:
+            toe_sensor_v63f = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            foot_cfg_v63f = SceneEntityCfg("robot", body_names=".*toe_link")
+
+            # ── V63.F weight 재배치 ──
+            # phase_contact: V62 10 → V63.F 3 (joint_target에 양보)
+            self.rewards.phase_contact.weight = 3.0
+            # propulsion: V62 8 → V63.F 1 (drag 유인 최소화)
+            self.rewards.propulsion.weight = 1.0
+            # feet_air_time: 4.0 유지
+            self.rewards.feet_air_time.weight = 4.0
+
+            # V63.B/C의 phase_foot_reach 제거
+            if hasattr(self.rewards, "phase_foot_reach"):
+                self.rewards.phase_foot_reach = None
+            # V63.D의 phase_joint_target 제거
+            if hasattr(self.rewards, "phase_joint_target"):
+                self.rewards.phase_joint_target = None
+
+            # ── V63.F 핵심: dominant linear joint target + 관대한 err_max ──
+            self.rewards.phase_joint_target_linear = RewTerm(
+                func=custom_mdp.phase_joint_target_linear_reward,
+                weight=8.0,  # V63.E.1 3.0 → V63.F 8.0 (dominant)
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "frequency": 2.0,
+                    "duty_factor": 0.55,
+                    "A_leg_start": 0.03,
+                    "A_leg_end": 0.20,       # V63.E.1 0.25 → 0.20 (11°)
+                    "A_foot_start": 0.05,
+                    "A_foot_end": 0.28,      # V63.E.1 0.35 → 0.28 (16°)
+                    "curriculum_iters": 3500, # V63.E.1 2500 → 3500
+                    "err_max": 4.0,          # V63.E.1 3.0 → 4.0 (더 관대)
+                },
+            )
+
+            # ── V63.B/E.1에서 이어받은 penalty 2개 ──
+            self.rewards.pair_lr_symmetry = RewTerm(
+                func=custom_mdp.pair_lr_symmetry_penalty,
+                weight=-0.3,
+                params={
+                    "sensor_cfg": toe_sensor_v63f,
+                    "contact_threshold": 1.0,
+                    "cr_weight": 0.5,
+                },
+            )
+            self.rewards.stance_slip = RewTerm(
+                func=custom_mdp.stance_slip_penalty,
+                weight=-0.05,
+                params={
+                    "sensor_cfg": toe_sensor_v63f,
+                    "foot_cfg": foot_cfg_v63f,
+                    "contact_threshold": 1.0,
+                },
+            )
+
+            # ── V63.F 신규 3 Metrics (학습 영향 무시, 판정 강화) ──
+            self.rewards.metric_clearance = RewTerm(
+                func=custom_mdp.metric_clearance_mean_reward,
+                weight=1e-4,  # 학습 영향 무시 (per-ep < 0.01)
+                params={
+                    "sensor_cfg": toe_sensor_v63f,
+                    "foot_cfg": foot_cfg_v63f,
+                    "contact_threshold": 1.0,
+                },
+            )
+            self.rewards.metric_anti_phase = RewTerm(
+                func=custom_mdp.metric_anti_phase_contact_reward,
+                weight=1e-4,
+                params={
+                    "sensor_cfg": toe_sensor_v63f,
+                    "contact_threshold": 1.0,
+                },
+            )
+            self.rewards.metric_leg_usage_cv = RewTerm(
+                func=custom_mdp.metric_leg_usage_cv_reward,
+                weight=1e-4,
+                params={
+                    "sensor_cfg": toe_sensor_v63f,
+                    "contact_threshold": 1.0,
+                },
+            )
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

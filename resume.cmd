@@ -3,16 +3,18 @@ setlocal
 
 set "PROJECT_DIR=D:\project\spot_micro_rl"
 set "LOG_DIR=%PROJECT_DIR%\logs\rsl_rl\spot_micro_flat"
-set "RUN=2026-04-06_10-51-10"
-set "CHECKPOINT=model_10000.pt"
+set "RUN=2026-04-08_10-32-44_V62"
+set "CHECKPOINT=model_3000.pt"
+set "RUN_NAME=V63.B"
 set "NUM_ENVS=4096"
-set "MAX_ITER=40000"
+set "MAX_ITER=5000"
 set "MODE=--headless"
 
 if /i "%~1"=="gui" set "MODE=" & shift
 if not "%~1"=="" set "RUN=%~1"
 if not "%~2"=="" set "CHECKPOINT=%~2"
 if not "%~3"=="" set "MAX_ITER=%~3"
+if not "%~4"=="" set "RUN_NAME=%~4"
 
 set "FULL_PATH=%LOG_DIR%\%RUN%\%CHECKPOINT%"
 if not exist "%FULL_PATH%" (
@@ -21,11 +23,11 @@ if not exist "%FULL_PATH%" (
 )
 
 echo Resume: run=%RUN% checkpoint=%CHECKPOINT%
-echo Mode: %MODE% envs=%NUM_ENVS% max_iter=%MAX_ITER%
+echo Mode: %MODE% envs=%NUM_ENVS% max_iter=%MAX_ITER% run_name=%RUN_NAME%
 
 call "C:\Users\etnlw\miniforge3\Scripts\activate.bat"
 call conda activate env_isaaclab
 set PYTHONDONTWRITEBYTECODE=1
 cd /d "%PROJECT_DIR%"
 
-"C:\IsaacLab\isaaclab.bat" -p scripts/rsl_rl/train.py --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=%NUM_ENVS% %MODE% --max_iterations=%MAX_ITER% --resume --load_run=%RUN% --checkpoint=%CHECKPOINT%
+"C:\IsaacLab\isaaclab.bat" -p scripts/rsl_rl/train.py --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=%NUM_ENVS% %MODE% --max_iterations=%MAX_ITER% --run_name=%RUN_NAME% --resume --load_run=%RUN% --checkpoint=%CHECKPOINT%

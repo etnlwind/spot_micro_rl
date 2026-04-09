@@ -77,3 +77,6 @@ tests/
 .isaac-lab-docker-history
 desktop.ini
 plan/*_논의.md
+
+# Claude Code local rules (machine-specific)
+CLAUDE.md
