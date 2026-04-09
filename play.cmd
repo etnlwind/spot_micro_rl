@@ -24,4 +24,4 @@ call conda activate env_isaaclab
 set PYTHONDONTWRITEBYTECODE=1
 cd /d "%PROJECT_DIR%"
 
-"C:\IsaacLab\isaaclab.bat" -p scripts/rsl_rl/play.py --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=%NUM_ENVS% --load_run=%RUN% --checkpoint=%CHECKPOINT%
+"C:\IsaacLab\isaaclab.bat" -p scripts/rsl_rl/play.py --task=Isaac-Velocity-Flat-SpotMicro-v0 --num_envs=%NUM_ENVS% --checkpoint=%FULL_PATH%

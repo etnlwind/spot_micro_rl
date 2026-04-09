@@ -16,9 +16,11 @@
 | V63.D | Joint target (exp sharp) | `joint_target` **0.0002** | 972 | ❌ **학습 실패** (gradient 0) |
 | V63.E | Linear + curriculum | `joint_target` 0.141 (peak) | 1000 | ⚠️ peak 후 하락 |
 | V63.E.1 | err_max 완화 (1.5→3.0) | `joint_target` 0.1507 (iter 1177) | 1000 | 🟡 경계 만족 (성급 중단) |
-| **V63.F** | **Dominant weight 8.0 + err_max 4.0 + 3 metrics** | **`joint_target` 0.5649 (iter 201)** | 720 | ✅ **STRONG SATISFIED** |
+| V63.F | Dominant weight 8.0 + err_max 4.0 + 3 metrics | `joint_target` 0.747 (peak) | 1000 | ❌ EXPLOIT (anti_phase 0.04) |
+| V63.F.1 | anti_phase REWARD 승격 (3.0) | `joint_target` 0.74, `anti_phase` 0.48 | 1000 | ❌ **GUI: RR 1발 exploit + intra desync** |
+| **V63.G** | **Asymmetric target + intra_pair_sync + leg_usage penalty** | **진행 중** (사용자 4가지 지적 직접 반영) | - | 🟡 진행 |
 
-**핵심 교훈:** Sharp exp reward는 초기 gradient 0 문제. Linear reward + Dominant weight + 관대한 err_max 조합이 근본 해결책.
+**핵심 교훈:** Sharp exp reward는 초기 gradient 0 문제. Linear reward + Dominant weight + 관대한 err_max로 수치는 잡지만, **metric 결함이 가짜 trot exploit을 가렸음**. V63.G는 사용자 GUI 관찰 4가지(RR exploit, hip lift 부족, 3발 drag, intra-pair desync)를 모두 직접 reward로 변환.
 
 ---
 
@@ -431,11 +433,372 @@ RewTerm(
 - **leg_usage_cv 0.638** — 한 발 편향. V60.A의 RR exploit 재현 가능성
 - **ep_len 720** — 아직 100% 생존은 아님, 부팅 중
 
-### 7.9 상태
+### 7.9 iter 383 업데이트 (2026-04-09 ~09:15)
 
-- **진행 중** (iter 201, 30분 타이머 설정: `bi6lkt2s6`)
-- 다음 판정 시점에 peak 유지 또는 추가 상승 확인 필요
-- Curriculum 5.7% 진행 — 많은 학습 남음
+| 지표 | iter 201 | **iter 383** | 변화 | 판정 |
+|------|:--------:|:------------:|:----:|:----:|
+| joint_target raw | 0.5649 | **0.6954** (peak 0.706) | ↑ +0.13 | ✓ STRONG SATISFIED |
+| ep_len | 720 | **1000** | ✅ | 완벽 수렴 |
+| timeout % | 42.6% | 98.5% | ✅ | |
+| bad_ori % | 54.78% | **1.45%** | ✅ | 엄청난 개선 |
+| non_toe % | 2.66% | 0.02% | ✅ | |
+| clearance raw | 0.0186 m | 0.0212 m | 🟡 | 턱걸이 |
+| anti_phase raw | 0.2433 | 0.3033 | 🟡 | 부분 교대 |
+| **leg_usage_cv raw** | **0.638** | **1.046** | 🔴 | **악화** |
+| feet_air raw | -0.0159 | -0.0405 | 🔴 | 악화 |
+
+**해석 (Codex 기준 엄격):**
+- `joint_target tracking`은 dominant weight로 **수치상 잘 학습됨** (0.7 근접)
+- 그러나 `leg_usage_cv 1.05` 급증 → **한 발 편향 심화**
+- `anti_phase 0.30` < 0.5 → 진짜 trot 구조 아님
+- 추정: policy가 **"joint target 수치는 맞추되 실제 보행은 비대칭"** exploit 발견
+
+**우려:** Codex가 경고한 "joint target tracking ≠ 보행 품질"의 실증 가능성. GUI 확인 또는 다음 회차 추이가 결정적.
+
+**다음 관찰 (iter ~800 예상):**
+- **leg_usage_cv가 0.5 이하로 감소 여부** (가장 중요)
+- anti_phase 0.5+ 도달 여부
+- clearance 0.025+ 도달 여부
+
+### 7.10 iter 899 업데이트 (2026-04-09 ~09:45) — **EXPLOIT 확정 신호**
+
+| 지표 | iter 383 | **iter 899** | 변화 |
+|------|:--------:|:------------:|:----:|
+| **joint_target raw** | 0.6954 | **0.7359** | ↑ (peak 0.7473) |
+| ep_len | 1000 | 1000 | ✓ |
+| timeout % | 98.5% | **100%** | ✓ |
+| bad_ori % | 1.45% | **0.00%** | ✓ |
+| non_toe % | 0.02% | **0.00%** | ✓ |
+| **leg_usage_cv raw** | 1.046 | **0.336** | ↓ (개선) |
+| **anti_phase raw** | **0.3033** | **0.0425** | **🔴 급락** |
+| clearance raw | 0.0212 | 0.0201 | ≈ |
+| feet_air raw | -0.0405 | -0.0155 | 약간 개선 |
+
+**Exploit 확정 패턴:**
+- joint_target tracking 0.74 (수치 우수)
+- 4발 균형 OK (leg_usage_cv 0.34)
+- **하지만 anti_phase 0.04** — 4발 동시 움직임 (대각 교대 없음)
+- clearance 2cm 정체 → 발 거의 안 뜸
+- → **bound/pronk/stationary joint wiggle**
+
+**Codex 경고 실증:** "joint target tracking ≠ 보행 품질"
+
+### 7.11 프로토콜 딜레마 + 결정
+
+- 프로토콜: joint_target ≥ 0.5 → STRONG SATISFIED → 재시작 없음
+- Codex 기준: anti_phase < 0.1 AND joint_target ≥ 0.5 → exploit 확정
+- V63.E.1 성급 중단 실수 재발 방지 위해 **프로토콜 준수**
+- **판정 기준 강화**: 다음 회차(iter ~1400)에도 anti_phase < 0.1이면 V63.F.1 자동 전환
+
+### 7.12 V63.F.1 사전 준비 (미적용)
+
+필요 시 즉시 전환 가능:
+- joint_target weight: 8.0 → 5.0 (dominant 완화)
+- phase_contact weight: 3.0 → 6.0 (복원)
+- **anti_phase_contact를 reward로 승격**: 1e-4 → +3.0
+- 예상 trot vs exploit 차이: +1.38 per-step
+
+### 7.13 iter 1465 — EXPLOIT 확정
+
+| iter | joint_tgt | anti_phase | leg_cv | clearance | feet_air |
+|-----:|:---------:|:----------:|:------:|:---------:|:--------:|
+| 800 | 0.7422 | 0.0690 | 0.454 | 0.0201 | -0.016 |
+| 1200 | 0.7341 | 0.0330 | 0.344 | 0.0201 | - |
+| **1465** | **0.6964** | **0.0430** | 0.433 | 0.0201 | -0.022 |
+
+**3회 연속 `anti_phase < 0.1`** → exploit 확정 → V63.F.1 자동 전환.
+
+---
+
+## 8. V63.F.1 — anti_phase REWARD 승격 (**첫 REAL TROT**)
+
+### 8.1 V63.F 대비 변경
+
+| 파라미터 | V63.F | **V63.F.1** |
+|---------|:-----:|:-----------:|
+| joint_target weight | 8.0 | **5.0** (dominant 해제) |
+| phase_contact weight | 3.0 | **6.0** (구조 복원) |
+| propulsion weight | 1.0 | **2.0** |
+| **anti_phase** | 1e-4 (metric) | **3.0 (REWARD)** ★ |
+| clearance, leg_usage_cv | 1e-4 유지 | 1e-4 유지 |
+
+### 8.2 🎉 iter 561 — REAL TROT SATISFIED 최초 달성
+
+| 지표 | V63.F (exploit) | **V63.F.1 iter 561** | 개선 |
+|------|:---------------:|:--------------------:|:----:|
+| joint_target raw | 0.6964 | **0.7386** | ↑ |
+| **anti_phase raw** | **0.0430** | **0.4355** | **↑ 10배** ⭐ |
+| clearance raw | 0.0201 | 0.0219 | ≈ |
+| ep_len | 1000 | 970 | ✓ |
+| timeout % | 100% | 98.2% | ✓ |
+| bad_ori % | 0.02% | 0.62% | ✓ |
+
+**V63 시리즈 최초 `anti_phase > 0.3` 달성** (정상 trot 하한 근접).
+
+### 8.3 상승 궤적 (매우 건강)
+
+| iter | joint_tgt | anti_phase | peak |
+|-----:|:---------:|:----------:|:----:|
+| 100 | 0.018 | 0.009 | 부팅 |
+| 200 | 0.306 | 0.145 | 학습 시작 |
+| 300 | 0.605 | 0.300 | 빠른 상승 |
+| 500 | 0.738 | **0.480** ★ | **anti_phase peak** |
+| 561 | 0.739 | 0.436 | 유지 |
+
+### 8.4 5단계 Trot 조건 판정
+
+| 단계 | 기준 | V63.F.1 561 | 판정 |
+|------|------|:-----------:|:----:|
+| 안정성 | ep_len, bad_ori, non_toe | ✓ | ✅ |
+| **구조** | anti_phase > 0.3 | **0.4355** | ✅ **최초 달성** |
+| 품질 | clearance > 0.02 | 0.022 | 🟡 턱걸이 |
+| 성능 | propulsion raw > 0.3 | 0.064 | 🔴 부족 |
+| 효율 | (V64+) | - | - |
+
+**2~3단계 달성, 4단계(성능) 개선 필요.**
+
+### 8.5 우려
+
+- **leg_usage_cv: 0.34 (V63.F) → 1.17 (V63.F.1)** — 한 발 편향 재발 가능
+- **feet_air raw: -0.016** — long step 여전히 부족
+- **propulsion raw 급감: 0.34 → 0.06** — drag 해소의 반작용일 수 있음
+
+### 8.6 iter 1103 업데이트 — leg_usage_cv 우려
+
+| 지표 | iter 561 | **iter 1103** |
+|------|:--------:|:-------------:|
+| joint_target raw | 0.7386 | 0.6918 |
+| anti_phase raw | 0.4355 | 0.4180 |
+| **leg_usage_cv raw** | 1.17 | **1.42** ⚠️ |
+| clearance raw | 0.0219 | 0.0207 |
+
+프로토콜 SATISFIED 유지하나 leg_usage_cv 1.42 → pair-level exploit 우려.
+
+### 8.7 iter 1808 업데이트 — **우려 해소, 안정화 중**
+
+| 지표 | iter 561 | iter 1103 | iter 1500 | **iter 1808** |
+|------|:--------:|:---------:|:---------:|:-------------:|
+| joint_target raw | 0.7386 | 0.6918 | 0.6304 | **0.7340** (회복) |
+| **anti_phase raw** | 0.4355 | 0.4180 | 0.4354 | **0.4169** (안정) |
+| clearance raw | 0.0219 | 0.0207 | 0.0211 | **0.0219** (회복) |
+| **leg_usage_cv** | 1.17 | 1.42 | **1.43 (peak)** | **1.39** (감소) |
+| propulsion raw | 0.064 | 0.117 | - | **0.178** (회복) |
+| feet_air raw | -0.016 | -0.005 | - | **-0.003** (거의 0) |
+| bad_ori % | 0.62% | 0.26% | - | **0.02%** |
+
+**핵심 발견:** leg_usage_cv가 iter 1200~1500에서 peak(1.45) 후 **감소 시작**. 내가 설정한 exploit threshold 1.6을 넘지 않음 → **pair exploit 실증 안 됨**.
+
+**V63.F vs V63.F.1 핵심 차이:**
+- V63.F: peak 후 지속 하락 (joint_tgt 0.74 → 0.70, anti_phase 0.33 → 0.04 붕괴)
+- **V63.F.1: peak 후 조정 후 재안정화** (anti_phase 0.42 전후 유지)
+
+### 8.8 5단계 Trot 조건 달성 현황 (iter 1808)
+
+| 단계 | 기준 | 값 | 판정 |
+|------|------|:--:|:----:|
+| 안정성 | ep_len, bad_ori, non_toe | 1000, 0.02%, 0.12% | ✅ |
+| 구조 | anti_phase > 0.3 | 0.4169 | ✅ |
+| **품질** | clearance > 0.02 | **0.0219** | ✅ **달성** |
+| 성능 | propulsion raw > 0.3 | 0.178 | 🟡 진행 중 |
+| 효율 | (V64+) | - | - |
+
+**3단계 달성 — V63 시리즈 최고 진전 상태.**
+
+### 8.9 iter 2383~3553: curriculum 마무리 단계
+
+| iter | joint_tgt | anti_phase | clear | leg_cv | non_toe% | curriculum |
+|-----:|:---------:|:----------:|:-----:|:------:|:--------:|:----------:|
+| 2383 | 0.586 | 0.394 | 0.024 | 1.31 | 4.51% | 68% |
+| 2983 | 0.528 | 0.392 | **0.029** ⭐ | 1.29 | 2.19% | 85% |
+| 3553 | **0.443** | 0.378 | 0.029 | 1.19 | 0.22% | **100%** |
+
+**Curriculum 완료 시점(iter 3553):**
+- joint_target raw 0.443 (0.5 미만으로 떨어짐 — WATCH 판정)
+- anti_phase 0.378 (여전히 0.3+ 유지)
+- clearance 0.029 m (역대 최고 유지)
+- leg_usage_cv 1.19 (계속 감소)
+
+**해석 (당시):** "느리지만 진짜 trot" 가능성. anti_phase 안정 + clearance 유지 + 4단계 중 3단계 달성.
+
+### 8.10 사용자 GUI 관찰 (결정적) — V63.F.1 실체 발견
+
+V63.F.1 iter 3752에서 사용자가 GUI로 직접 확인 (model_3800 checkpoint).
+
+**관찰 내용 (4가지 명확한 결함):**
+
+1. **RR(오른쪽 뒷다리)이 가짜로 작동** — 포인트만 얻기 위해 불필요하게 높이 차지만 추진력 없음
+2. **나머지 3발은 발 끌기** (drag)
+3. **윗다리(hip pitch)가 안 올라옴** — 사용자 표현: "수평에 가깝게 접혀야 하는데 안 그럼"
+4. **FL-RR / FR-RL intra-pair 동기 안 됨** (사용자 두 번째 지적) — "트롯 보행이 아예 안 나옴"
+
+### 8.11 Metric의 결함 발견
+
+**1. `clearance` 평균이 RR 단독을 가림**
+- RR 혼자 높이 → 평균 0.028m
+- 실제로는 1발 exploit
+
+**2. `leg_usage_cv` 1.27을 "감소 추세"로 잘못 판단**
+- 1.27도 정상 trot(< 0.2) 대비 6배 비정상
+- 제가 "peak 후 감소 = OK"로 본 것은 잘못
+
+**3. `anti_phase` 수학적 결함 (사용자 두 번째 지적의 핵심)**
+```
+pair_a = (FL + RR) / 2
+pair_b = (FR + RL) / 2
+anti_phase = |pair_a - pair_b|
+```
+
+| 상태 | FL | FR | RL | RR | pair_a | pair_b | anti_phase | 진짜 trot? |
+|------|:--:|:--:|:--:|:--:|:------:|:------:|:----------:|:----------:|
+| **정상 trot** | 1 | 0 | 0 | 1 | 1.0 | 0.0 | **1.0** | ✅ |
+| **V63.F.1 가짜** | 1 | 0 | 1 | 0 | 0.5 | 0.5 | **0** | ❌ |
+
+→ anti_phase는 **inter-pair 차이만 측정**, **intra-pair 동기는 못 봄**.
+V63.F.1의 0.39는 가짜 신호일 가능성.
+
+### 8.12 V63.F.1 최종 판정 — V63 시리즈 6번째 실패
+
+5단계 trot 조건 재평가:
+| 단계 | 기준 | V63.F.1 | 실제 (GUI) |
+|------|------|:-------:|:----------:|
+| 안정성 | ✓ | ✓ | ✓ |
+| **구조** | anti_phase > 0.3 | 0.39 (가짜) | ❌ intra-pair desync |
+| 품질 | clearance > 0.02 | 0.029 (RR 단독) | ❌ 1발 exploit |
+| 추적 | joint_target > 0.5 | 0.45 | ❌ 윗다리 부족 |
+| 성능 | propulsion > 0.3 | 0.165 | ❌ |
+
+**V63.F.1도 실패. 원인은 metric 한계 + dominant weight 부재.**
+
+### 8.13 교훈 #8~10
+
+**#8:** Metric 평균값이 1발 exploit을 가림. **per-leg metric이 필수**.
+**#9:** anti_phase는 trot 보장 불충분. **intra_pair_sync metric이 필요**.
+**#10:** "peak 후 감소"가 항상 진전은 아님. 절대값 (cv 1.27 ≠ 정상)도 봐야 함.
+
+---
+
+## 9. V63.G — Asymmetric Target + Intra-pair Sync (사용자 관찰 직접 반영)
+
+### 9.1 설계 원칙
+
+V63.F.1 GUI 관찰 4가지를 reward로 직접 변환.
+
+| # | 사용자 지적 | V63.G 해결 |
+|---|------------|-----------|
+| 1 | RR 가짜 차기 | `leg_usage_cv_penalty` -3.0 |
+| 2 | 윗다리 안 올라옴 | `asymmetric_joint_target` A_leg_lift 23° |
+| 3 | 다른 3발 발 끌기 | `per_leg_propulsion_balance` +2.0 |
+| 4 | **intra-pair 동기 X** | **`intra_pair_sync` +4.0** ★ |
+
+### 9.2 핵심 신규 함수 4개
+
+**(1) `asymmetric_joint_target_reward`** — Joint target 비대칭 재설계
+
+```python
+# Stance: 작은 변화
+if in_stance:
+    leg_target = default - 0.05 × stance_progress
+    foot_target = default
+
+# Swing: 크게 위로 들림 (사용자가 원한 "수평에 가까운 접힘")
+else:
+    leg_target = default + A_leg_lift × sin(swing_progress × π)   # 23°
+    foot_target = default - A_foot_bend × sin(swing_progress × π) # 28°
+```
+
+**핵심:** `A_leg_lift_end = 0.40 rad (23°)` — V63.F의 0.20(11°)의 **2배**.
+default leg `-0.66` (-37.8°) + 0.40 = `-0.26` (-15°) → 사용자가 원한 "수평 가까이" 달성.
+
+**(2) `intra_pair_sync_reward`** — 사용자 두 번째 지적 ★
+
+```python
+sync_a = 1 - |FL_contact - RR_contact|  # 같으면 1, 다르면 0
+sync_b = 1 - |FR_contact - RL_contact|
+reward = (sync_a + sync_b) / 2  # 0~1
+```
+
+- 1.0: FL+RR 동기, FR+RL 동기 (정상 trot)
+- 0.5: 한 쌍만 동기
+- 0.0: 모두 비동기
+
+**anti_phase의 결함을 직접 보완.**
+
+**(3) `leg_usage_cv_penalty`** — RR exploit 차단
+
+```python
+cv = std(swing_ratio) / mean(swing_ratio)
+penalty = clamp(cv - 0.3, 0, 2.0)  # threshold 0.3
+```
+
+V63.F의 metric (1e-4) → V63.G **penalty -3.0** 승격.
+- 정상 trot cv 0.2 → penalty 0
+- V63.F.1 cv 1.27 → penalty 0.97 → **-2.91/step**
+
+**(4) `per_leg_propulsion_balance_reward`** — 4발 균등 추진
+
+```python
+push_cv = std(per_leg_push) / (mean + 1e-3)
+balance = clamp(1 - push_cv, 0, 1)
+```
+
+### 9.3 V63.G Reward 구조
+
+**양수 (9개):**
+| reward | weight | 역할 |
+|--------|-------:|------|
+| **asymmetric_joint_target** | **+5.0** | asym target, 큰 lift |
+| **intra_pair_sync** ★ | **+4.0** | 쌍 내 동기 (사용자 지적) |
+| track_lin_vel_xy_exp | +4.0 | 속도 |
+| feet_air_time | +4.0 | swing 검증 |
+| phase_contact | +4.0 | timing |
+| forward_velocity | +3.0 | 전진 |
+| flat_orientation_bonus | +3.0 | 자세 |
+| **per_leg_propulsion_balance** | **+2.0** | 4발 균등 |
+| propulsion | +2.0 | 추진 |
+| track_ang_vel_z_exp | +1.0 | yaw |
+
+**음수 (10개):**
+| penalty | weight |
+|---------|-------:|
+| **leg_usage_cv_penalty** ★ | **-3.0** | RR exploit 차단 |
+| per_leg_contact_min | -5.0 |
+| per_leg_excess_swing | -5.0 |
+| pair_lock | -5.0 |
+| pair_lr_symmetry | -0.3 |
+| stance_slip | -0.05 |
+| flat_orientation_l2 | -2.0 |
+| lin_vel_z_l2 | -2.0 |
+| ang_vel_xy_l2 | -1.0 |
+| action_rate_l2 | -0.05 |
+| dof_torques_l2 | -0.0001 |
+
+### 9.4 V63.G 실행
+
+- Run: `2026-04-09_14-44-10_V63.G`
+- TRAIN_VERSION = "V63.G"
+- from-scratch
+- Curriculum: 1500 iters (A_leg_lift 11°→23°, A_foot_bend 14°→28°)
+- 30분 타이머: `b2avw5vfz`
+
+### 9.5 판정 기준 (V63.G 전용)
+
+**REAL TROT SATISFIED 조건 (모두 만족):**
+- `asym_target raw ≥ 0.5`
+- **`intra_pair_sync raw ≥ 0.7`** ★ (사용자 지적의 핵심 검증)
+- `leg_usage_cv penalty raw < 0.3` (cv < 0.6)
+- `ep_len ≥ 900`
+
+**부분 진전 (WATCH+):**
+- `intra_pair_sync raw ≥ 0.5` (쌍 내 동기 부분 형성)
+
+**실패 (재시작 필요):**
+- `intra_pair_sync raw < 0.3` 지속
+
+### 9.6 상태
+
+- **진행 중**
+- 사용자 GUI 관찰 4가지 모두 reward로 직접 변환됨
+- V63 시리즈 7번째 시도, 가장 사용자 의도에 부합하는 설계
 
 ---
 
@@ -451,7 +814,14 @@ RewTerm(
 | **4** | **Linear reward + 관대한 err_max가 기본** | V63.F 성공 |
 | **5** | **Weight dominant 아니면 다른 reward에 묻힘** | V63.E/E.1 peak 하락 |
 | **6** | **Curriculum은 amplitude 점진 확대로 exploration 지원** | V63.E~F 공통 |
-| **7** | **Metric 3개(clearance/anti_phase/leg_usage_cv)가 trot 판정 핵심** | Codex 리뷰 |
+| **7** | **Metric 3개(clearance/anti_phase/leg_usage_cv)는 부분적 trot 판정 도구** | Codex 리뷰 |
+| **8** | **Metric 평균값이 1발 exploit을 가림** | V63.F clearance 0.028 (RR 단독) |
+| **9** | **anti_phase metric은 intra-pair desync를 못 잡음** | V63.F.1 GUI 실증 |
+| **10** | **"peak 후 감소"가 항상 진전 아님 — 절대값도 봐야 함** | leg_usage_cv 1.27 오판 |
+| **11** | **Sinusoid joint target은 amplitude 부족 시 윗다리 lift 못 만듦** | V63.F.1 -26°까지만 |
+| **12** | **GUI 관찰이 metric 해석보다 정확** | V63.F.1 사용자 발견 |
+| **13** | **사용자 직접 관찰을 reward로 변환하는 것이 가장 직접적** | V63.G 설계 원리 |
+| **14** | **intra_pair_sync는 trot의 필수 조건** | V63.G 핵심 reward |
 
 ### 판정 프로세스 (자기 교정)
 
@@ -520,8 +890,15 @@ RewTerm(
 | 04-09 08:14 | V63.E.1 중단 (iter 1002, **제 성급 판정**) |
 | 04-09 08:14 | V63.E.1 실제로 iter 1177에서 0.1507 달성 (사후 확인) |
 | 04-09 08:16 | V63.F 시작 |
-| 04-09 08:45 경 | V63.F iter 201에서 **0.5649 STRONG SATISFIED 달성** ⭐ |
-| 04-09 현재 | V63.F 진행 중, 30분 타이머 대기 |
+| 04-09 08:45 경 | V63.F iter 201에서 0.5649 STRONG SATISFIED 달성 |
+| 04-09 10:23 | V63.F iter 1465 EXPLOIT 확정 (anti_phase 0.04 < 0.1) |
+| 04-09 10:59 | V63.F.1 시작 (anti_phase REWARD 3.0 승격) |
+| 04-09 11:30 | V63.F.1 iter 561 REAL TROT SATISFIED 첫 달성 |
+| 04-09 14:30 경 | V63.F.1 iter 3752 — 사용자 GUI로 V63.F.1 검사 |
+| 04-09 14:30 | **사용자 발견: RR 1발 exploit + intra-pair desync** |
+| 04-09 14:40 | V63.F.1 중단 (V63 시리즈 6번째 실패 인정) |
+| 04-09 14:44 | **V63.G 시작** (사용자 4가지 지적 직접 reward 변환) |
+| 04-09 현재 | V63.G 진행 중 |
 
 ---
 

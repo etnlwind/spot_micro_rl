@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V63.F"
+TRAIN_VERSION = "V63.G"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -36,8 +36,9 @@ _IS_V63C = TRAIN_VERSION.startswith("V63.C")
 _IS_V63D = TRAIN_VERSION.startswith("V63.D")
 _IS_V63E = TRAIN_VERSION.startswith("V63.E")  # V63.E, V63.E.1 등 모두 포함
 _IS_V63F = TRAIN_VERSION.startswith("V63.F")  # V63.F, V63.F.1 등
-# V63.B/C/D/E/F 모두 V62 reward 구조를 베이스로 사용. V62 블록을 그대로 활성화.
-if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F:
+_IS_V63G = TRAIN_VERSION.startswith("V63.G")  # V63.G
+# V63.B/C/D/E/F/G 모두 V62 reward 구조를 베이스로 사용.
+if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G:
     _IS_V62 = True
 _V59_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V59 and "." in TRAIN_VERSION else ("A" if _IS_V59 else "")
 _V60_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V60 and "." in TRAIN_VERSION else ("A" if _IS_V60 else "")
@@ -5471,13 +5472,13 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             toe_sensor_v63f = SceneEntityCfg("contact_forces", body_names=".*toe_link")
             foot_cfg_v63f = SceneEntityCfg("robot", body_names=".*toe_link")
 
-            # ── V63.F weight 재배치 ──
-            # phase_contact: V62 10 → V63.F 3 (joint_target에 양보)
-            self.rewards.phase_contact.weight = 3.0
-            # propulsion: V62 8 → V63.F 1 (drag 유인 최소화)
-            self.rewards.propulsion.weight = 1.0
-            # feet_air_time: 4.0 유지
-            self.rewards.feet_air_time.weight = 4.0
+            # ── V63.F.1 weight 재조정 (V63.F exploit 해결) ──
+            # V63.F 문제: joint_target 0.74 도달 but anti_phase 0.04 (대각 교대 없음)
+            # = stationary joint wiggle exploit
+            # 해결: joint_target dominant 완화 + phase_contact 복원 + anti_phase reward 승격
+            self.rewards.phase_contact.weight = 6.0  # V63.F 3.0 → 6.0 (구조 강제)
+            self.rewards.propulsion.weight = 2.0     # V63.F 1.0 → 2.0 (약간 복원)
+            self.rewards.feet_air_time.weight = 4.0  # 유지
 
             # V63.B/C의 phase_foot_reach 제거
             if hasattr(self.rewards, "phase_foot_reach"):
@@ -5486,20 +5487,20 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             if hasattr(self.rewards, "phase_joint_target"):
                 self.rewards.phase_joint_target = None
 
-            # ── V63.F 핵심: dominant linear joint target + 관대한 err_max ──
+            # ── V63.F.1: joint_target weight 완화 (dominant 해제) ──
             self.rewards.phase_joint_target_linear = RewTerm(
                 func=custom_mdp.phase_joint_target_linear_reward,
-                weight=8.0,  # V63.E.1 3.0 → V63.F 8.0 (dominant)
+                weight=5.0,  # V63.F 8.0 → 5.0 (exploit 완화)
                 params={
                     "asset_cfg": SceneEntityCfg("robot"),
                     "frequency": 2.0,
                     "duty_factor": 0.55,
                     "A_leg_start": 0.03,
-                    "A_leg_end": 0.20,       # V63.E.1 0.25 → 0.20 (11°)
+                    "A_leg_end": 0.20,
                     "A_foot_start": 0.05,
-                    "A_foot_end": 0.28,      # V63.E.1 0.35 → 0.28 (16°)
-                    "curriculum_iters": 3500, # V63.E.1 2500 → 3500
-                    "err_max": 4.0,          # V63.E.1 3.0 → 4.0 (더 관대)
+                    "A_foot_end": 0.28,
+                    "curriculum_iters": 3500,
+                    "err_max": 4.0,
                 },
             )
 
@@ -5523,21 +5524,27 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 },
             )
 
-            # ── V63.F 신규 3 Metrics (학습 영향 무시, 판정 강화) ──
-            self.rewards.metric_clearance = RewTerm(
-                func=custom_mdp.metric_clearance_mean_reward,
-                weight=1e-4,  # 학습 영향 무시 (per-ep < 0.01)
+            # ── V63.F.1: anti_phase를 metric → REWARD로 승격 ──
+            # V63.F exploit 해결: 대각 교대를 직접 보상
+            # 정상 trot anti_phase 0.5+ × weight 3.0 = +1.5 per-step
+            # 현재 exploit 0.04 × 3.0 = +0.12 per-step
+            # → trot vs exploit 차이 +1.38 per-step (강한 신호)
+            self.rewards.metric_anti_phase = RewTerm(
+                func=custom_mdp.metric_anti_phase_contact_reward,
+                weight=3.0,  # V63.F 1e-4 → V63.F.1 3.0 (REWARD 승격)
                 params={
                     "sensor_cfg": toe_sensor_v63f,
-                    "foot_cfg": foot_cfg_v63f,
                     "contact_threshold": 1.0,
                 },
             )
-            self.rewards.metric_anti_phase = RewTerm(
-                func=custom_mdp.metric_anti_phase_contact_reward,
+
+            # ── Metric 2개는 유지 (clearance, leg_usage_cv) ──
+            self.rewards.metric_clearance = RewTerm(
+                func=custom_mdp.metric_clearance_mean_reward,
                 weight=1e-4,
                 params={
                     "sensor_cfg": toe_sensor_v63f,
+                    "foot_cfg": foot_cfg_v63f,
                     "contact_threshold": 1.0,
                 },
             )
@@ -5546,6 +5553,116 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 weight=1e-4,
                 params={
                     "sensor_cfg": toe_sensor_v63f,
+                    "contact_threshold": 1.0,
+                },
+            )
+
+        # ══════════════════════════════════════════════════════════
+        # V63.G: Asymmetric Target + Intra-pair Sync + leg_usage Penalty
+        # V63.F.1 GUI 관찰 (사용자):
+        #   1. RR이 가짜로 차고 다른 3발은 발 끌기 (1발 exploit)
+        #   2. 윗다리(hip pitch)가 안 올라옴 (수평 가까이 필요)
+        #   3. FL-RR / FR-RL intra-pair 동기 안 됨 (가짜 trot)
+        # 해결:
+        #   1) asymmetric_joint_target_reward (stance/swing 분리, 큰 lift)
+        #   2) intra_pair_sync_reward (+4) — 사용자 두 번째 지적
+        #   3) leg_usage_cv_penalty (-3) — RR exploit 차단
+        #   4) per_leg_propulsion_balance_reward (+2) — 4발 균등 추진
+        #   5) phase_foot_reach, phase_joint_target_linear, V63.F metric 모두 제거
+        # ══════════════════════════════════════════════════════════
+        if _IS_V63G:
+            toe_sensor_v63g = SceneEntityCfg("contact_forces", body_names=".*toe_link")
+            foot_cfg_v63g = SceneEntityCfg("robot", body_names=".*toe_link")
+
+            # ── V63.G weight 재배치 ──
+            self.rewards.phase_contact.weight = 4.0
+            self.rewards.propulsion.weight = 2.0
+            self.rewards.feet_air_time.weight = 4.0
+
+            # 이전 버전 reward 제거
+            if hasattr(self.rewards, "phase_foot_reach"):
+                self.rewards.phase_foot_reach = None
+            if hasattr(self.rewards, "phase_joint_target"):
+                self.rewards.phase_joint_target = None
+            if hasattr(self.rewards, "phase_joint_target_linear"):
+                self.rewards.phase_joint_target_linear = None
+            if hasattr(self.rewards, "metric_clearance"):
+                self.rewards.metric_clearance = None
+            if hasattr(self.rewards, "metric_anti_phase"):
+                self.rewards.metric_anti_phase = None
+            if hasattr(self.rewards, "metric_leg_usage_cv"):
+                self.rewards.metric_leg_usage_cv = None
+
+            # ── V63.G 핵심 1: Asymmetric joint target ──
+            # leg lift 23° (V63.F 11°의 2배), foot bend 28°
+            self.rewards.asymmetric_joint_target = RewTerm(
+                func=custom_mdp.asymmetric_joint_target_reward,
+                weight=5.0,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "frequency": 2.0,
+                    "duty_factor": 0.55,
+                    "A_leg_lift_start": 0.20,    # 11° (시작)
+                    "A_leg_lift_end": 0.40,      # 23° (목표, V63.F 0.20의 2배)
+                    "A_foot_bend_start": 0.25,   # 14°
+                    "A_foot_bend_end": 0.50,     # 28°
+                    "stance_pull_back": 0.05,
+                    "curriculum_iters": 1500,
+                    "err_max": 4.0,
+                },
+            )
+
+            # ── V63.G 핵심 2: Intra-pair sync (사용자 두 번째 지적) ──
+            self.rewards.intra_pair_sync = RewTerm(
+                func=custom_mdp.intra_pair_sync_reward,
+                weight=4.0,  # dominant 급
+                params={
+                    "sensor_cfg": toe_sensor_v63g,
+                    "contact_threshold": 1.0,
+                },
+            )
+
+            # ── V63.G 핵심 3: leg_usage_cv PENALTY (RR exploit 차단) ──
+            self.rewards.leg_usage_cv = RewTerm(
+                func=custom_mdp.leg_usage_cv_penalty,
+                weight=-3.0,  # V63.F 1e-4 metric → V63.G -3.0 강한 penalty
+                params={
+                    "sensor_cfg": toe_sensor_v63g,
+                    "contact_threshold": 1.0,
+                    "cv_threshold": 0.3,
+                    "cv_max": 2.0,
+                },
+            )
+
+            # ── V63.G 핵심 4: per-leg propulsion balance ──
+            self.rewards.per_leg_propulsion_balance = RewTerm(
+                func=custom_mdp.per_leg_propulsion_balance_reward,
+                weight=2.0,
+                params={
+                    "sensor_cfg": toe_sensor_v63g,
+                    "foot_cfg": foot_cfg_v63g,
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "contact_threshold": 1.0,
+                    "target_push_vel": 0.3,
+                },
+            )
+
+            # ── V63.B에서 이어받은 penalty 2개 ──
+            self.rewards.pair_lr_symmetry = RewTerm(
+                func=custom_mdp.pair_lr_symmetry_penalty,
+                weight=-0.3,
+                params={
+                    "sensor_cfg": toe_sensor_v63g,
+                    "contact_threshold": 1.0,
+                    "cr_weight": 0.5,
+                },
+            )
+            self.rewards.stance_slip = RewTerm(
+                func=custom_mdp.stance_slip_penalty,
+                weight=-0.05,
+                params={
+                    "sensor_cfg": toe_sensor_v63g,
+                    "foot_cfg": foot_cfg_v63g,
                     "contact_threshold": 1.0,
                 },
             )
