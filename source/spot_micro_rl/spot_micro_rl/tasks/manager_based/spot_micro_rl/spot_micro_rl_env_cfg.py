@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V63.H.2"
+TRAIN_VERSION = "V63.J"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -38,8 +38,16 @@ _IS_V63E = TRAIN_VERSION.startswith("V63.E")
 _IS_V63F = TRAIN_VERSION.startswith("V63.F")
 _IS_V63G = TRAIN_VERSION.startswith("V63.G")
 _IS_V63H = TRAIN_VERSION.startswith("V63.H")
-# V63.B/C/D/E/F/G/H 모두 V62 reward 구조를 베이스로 사용.
-if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H:
+_IS_V63I = TRAIN_VERSION.startswith("V63.I")
+_IS_V63J = TRAIN_VERSION.startswith("V63.J")
+# V63.J는 V63.I 구조를 물려받음 (per_leg_contact_min 0.40, stance_ratio_balance)
+if _IS_V63J:
+    _IS_V63I = True
+# V63.I/J는 V63.H 구조를 그대로 물려받고 exploit 차단 reward만 추가
+if _IS_V63I or _IS_V63J:
+    _IS_V63H = True
+# V63.B/C/D/E/F/G/H/I 모두 V62 reward 구조를 베이스로 사용.
+if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J:
     _IS_V62 = True
 _V59_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V59 and "." in TRAIN_VERSION else ("A" if _IS_V59 else "")
 _V60_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V60 and "." in TRAIN_VERSION else ("A" if _IS_V60 else "")
@@ -5774,9 +5782,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
             )
 
             # V63.H.1: pace gait 차단 위해 weight 강화
+            # V63.H.4: 사용자 "이상한 박자" 지적 → trot 구조 우선 강화 (5.0 → 7.0)
             self.rewards.true_trot_pattern = RewTerm(
                 func=custom_mdp.true_trot_pattern_reward,
-                weight=5.0,  # V63.H 3.0 → V63.H.1 5.0 (trot 강제 강화)
+                weight=7.0,  # V63.H 3.0 → H.1/H.2/H.3 5.0 → H.4 7.0 (박자 우선)
                 params={
                     "sensor_cfg": toe_sensor_v63h,
                     "contact_threshold": 1.0,
@@ -5827,8 +5836,6 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
             # ── V63.H.2 복원: asymmetric_joint_target (윗다리 lift target) ──
             # 사용자 두 번 강조: "윗다리가 더 수평에 가깝게 올라와야"
-            # V63.G.1의 0.55 rad (31.5°)로 윗다리를 거의 수평까지 들기
-            # leg target end = -0.66 + 0.55 = -0.11 rad (-6.3°)
             self.rewards.asymmetric_joint_target = RewTerm(
                 func=custom_mdp.asymmetric_joint_target_reward,
                 weight=5.0,
@@ -5836,13 +5843,40 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "asset_cfg": SceneEntityCfg("robot"),
                     "frequency": 2.0,
                     "duty_factor": 0.55,
-                    "A_leg_lift_start": 0.15,    # 8.6° 시작
-                    "A_leg_lift_end": 0.55,      # 31.5° (사용자 의도, 거의 수평)
+                    "A_leg_lift_start": 0.15,
+                    "A_leg_lift_end": 0.55,
                     "A_foot_bend_start": 0.20,
-                    "A_foot_bend_end": 0.55,     # 31.5° foot bend
+                    "A_foot_bend_end": 0.55,
                     "stance_pull_back": 0.05,
                     "curriculum_iters": 1500,
                     "err_max": 4.0,
+                },
+            )
+
+            # ── V63.H.3 신규 1: Per-leg stance push MIN (좌우 비대칭 차단) ──
+            # 사용자 V63.H.2 GUI: "FL 완벽, FR이 뒤로 힘차게 못 밀고 swing에서 급함"
+            # → 4발 중 가장 약한 발의 stance propulsion을 보상
+            # → FR이 약하면 전체 reward 낮음 → policy가 모든 발 균등 push 학습
+            # V63.H.4: push_min weight 4.0 → 2.0 (trot 박자에 양보)
+            self.rewards.per_leg_stance_push_min = RewTerm(
+                func=custom_mdp.per_leg_stance_push_min_reward,
+                weight=2.0,  # V63.H.3 4.0 → V63.H.4 2.0
+                params={
+                    "sensor_cfg": toe_sensor_v63h,
+                    "foot_cfg": foot_cfg_v63h,
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "contact_threshold": 1.0,
+                    "target_push_vel": 0.3,
+                },
+            )
+
+            # ── V63.H.3 신규 2: 좌우 대칭 penalty ──
+            self.rewards.leg_lr_symmetry = RewTerm(
+                func=custom_mdp.leg_lr_symmetry_penalty,
+                weight=-2.0,
+                params={
+                    "sensor_cfg": toe_sensor_v63h,
+                    "contact_threshold": 1.0,
                 },
             )
 
@@ -5856,6 +5890,100 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "min_contact_ratio": 0.10,
                 },
             )
+
+            # ── V63.H.5: gait smoothness fix ──
+            # 사용자 GUI 지적: "한 걸음 → 다음 걸음 전환 시 끊어짐"
+            # P1: asymmetric_joint_target stance_pull_back 불연속 제거 (rewards.py 수정)
+            # P2: action_rate_l2 -0.05 → -0.10 (2배, jerk 억제 강화)
+            # 보수적 1차 수정 — 코덱스 리뷰 반영
+            self.rewards.action_rate_l2.weight = -0.10
+
+            # ══════════════════════════════════════════════════════════
+            # V63.I: Frozen Diagonal Exploit 차단
+            # 사용자 V63.H.5 model_2600 GUI: "FL, RR만 땅에 닿고 비대칭"
+            # 데이터: contact_ratio FL 77% / FR 10% / RL 9% / RR 76%
+            # → true_trot_pattern(intra×inter) 만점이지만 실제는 2발 hover exploit
+            # → "매 순간 상관"만 측정하는 metric의 맹점
+            #
+            # 수정 (P1+P2+P4):
+            # P1: per_leg_contact_min min_contact_ratio 0.10→0.40, weight -3→-8
+            # P2: stance_ratio_balance_reward 신규 (+5.0, EMA 기반 장기 교대 강제)
+            # P4: log_contact_ema_* 진단 logger (함수 내장)
+            # ══════════════════════════════════════════════════════════
+            if _IS_V63I:
+                # P1: 기존 per_leg_contact_min 강화 (10% → 40% threshold)
+                self.rewards.per_leg_contact_min = RewTerm(
+                    func=custom_mdp.per_leg_contact_min_penalty,
+                    weight=-8.0,  # V63.H -3.0 → V63.I -8.0
+                    params={
+                        "sensor_cfg": toe_sensor_v63h,
+                        "contact_threshold": 1.0,
+                        "min_contact_ratio": 0.40,  # V63.H 0.10 → V63.I 0.40
+                    },
+                )
+
+                # P2: 신규 stance_ratio_balance (EMA 기반 장기 접지율 균등화)
+                self.rewards.stance_ratio_balance = RewTerm(
+                    func=custom_mdp.stance_ratio_balance_reward,
+                    weight=5.0,
+                    params={
+                        "sensor_cfg": toe_sensor_v63h,
+                        "contact_threshold": 1.0,
+                        "target_ratio": 0.55,
+                        "ema_decay": 0.99,
+                        "sigma": 0.15,
+                    },
+                )
+
+                # ══════════════════════════════════════════════════════════
+                # V63.J: Alternation-Aware Trot + Role Balance
+                # ══════════════════════════════════════════════════════════
+                # V63.I 진단 결론:
+                #   - true_trot_pattern은 편향 trot에 더 높은 점수 부여 (시간축 교대 없음)
+                #   - penalty(diagonal_pair_balance, leg_lr_symmetry)만으로 못 깸
+                #   - 원인: 정책 symmetry breaking (물리 대칭 검증 완료)
+                #
+                # 해결 철학 (코덱스):
+                #   1. 주연 = "반 사이클마다 역할이 실제로 바뀌는가" (alternation)
+                #   2. 보조 = per-leg propulsion/lift 분산 감소
+                #   3. 기존 true_trot_pattern 약화 공존 (7→2)
+                #   4. diagonal_pair_balance 제거 (alternation이 대체)
+                # ══════════════════════════════════════════════════════════
+                if _IS_V63J:
+                    # 1. 주연: alternation_trot_reward (+5.0)
+                    self.rewards.alternation_trot = RewTerm(
+                        func=custom_mdp.alternation_trot_reward,
+                        weight=5.0,
+                        params={
+                            "sensor_cfg": toe_sensor_v63h,
+                            "contact_threshold": 1.0,
+                            "frequency": 2.0,
+                            "window": 3,
+                        },
+                    )
+
+                    # 2. 기존 true_trot_pattern 약화 (7→2, 보조 역할로 유지)
+                    self.rewards.true_trot_pattern.weight = 2.0
+
+                    # 3. per-leg role variance penalty (-2.0, propulsion+lift)
+                    self.rewards.per_leg_role_variance = RewTerm(
+                        func=custom_mdp.per_leg_role_variance_penalty,
+                        weight=-2.0,
+                        params={
+                            "sensor_cfg": toe_sensor_v63h,
+                            "foot_cfg": foot_cfg_v63h,
+                            "asset_cfg": SceneEntityCfg("robot"),
+                            "contact_threshold": 1.0,
+                            "ema_decay": 0.99,
+                        },
+                    )
+
+                    # 4. diagonal_pair_balance 제거 (alternation이 대체)
+                    if hasattr(self.rewards, "diagonal_pair_balance"):
+                        self.rewards.diagonal_pair_balance = None
+
+                    # 5. leg_lr_symmetry -2.0 유지 (약한 보조)
+                    # (V63.I 원래 값 그대로, 변경 없음)
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

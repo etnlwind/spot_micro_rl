@@ -3344,7 +3344,11 @@ def asymmetric_joint_target_reward(
     swing_progress = torch.clamp((phase_norm - stance_end) / (swing_dur + 1e-6), 0.0, 1.0)
 
     # Asymmetric leg target
-    stance_leg_offset = -stance_pull_back * stance_progress
+    # V63.H.5: stance_pull_back 경계 연속화 (linear → sin)
+    #   기존: stance 끝에서 -pull_back, swing 시작에서 0 → C⁰ 불연속 (~2.9° jump)
+    #   수정: sin(stance_progress·π) → stance 시작 0, 중간 최대, stance 끝 0
+    #         swing 경계 연속, stance 기능(중간 pull-back) 보존
+    stance_leg_offset = -stance_pull_back * torch.sin(stance_progress * math.pi)
     swing_leg_offset = A_leg_lift * torch.sin(swing_progress * math.pi)
     leg_offset = in_stance * stance_leg_offset + in_swing * swing_leg_offset
     leg_target = env._v63e_leg_defaults.unsqueeze(0) + leg_offset
@@ -3379,6 +3383,459 @@ def asymmetric_joint_target_reward(
             env.extras["log_v63g_err_rr"] = (leg_err[:, 3] + foot_err[:, 3]).mean().item()
 
     return reward
+
+
+def per_leg_stance_push_min_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    target_push_vel: float = 0.3,
+) -> torch.Tensor:
+    """V63.H.3: Per-leg stance propulsion의 MIN을 보상.
+
+    사용자 GUI 관찰 (V63.H.2 iter 2400):
+    > "FL은 완벽한데 FR은 뒤로 힘차게 밀지 못하고 swing에서 급하게 맞춤"
+    → FR이 stance propulsion을 못 함 → 좌우 비대칭
+
+    해결: 4발 중 가장 약한 발의 stance push를 보상.
+    한 발이라도 weak이면 전체 reward 낮음 → policy가 모든 발 balance 강제.
+
+    수식:
+        foot_rel_vel = foot_vel_world - body_vel_world  # body 대비
+        push_per_leg = clamp(-foot_rel_vel_heading, 0) × stance_mask
+        min_push = min(push_per_leg across 4 legs)
+        reward = clamp(min_push / target_push_vel, 0, 1)
+
+    정상 trot: 모든 발이 ~0.3 m/s backward push → min 0.3 → reward 1.0
+    FR만 weak: min = FR push ~0.1 → reward 0.33
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    stance_mask = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4)
+
+    foot_asset = env.scene[foot_cfg.name]
+    foot_vel_w = foot_asset.data.body_vel_w[:, foot_cfg.body_ids, :3]  # (N, 4, 3)
+
+    robot = env.scene[asset_cfg.name]
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    heading_x = 1.0 - 2.0 * (y * y + z * z)
+    heading_y = 2.0 * (x * y + w * z)
+
+    foot_heading_vel = (
+        foot_vel_w[:, :, 0] * heading_x.unsqueeze(1)
+        + foot_vel_w[:, :, 1] * heading_y.unsqueeze(1)
+    )
+    body_vel_w = robot.data.root_lin_vel_w
+    body_heading_vel = body_vel_w[:, 0] * heading_x + body_vel_w[:, 1] * heading_y
+
+    # 발이 body 대비 뒤쪽으로 움직이는 정도 (propulsion)
+    relative_vel = foot_heading_vel - body_heading_vel.unsqueeze(1)
+    push_per_leg = torch.clamp(-relative_vel, min=0.0) * stance_mask  # (N, 4)
+
+    # Stance 중인 발만 고려 (stance 아닌 발은 max로 설정해서 min 계산에서 제외)
+    # → stance=0인 발은 큰 값으로 치환
+    large_val = torch.full_like(push_per_leg, 1e6)
+    push_masked = torch.where(stance_mask > 0.5, push_per_leg, large_val)
+
+    # 4발 중 min (stance 중인 발 중 최소 push)
+    min_push = push_masked.min(dim=-1).values  # (N,)
+    # stance가 하나도 없으면 min_push = 1e6 → 비정상. 그때는 0으로 fallback.
+    has_stance = (stance_mask.sum(dim=-1) > 0.5)
+    min_push = torch.where(has_stance, min_push, torch.zeros_like(min_push))
+    # 너무 큰 값은 0으로
+    min_push = torch.where(min_push > target_push_vel * 10, torch.zeros_like(min_push), min_push)
+
+    reward = torch.clamp(min_push / target_push_vel, 0.0, 1.0)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_per_leg_push_min"] = reward.mean().item()
+            env.extras["log_push_fl"] = push_per_leg[:, 0].mean().item()
+            env.extras["log_push_fr"] = push_per_leg[:, 1].mean().item()
+            env.extras["log_push_rl"] = push_per_leg[:, 2].mean().item()
+            env.extras["log_push_rr"] = push_per_leg[:, 3].mean().item()
+
+    return reward
+
+
+def leg_lr_symmetry_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """V63.H.3: 좌우 (FL-FR, RL-RR) 대칭성 penalty.
+
+    4발 평균/min reward는 한쪽이 완벽하고 다른쪽이 이상해도
+    평균으로 희석됨. 직접 좌우 차이를 penalty.
+
+    수식:
+        front_sw_diff = |sw[FL] - sw[FR]|
+        rear_sw_diff = |sw[RL] - sw[RR]|
+        penalty = front_sw_diff + rear_sw_diff
+    """
+    contact_ratio = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )  # (N, 4)
+    swing_ratio = 1.0 - contact_ratio
+
+    front_sw_diff = torch.abs(swing_ratio[:, 0] - swing_ratio[:, 1])  # FL-FR
+    rear_sw_diff = torch.abs(swing_ratio[:, 2] - swing_ratio[:, 3])   # RL-RR
+    penalty = front_sw_diff + rear_sw_diff
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_lr_symmetry_front"] = front_sw_diff.mean().item()
+            env.extras["log_lr_symmetry_rear"] = rear_sw_diff.mean().item()
+            env.extras["log_lr_symmetry_total"] = penalty.mean().item()
+
+    return penalty
+
+
+def stance_ratio_balance_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    target_ratio: float = 0.55,
+    ema_decay: float = 0.99,
+    sigma: float = 0.15,
+) -> torch.Tensor:
+    """V63.I: Long-term per-leg contact ratio 를 target_ratio 로 수렴시킴.
+
+    V63.H.5 GUI 관찰 — frozen diagonal exploit:
+        FL/RR 76% stance, FR/RL 10% stance
+        → true_trot_pattern 만점이지만 실제는 2발 스탠스 + 2발 hover
+        → V63.H의 metric(intra×inter)은 "매 순간 상관"만 측정, 시간축 교대 없음
+
+    해결: 각 다리의 long-term contact 비율을 EMA로 측정하여
+          target_ratio(=duty_factor)와의 편차를 exp로 보상.
+
+    수식:
+        contact_t = (force > threshold).float()              # (N, 4)
+        ema_t     = decay · ema_{t-1} + (1-decay) · contact_t
+        err       = Σ_leg |ema - target_ratio|
+        reward    = exp(-err / sigma)
+
+    파라미터 근거:
+        ema_decay = 0.99 → effective window ≈ 1/(1-decay) = 100 steps
+                          (decimation=4, dt=0.02 → 2s, trot 4사이클)
+        target_ratio = 0.55 → duty_factor 와 동일
+        sigma = 0.15 → err 0.15→reward 0.37, err 0.45→reward 0.05
+
+    수치 예측:
+        - 정상 trot (모두 0.55): err=0 → reward=1.00
+        - V63.H.5 frozen (0.77, 0.10, 0.09, 0.76):
+            err = 0.22+0.45+0.46+0.21 = 1.34 → reward = exp(-8.9) ≈ 0 (차단)
+        - 약간 편차 (0.60, 0.50, 0.50, 0.60): err=0.20 → reward=0.26
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_mask = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4)
+
+    if not hasattr(env, "_v63i_contact_ema"):
+        env._v63i_contact_ema = torch.full_like(contact_mask, target_ratio)
+
+    # Reset on episode start
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        env._v63i_contact_ema[reset_mask] = target_ratio
+
+    # EMA update (in-place safe — contact_mask is detached)
+    env._v63i_contact_ema = (
+        ema_decay * env._v63i_contact_ema + (1.0 - ema_decay) * contact_mask
+    )
+
+    err = (env._v63i_contact_ema - target_ratio).abs().sum(dim=-1)  # (N,)
+    reward = torch.exp(-err / sigma)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_stance_balance"] = reward.mean().item()
+            env.extras["log_contact_ema_fl"] = env._v63i_contact_ema[:, 0].mean().item()
+            env.extras["log_contact_ema_fr"] = env._v63i_contact_ema[:, 1].mean().item()
+            env.extras["log_contact_ema_rl"] = env._v63i_contact_ema[:, 2].mean().item()
+            env.extras["log_contact_ema_rr"] = env._v63i_contact_ema[:, 3].mean().item()
+            env.extras["log_contact_ema_min"] = env._v63i_contact_ema.min(dim=-1).values.mean().item()
+            env.extras["log_contact_ema_max"] = env._v63i_contact_ema.max(dim=-1).values.mean().item()
+            env.extras["log_contact_ema_spread"] = (
+                env._v63i_contact_ema.max(dim=-1).values - env._v63i_contact_ema.min(dim=-1).values
+            ).mean().item()
+            env.extras["log_contact_ema_err"] = err.mean().item()
+
+    return reward
+
+
+def diagonal_pair_balance_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    ema_decay: float = 0.99,
+) -> torch.Tensor:
+    """V63.I.2: 대각선 페어 간 contact 비율 균등화 penalty.
+
+    V63.I 진단: FL+RR(PairA) vs FR+RL(PairB) stance 시간 19.5%p 차이.
+    기존 leg_lr_symmetry는 L/R 축을 찌르는데, 실제 편향은 대각선 축.
+    이 penalty가 대각선 축을 직접 공격.
+
+    수식:
+        contact_ema 재사용 (stance_ratio_balance과 동일 버퍼 _v63i_contact_ema)
+        pair_a = (ema_FL + ema_RR) / 2
+        pair_b = (ema_FR + ema_RL) / 2
+        penalty = |pair_a - pair_b|
+
+    수치 예측 (weight -4.0):
+        - V63.I 최종 (FL52 FR43 RL45 RR48): pair_a=0.50, pair_b=0.44
+          → |0.50-0.44| = 0.06 → penalty 0.06 × -4 = -0.24/step
+        - 대칭 해 (모두 55%): pair_a=pair_b=0.55 → penalty 0
+        - 극단 편향 (76/10/9/76): pair_a=0.76, pair_b=0.10
+          → 0.66 × -4 = -2.64/step (강력 차단)
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_mask = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4): FL, FR, RL, RR
+
+    # stance_ratio_balance와 동일 EMA 버퍼 재사용
+    if not hasattr(env, "_v63i_contact_ema"):
+        env._v63i_contact_ema = torch.full_like(contact_mask, 0.55)
+
+    # Reset (stance_ratio_balance에서 이미 처리하지만 독립 실행 시 대비)
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        env._v63i_contact_ema[reset_mask] = 0.55
+
+    # EMA update (stance_ratio_balance가 같은 step에서 이미 갱신했을 수 있음)
+    # 동일 step 내 중복 갱신 방지: hasattr 체크
+    if not hasattr(env, "_v63i_ema_step"):
+        env._v63i_ema_step = -1
+    current_step = env.episode_length_buf.max().item()
+    if env._v63i_ema_step != current_step:
+        env._v63i_contact_ema = (
+            ema_decay * env._v63i_contact_ema + (1.0 - ema_decay) * contact_mask
+        )
+        env._v63i_ema_step = current_step
+
+    # Pair A (FL=0, RR=3) vs Pair B (FR=1, RL=2)
+    pair_a = (env._v63i_contact_ema[:, 0] + env._v63i_contact_ema[:, 3]) * 0.5
+    pair_b = (env._v63i_contact_ema[:, 1] + env._v63i_contact_ema[:, 2]) * 0.5
+    penalty = torch.abs(pair_a - pair_b)  # (N,)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_diag_pair_a"] = pair_a.mean().item()
+            env.extras["log_diag_pair_b"] = pair_b.mean().item()
+            env.extras["log_diag_pair_diff"] = penalty.mean().item()
+
+    return penalty
+
+
+def alternation_trot_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    frequency: float = 2.0,
+    window: int = 3,
+) -> torch.Tensor:
+    """V63.J: 반 사이클마다 역할 교대를 직접 측정하는 trot reward.
+
+    V63.I 진단: true_trot_pattern은 "매 순간 두 쌍이 다르면 만점"이라
+    한 쌍이 항시 stance여도 만점 (시간축 교대 없음 → 편향 trot 보상).
+
+    이 reward는 **반 사이클 전 contact state와 현재를 비교**:
+        - 반 사이클 전에 stance였던 쌍이 지금 swing이면 → 교대 성공
+        - 같은 쌍이 계속 stance이면 → 교대 실패 → 0점
+
+    수식:
+        contact_smooth = 최근 window(3) step 평균 contact state
+        past_smooth = half_cycle 전의 window 평균 contact state
+
+        pair_a = (FL + RR) / 2,  pair_b = (FR + RL) / 2
+        alt_a = |pair_a_now - pair_a_past|  (역할 바뀌었으면 ~1)
+        alt_b = |pair_b_now - pair_b_past|
+        alternation = (alt_a + alt_b) / 2
+
+        intra_sync = 기존 true_trot_pattern의 intra 계산
+        inter_diff = 기존 inter_diff 계산
+
+        reward = intra_sync × inter_diff × alternation
+
+    시나리오:
+        정상 trot: intra=1, inter=1, alt=1 → reward=1.0
+        편향 trot (PairA 고정): intra=1, inter=1, alt=0 → reward=0 ← 차단!
+        4발 동시: intra=1, inter=0 → reward=0
+        제자리: inter~0 → reward=0
+
+    Ring buffer: (N, buffer_size, 4) — half_cycle + window steps 저장.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4): FL, FR, RL, RR
+
+    step_dt = env.step_dt
+    half_cycle_steps = max(1, int(round(0.5 / (frequency * step_dt))))
+    buffer_size = half_cycle_steps + window
+
+    # Ring buffer init
+    if not hasattr(env, "_v63j_contact_buf"):
+        N = contact.shape[0]
+        device = contact.device
+        env._v63j_contact_buf = torch.zeros(N, buffer_size, 4, device=device)
+        env._v63j_buf_idx = 0
+
+    # Reset on episode start
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        env._v63j_contact_buf[reset_mask] = 0.0
+
+    # Write current contact to ring buffer
+    idx = env._v63j_buf_idx % buffer_size
+    env._v63j_contact_buf[:, idx, :] = contact
+    env._v63j_buf_idx += 1
+
+    # "Now" smooth: average of last `window` entries
+    now_indices = [(env._v63j_buf_idx - 1 - i) % buffer_size for i in range(window)]
+    now_smooth = torch.stack([env._v63j_contact_buf[:, i, :] for i in now_indices], dim=0).mean(dim=0)
+
+    # "Past" smooth: average of `window` entries from half_cycle ago
+    past_indices = [(env._v63j_buf_idx - 1 - half_cycle_steps - i) % buffer_size for i in range(window)]
+    past_smooth = torch.stack([env._v63j_contact_buf[:, i, :] for i in past_indices], dim=0).mean(dim=0)
+
+    # Pair alternation
+    pair_a_now = (now_smooth[:, 0] + now_smooth[:, 3]) * 0.5   # FL+RR
+    pair_b_now = (now_smooth[:, 1] + now_smooth[:, 2]) * 0.5   # FR+RL
+    pair_a_past = (past_smooth[:, 0] + past_smooth[:, 3]) * 0.5
+    pair_b_past = (past_smooth[:, 1] + past_smooth[:, 2]) * 0.5
+
+    alt_a = torch.abs(pair_a_now - pair_a_past)
+    alt_b = torch.abs(pair_b_now - pair_b_past)
+    alternation = (alt_a + alt_b) * 0.5
+
+    # Intra-pair sync (from true_trot_pattern)
+    sync_a = 1.0 - torch.abs(now_smooth[:, 0] - now_smooth[:, 3])
+    sync_b = 1.0 - torch.abs(now_smooth[:, 1] - now_smooth[:, 2])
+    intra = (sync_a + sync_b) * 0.5
+
+    # Inter-pair diff
+    inter_diff = torch.abs(pair_a_now - pair_b_now)
+
+    # Combined: all three must be high for reward
+    reward = intra * inter_diff * alternation
+
+    # Grace period: buffer needs half_cycle to fill
+    if env._v63j_buf_idx < half_cycle_steps + window:
+        reward = reward * 0.0  # suppress until buffer is ready
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_alternation"] = alternation.mean().item()
+            env.extras["log_alternation_a"] = alt_a.mean().item()
+            env.extras["log_alternation_b"] = alt_b.mean().item()
+            env.extras["log_alt_intra"] = intra.mean().item()
+            env.extras["log_alt_inter"] = inter_diff.mean().item()
+            env.extras["log_alt_reward"] = reward.mean().item()
+
+    return reward
+
+
+def per_leg_role_variance_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    foot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
+    ema_decay: float = 0.99,
+) -> torch.Tensor:
+    """V63.J: Per-leg propulsion + lift의 분산(CV) penalty.
+
+    코덱스 권장: "희생 다리"가 생기지 않도록 다리별 역할 균등화.
+    1차 구현: propulsion + lift만 (stride는 2차, 원인 분리).
+
+    수식:
+        propulsion_per_leg: stance 중 body 대비 backward 속도 (EMA 추적)
+        lift_per_leg: swing 중 발 z 높이 (EMA 추적)
+        cv_propulsion = std(4발) / (mean + eps)
+        cv_lift = std(4발) / (mean + eps)
+        penalty = cv_propulsion + cv_lift
+
+    정상 trot (4발 균등): cv ≈ 0.1~0.2 → penalty 0.2~0.4
+    편향 trot (1발 약함): cv ≈ 0.5~1.0 → penalty 1.0~2.0
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    stance_mask = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4)
+    swing_mask = 1.0 - stance_mask
+
+    # === Propulsion per leg ===
+    foot_asset = env.scene[foot_cfg.name]
+    foot_vel_w = foot_asset.data.body_vel_w[:, foot_cfg.body_ids, :3]  # (N, 4, 3)
+
+    robot = env.scene[asset_cfg.name]
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    heading_x = 1.0 - 2.0 * (y * y + z * z)
+    heading_y = 2.0 * (x * y + w * z)
+
+    foot_heading_vel = (
+        foot_vel_w[:, :, 0] * heading_x.unsqueeze(1)
+        + foot_vel_w[:, :, 1] * heading_y.unsqueeze(1)
+    )
+    body_vel_w = robot.data.root_lin_vel_w
+    body_heading_vel = body_vel_w[:, 0] * heading_x + body_vel_w[:, 1] * heading_y
+    relative_vel = foot_heading_vel - body_heading_vel.unsqueeze(1)
+    push_instant = torch.clamp(-relative_vel, min=0.0) * stance_mask  # (N, 4)
+
+    # === Lift per leg ===
+    foot_z_w = foot_asset.data.body_pos_w[:, foot_cfg.body_ids, 2]  # (N, 4)
+    ground_z = env.scene.env_origins[:, 2].unsqueeze(1)
+    clearance = torch.clamp(foot_z_w - ground_z, min=0.0)
+    lift_instant = clearance * swing_mask  # (N, 4)
+
+    # === EMA tracking ===
+    if not hasattr(env, "_v63j_push_ema"):
+        env._v63j_push_ema = torch.zeros_like(push_instant)
+        env._v63j_lift_ema = torch.zeros_like(lift_instant)
+
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        env._v63j_push_ema[reset_mask] = 0.0
+        env._v63j_lift_ema[reset_mask] = 0.0
+
+    env._v63j_push_ema = ema_decay * env._v63j_push_ema + (1.0 - ema_decay) * push_instant
+    env._v63j_lift_ema = ema_decay * env._v63j_lift_ema + (1.0 - ema_decay) * lift_instant
+
+    # === CV (coefficient of variation) across 4 legs ===
+    eps = 1e-6
+    push_std = env._v63j_push_ema.std(dim=-1)
+    push_mean = env._v63j_push_ema.mean(dim=-1)
+    cv_push = push_std / (push_mean + eps)
+
+    lift_std = env._v63j_lift_ema.std(dim=-1)
+    lift_mean = env._v63j_lift_ema.mean(dim=-1)
+    cv_lift = lift_std / (lift_mean + eps)
+
+    penalty = cv_push + cv_lift
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_role_cv_push"] = cv_push.mean().item()
+            env.extras["log_role_cv_lift"] = cv_lift.mean().item()
+            env.extras["log_role_cv_total"] = penalty.mean().item()
+            env.extras["log_push_ema_fl"] = env._v63j_push_ema[:, 0].mean().item()
+            env.extras["log_push_ema_fr"] = env._v63j_push_ema[:, 1].mean().item()
+            env.extras["log_push_ema_rl"] = env._v63j_push_ema[:, 2].mean().item()
+            env.extras["log_push_ema_rr"] = env._v63j_push_ema[:, 3].mean().item()
+            env.extras["log_lift_ema_fl"] = env._v63j_lift_ema[:, 0].mean().item()
+            env.extras["log_lift_ema_fr"] = env._v63j_lift_ema[:, 1].mean().item()
+            env.extras["log_lift_ema_rl"] = env._v63j_lift_ema[:, 2].mean().item()
+            env.extras["log_lift_ema_rr"] = env._v63j_lift_ema[:, 3].mean().item()
+
+    return penalty
 
 
 def base_height_target_reward(

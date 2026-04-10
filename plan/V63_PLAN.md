@@ -4148,3 +4148,154 @@ V63.E.1 진행 중에도 **rewards.py 함수 추가는 영향 없음** (호출 �
 ## 7. 한 줄 요약
 
 V63.F는 학습을 건드리지 않고, **Codex 지적 "진짜 trot 판정 부족"을 해결하는 3개 metric**(clearance, anti_phase, leg_usage_cv)을 `weight=1e-4`로 추가해 tensorboard 등록만 강화한다.
+
+---
+
+# Appendix I: V63.I ~ V63.J (Frozen Diagonal Exploit → Alternation-Aware Trot)
+
+## V63.I — Frozen Diagonal 차단 (구조 성공)
+
+### 배경
+V63.H.5에서 GUI 관찰: FL/RR만 땅에 닿고, FR/RL은 공중. 데이터:
+- FL 76.7%, FR 10.2%, RL 9.4%, RR 76.3% → **spread 0.67**
+- `true_trot_pattern` = 1.67 (만점에 가까움!)
+
+**Metric 설계 버그**: `true_trot_pattern = intra × inter`는 "매 순간 두 쌍이 다르면 만점"이라
+한 쌍이 영구 stance, 다른 쌍이 영구 swing이어도 만점. 시간축 교대 불요.
+
+### 해결
+- `stance_ratio_balance_reward` (EMA, +5.0) — 각 다리의 장기 접지율을 duty_factor 55%로 유도
+- `per_leg_contact_min` 강화 (threshold 0.10 → 0.40, weight -3 → -8)
+
+### 결과
+- Contact: FL 52%, FR 42.5%, RL 45%, RR 48.2% → **spread 0.09** (7배 개선)
+- Propulsion: 4발 모두 0.39~0.47 (균등)
+- timeout 99.95%, 생존 완벽
+- **V63.I = "구조 성공, 대각 편향 잔존"**
+
+## V63.I 진단: 대각선 페어 편향
+
+### URDF 좌우 대칭 검증
+`scripts/urdf_symmetry_check.py` — mass, inertia, collision, joint 모두 **완벽 대칭** ✓
+
+### Tensorboard per-leg 진단 (scripts/v63i_per_leg_diagnosis.py)
+```
+iter  PairA(FL+RR)  PairB(FR+RL)  diff
+ 100     0.073        0.074      -0.001  ← 동등
+ 300     0.450        0.430      +0.021  ← 거의 동등
+ 500     0.886        0.774      +0.111  ← ★ 갈라짐!
+3000     0.963        0.958      +0.005  ← 일시 수렴
+4999     1.001        0.875      +0.126  ← 재발
+```
+- **iter 500부터 갈라짐** → 물리가 아닌 정책의 symmetry breaking
+- iter 3000~3500 일시 수렴 → **정책이 대칭 가능함**을 입증
+- 문제는 L/R 축이 아닌 **대각선 페어 축** (좌우 합은 0.7%p 차이에 불과)
+
+### V63.I.1 실패 — leg_lr_symmetry -3.0
+- 축이 다름 (L/R 축을 찌르는데 편향은 대각선 축)
+- 786 iter 진행, 대각 diff 개선 없이 RL만 악화
+- GUI: "발 다친 것처럼 힘 안 실음, 뒷다리도 이상" — 즉시 중단
+
+### V63.I.2 실패 — diagonal_pair_balance penalty
+- 대각선 축 직접 공격 (EMA, weight -4.0) → 올바른 축
+- 그러나 **true_trot_pattern이 편향을 적극 보상**하는 구조 발견:
+  - 편향 trot: inter_diff 항시 ~1.0 (교대 전환 없음) → 높은 cumulative reward
+  - 정상 trot: inter_diff 교대 시 ~0으로 떨어짐 → 낮은 cumulative reward
+  - true_trot weight 7.0의 편향 bonus(+1.26/step) > penalty(-0.20/step) → **penalty가 6배 약함**
+- EMA decay 0.99의 per-step gradient 100배 감쇠도 겹침
+
+### 근본 원인 도식
+```
+true_trot_pattern (w=7, instantaneous gradient)
+    → 편향 trot에 +1.26/step bonus
+    → 정상 trot보다 높은 cumulative reward
+
+diagonal_pair_balance (w=-4, EMA gradient)
+    → 편향에 -0.20/step penalty
+    → gradient 100x 감쇠 (EMA decay 0.99)
+
+NET: 편향 유지가 +1.06 이득 → policy 절대 대칭으로 안 감
+```
+
+## V63.J — Alternation-Aware Trot (역할 교대 직접 정의)
+
+### 철학 전환 (코덱스)
+> "reward의 주연을 '결과 형태'가 아니라 '역할 교대'로 바꿔야 한다."
+> "반 사이클 전과 지금을 비교해서, 이전 stance pair는 지금 swing이어야 한다."
+
+### 핵심 수정
+
+#### 1. `alternation_trot_reward` (주연, weight +5.0)
+```python
+# Ring buffer로 half_cycle(0.25s, 13 steps) 전 contact 저장
+# 3-step window average로 smoothing (코덱스: noisy 방지)
+pair_a_now  vs pair_a_past → alternation_a = |now - past|
+pair_b_now  vs pair_b_past → alternation_b = |now - past|
+
+reward = intra_sync × inter_diff × alternation
+
+# 시나리오:
+#   정상 trot: intra=1, inter=1, alt=1 → reward=1.0
+#   편향 trot: intra=1, inter=1, alt=0 → reward=0  ← 차단!
+```
+
+#### 2. `true_trot_pattern` 약화 (7 → 2)
+- 완전 삭제보다 공존이 안전 (코덱스 권장)
+- intra_sync 성분(쌍 내부 동기화)은 alternation이 안 커버 → 보조로 유용
+- Weight 2.0이면 편향 bonus ~0.36/step, alternation 미달 loss ~3.5/step → alternation 8배 우위
+
+#### 3. `per_leg_role_variance_penalty` (보조, weight -2.0)
+- 4발 propulsion + lift의 CV(변동계수) penalty
+- propulsion + lift만 (stride는 2차, 원인 분리 — 코덱스 권장)
+- "희생 다리" 발생 시 CV 폭발 → 직접 벌점
+
+#### 4. `diagonal_pair_balance` 제거
+- alternation_trot가 대체 (시간축 교대 강제 = 대각 편향 차단)
+
+### V63.J Reward 최종 구조
+```
+[주연]
+  alternation_trot:        +5.0  (반 사이클 역할 교대)
+  
+[보조 — 기존 유지]
+  true_trot_pattern:       +2.0  (7→2 약화, intra_sync 보존)
+  swing_body_forward:      +4.0
+  effective_stride:        +5.0
+  clearance_lift:          +3.0
+  base_height_target:      +4.0
+  asymmetric_joint_target: +5.0
+  per_leg_stance_push_min: +2.0
+  stance_ratio_balance:    +5.0
+
+[Penalty]
+  per_leg_role_variance:   -2.0  (NEW — propulsion+lift CV)
+  per_leg_contact_min:     -8.0
+  shoulder_neutral:        -4.0
+  anti_pace:               -3.0
+  lateral_balance:         -2.0
+  leg_lr_symmetry:         -2.0
+  action_rate_l2:          -0.10
+
+POSITIVE TOTAL: ~46  |  NEGATIVE TOTAL: ~-26  |  NET: ~+20
+```
+
+### 실행
+- V63.I `model_4999.pt` resume (구조 성공본)
+- MAX_ITER = +2000 (iter 4999 → 6999)
+- 부팅 확인: alternation_trot, per_leg_role_variance, true_trot_pattern 모두 등록 ✓
+
+### 성공 기준
+| 지표 | V63.I | V63.J 목표 |
+|---|---|---|
+| Pair A-B diff | 12.6%p | **< 5%p** |
+| alternation raw | — | **> 0.7** |
+| role_cv_total | — | **< 0.5** |
+| timeout | 99.95% | 유지 |
+| **GUI: 4발 역할 교대** | 편향 | **균등** |
+
+### V63 시리즈 교훈 요약
+1. **Contact ratio 균등 ≠ 역할 균등** — V63.I가 ratio 균등화에 성공해도 대각 편향 잔존
+2. **Reward가 exploit을 보상할 수 있다** — true_trot_pattern이 편향 trot에 높은 점수
+3. **시간축 교대(alternation)가 trot의 본질** — 순간 상관이 아닌 반 사이클 역할 전환
+4. **Penalty 미세조정은 한계** — 같은 basin에서 weight 조정만으론 구조적 편향 못 깸
+5. **진단 먼저, 수정 나중** — URDF 대칭 검증 + Tensorboard per-leg 분석이 근본 원인 발견의 핵심
