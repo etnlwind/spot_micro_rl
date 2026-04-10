@@ -5,7 +5,10 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg
+
+from spot_micro_rl.tasks.manager_based.spot_micro_rl.mdp.mirror_symmetry import spot_micro_mirror_augmentation
+from spot_micro_rl.tasks.manager_based.spot_micro_rl.spot_micro_rl_env_cfg import TRAIN_VERSION
 
 
 @configclass
@@ -28,6 +31,14 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
     )
+    # V64: symmetry augmentation 조건부 활성화
+    _symmetry = None
+    if TRAIN_VERSION.startswith("V64"):
+        _symmetry = RslRlSymmetryCfg(
+            use_data_augmentation=True,
+            data_augmentation_func=spot_micro_mirror_augmentation,
+        )
+
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=0.5,
         use_clipped_value_loss=True,
@@ -41,6 +52,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+        symmetry_cfg=_symmetry,
     )
 
 

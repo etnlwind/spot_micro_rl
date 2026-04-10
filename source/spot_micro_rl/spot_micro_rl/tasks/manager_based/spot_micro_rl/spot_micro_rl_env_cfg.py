@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V63.J"
+TRAIN_VERSION = "V64"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -40,14 +40,18 @@ _IS_V63G = TRAIN_VERSION.startswith("V63.G")
 _IS_V63H = TRAIN_VERSION.startswith("V63.H")
 _IS_V63I = TRAIN_VERSION.startswith("V63.I")
 _IS_V63J = TRAIN_VERSION.startswith("V63.J")
+_IS_V64 = TRAIN_VERSION.startswith("V64")
+# V64는 V63.I 구조 위에 mirror symmetry augmentation 추가
+if _IS_V64:
+    _IS_V63I = True
 # V63.J는 V63.I 구조를 물려받음 (per_leg_contact_min 0.40, stance_ratio_balance)
 if _IS_V63J:
     _IS_V63I = True
 # V63.I/J는 V63.H 구조를 그대로 물려받고 exploit 차단 reward만 추가
 if _IS_V63I or _IS_V63J:
     _IS_V63H = True
-# V63.B/C/D/E/F/G/H/I 모두 V62 reward 구조를 베이스로 사용.
-if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J:
+# V63.B/C/D/E/F/G/H/I/J + V64 모두 V62 reward 구조를 베이스로 사용.
+if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J or _IS_V64:
     _IS_V62 = True
 _V59_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V59 and "." in TRAIN_VERSION else ("A" if _IS_V59 else "")
 _V60_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V60 and "." in TRAIN_VERSION else ("A" if _IS_V60 else "")
@@ -5984,6 +5988,38 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
                     # 5. leg_lr_symmetry -2.0 유지 (약한 보조)
                     # (V63.I 원래 값 그대로, 변경 없음)
+
+            # ══════════════════════════════════════════════════════════
+            # V64: Mirror Symmetry Augmentation
+            # ══════════════════════════════════════════════════════════
+            # V63 시리즈 교훈:
+            #   - reward penalty로는 정책 symmetry breaking 못 깸
+            #   - 학습 구조 자체를 바꿔야 함
+            # 해결:
+            #   - Isaac Lab 내장 RslRlSymmetryCfg.data_augmentation_func
+            #   - PPO 학습 시 rollout 데이터를 좌우 반전하여 augmented batch
+            #   - policy가 구조적으로 좌우 대칭 표현 학습
+            # Reward 정리 (코덱스 권장):
+            #   - V63.J의 alternation/role_variance 제거 (mirror가 대칭 해결)
+            #   - V63.I base 그대로 유지 (검증된 구조)
+            #   - diagonal_pair_balance 제거
+            #   - leg_lr_symmetry 제거 (mirror augmentation이 대체)
+            # ══════════════════════════════════════════════════════════
+            if _IS_V64:
+                # V63.J 잔여물 제거 (V63.I base로 복귀)
+                for attr_name in [
+                    "alternation_trot",
+                    "per_leg_role_variance",
+                    "diagonal_pair_balance",
+                ]:
+                    if hasattr(self.rewards, attr_name):
+                        setattr(self.rewards, attr_name, None)
+
+                # true_trot_pattern: V63.I 원래 weight 7.0 유지
+                # (mirror augmentation이 대칭 해결, reward는 trot 유도에 집중)
+
+                # leg_lr_symmetry 제거 (mirror augmentation이 대체)
+                self.rewards.leg_lr_symmetry = None
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)
