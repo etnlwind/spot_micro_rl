@@ -8,6 +8,13 @@ from .mdp.rewards import accumulate_v23_raw_metrics, reset_v23_raw_metric_extras
 
 
 class SpotMicroManagerBasedRLEnv(ManagerBasedRLEnv):
+    def __init__(self, cfg, render_mode=None, **kwargs):
+        super().__init__(cfg, render_mode=render_mode, **kwargs)
+        # V66: Phase randomization (대각 편향 방지)
+        from .spot_micro_rl_env_cfg import TRAIN_VERSION
+        if TRAIN_VERSION.startswith("V66"):
+            self._v66_phase_random_enabled = True
+
     def step(self, action: torch.Tensor):
         action = action.to(self.device)
         warmup_steps = int(getattr(self.cfg, "action_warmup_steps", 0))

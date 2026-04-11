@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V65"
+TRAIN_VERSION = "V66"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -42,8 +42,9 @@ _IS_V63I = TRAIN_VERSION.startswith("V63.I")
 _IS_V63J = TRAIN_VERSION.startswith("V63.J")
 _IS_V64 = TRAIN_VERSION.startswith("V64")
 _IS_V65 = TRAIN_VERSION.startswith("V65")
-# V64/V65는 V63.I 구조 위에 구축
-if _IS_V64 or _IS_V65:
+_IS_V66 = TRAIN_VERSION.startswith("V66")
+# V64/V65/V66는 V63.I 구조 위에 구축
+if _IS_V64 or _IS_V65 or _IS_V66:
     _IS_V63I = True
 # V63.J는 V63.I 구조를 물려받음 (per_leg_contact_min 0.40, stance_ratio_balance)
 if _IS_V63J:
@@ -52,7 +53,7 @@ if _IS_V63J:
 if _IS_V63I or _IS_V63J:
     _IS_V63H = True
 # V63.B/C/D/E/F/G/H/I/J + V64 모두 V62 reward 구조를 베이스로 사용.
-if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J or _IS_V64 or _IS_V65:
+if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J or _IS_V64 or _IS_V65 or _IS_V66:
     _IS_V62 = True
 _V59_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V59 and "." in TRAIN_VERSION else ("A" if _IS_V59 else "")
 _V60_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V60 and "." in TRAIN_VERSION else ("A" if _IS_V60 else "")
@@ -6103,6 +6104,45 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
                 # 6. leg_lr_symmetry -2.0 유지 (V63.I 원래 값, 보조 안전장치)
                 # (상속됨, 변경 없음)
+
+            # ══════════════════════════════════════════════════════════
+            # V66: Phase Randomization (최소 변경, 구조적 대칭)
+            # ══════════════════════════════════════════════════════════
+            # 근본 원인 재분석:
+            #   모든 4096 env가 동일 phase(FL=0, FR=π)에서 시작
+            #   → FL+RR이 항상 "첫 stance" → gradient 일관 편향 → frozen diagonal
+            #
+            # 해결: episode reset 시 env별 random phase offset (0 또는 π)
+            #   → 50% env: FL first stance, 50%: FR first stance
+            #   → policy gradient 평균 편향 0 → 구조적 대칭
+            #
+            # V64(mirror augmentation), V65(curriculum) 대비 장점:
+            #   - phantom 데이터 없음 (실제 env 경험만)
+            #   - phase 모순 없음 (offset이 phase_clock + joint_target 양쪽에 적용)
+            #   - 부팅 지연 없음 (V63.I reward 그대로)
+            #   - 20줄 수정으로 해결
+            #
+            # Reward: V63.I 완전 동일 (검증된 구조, 변경 없음)
+            # Mirror loss/curriculum/alternation: 불필요 → 제거
+            # ══════════════════════════════════════════════════════════
+            if _IS_V66:
+                # V65 잔여물 정리 (V63.I base 복귀)
+                for attr_name in [
+                    "alternation_trot",
+                    "per_leg_role_variance",
+                    "diagonal_pair_balance",
+                    "per_leg_contact_exp",
+                ]:
+                    if hasattr(self.rewards, attr_name):
+                        setattr(self.rewards, attr_name, None)
+
+                # V65 curriculum 제거
+                self.curriculum.reward_weights = None
+
+                # true_trot_pattern: V63.I 원래 weight 7.0 유지
+                # leg_lr_symmetry: -2.0 유지
+                # per_leg_contact_min: -8.0, threshold 0.40 유지
+                # stance_ratio_balance: +5.0 유지
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

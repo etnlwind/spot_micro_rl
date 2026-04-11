@@ -29,6 +29,27 @@ def alive_bonus(env: ManagerBasedRLEnv) -> torch.Tensor:
 # V39: CPG / Phase Clock
 # ═══════════════════════════════════════════
 
+def _get_phase_offset(env):
+    """V66: Per-env random phase offset (대각 편향 방지).
+
+    모든 env가 동일한 phase=0에서 시작하면 FL+RR이 항상 "첫 stance"
+    → 4096 env 전체에서 일관된 gradient bias → frozen diagonal.
+
+    해결: episode reset 시 env별 random offset → 50% env는 FL first,
+    50%는 FR first → policy gradient 평균 편향 0.
+    """
+    if not hasattr(env, "_v66_phase_offset"):
+        env._v66_phase_offset = torch.zeros(env.num_envs, device=env.device)
+    # Reset on episode start
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        # Random offset: 0 or π (두 대각 페어 중 하나를 랜덤 선택)
+        # 0: FL+RR first stance,  π: FR+RL first stance
+        random_pair = torch.randint(0, 2, (reset_mask.sum().item(),), device=env.device).float()
+        env._v66_phase_offset[reset_mask] = random_pair * math.pi
+    return env._v66_phase_offset
+
+
 def phase_clock_obs(
     env: ManagerBasedRLEnv,
     frequency: float = 2.0,
@@ -38,6 +59,9 @@ def phase_clock_obs(
     V39: 4다리 각각의 phase를 sin/cos로 인코딩하여 8차원 observation 반환.
     Trot 패턴: FL/RR 동위상, FR/RL 반위상.
 
+    V66: per-env random phase offset 추가 (대각 편향 방지).
+    _IS_V66이 아닌 버전에서는 offset=0 (기존 동작 유지).
+
     Args:
         frequency: trot 주파수 (Hz). 1 cycle = stance + swing.
     Returns:
@@ -45,6 +69,10 @@ def phase_clock_obs(
     """
     t = env.episode_length_buf.float() * env.step_dt  # (num_envs,)
     base_phase = 2.0 * math.pi * frequency * t  # (num_envs,)
+
+    # V66: per-env phase offset (enabled via env attribute)
+    if getattr(env, "_v66_phase_random_enabled", False):
+        base_phase = base_phase + _get_phase_offset(env)
 
     # Trot: FL/RR = base, FR/RL = base + π
     fl_phase = base_phase
@@ -3381,9 +3409,11 @@ def asymmetric_joint_target_reward(
     A_leg_lift = A_leg_lift_start + (A_leg_lift_end - A_leg_lift_start) * frac
     A_foot_bend = A_foot_bend_start + (A_foot_bend_end - A_foot_bend_start) * frac
 
-    # Phase
+    # Phase (V66: per-env offset for diagonal symmetry)
     t = env.episode_length_buf.float() * env.step_dt
     base_phase = 2.0 * math.pi * frequency * t
+    if getattr(env, "_v66_phase_random_enabled", False):
+        base_phase = base_phase + _get_phase_offset(env)
     leg_phases = torch.stack([
         base_phase, base_phase + math.pi,
         base_phase + math.pi, base_phase,
