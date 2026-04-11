@@ -6018,8 +6018,13 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # true_trot_pattern: V63.I 원래 weight 7.0 유지
                 # (mirror augmentation이 대칭 해결, reward는 trot 유도에 집중)
 
-                # leg_lr_symmetry 제거 (mirror augmentation이 대체)
-                self.rewards.leg_lr_symmetry = None
+                # leg_lr_symmetry 유지 (-2.0) — frozen diagonal 방어 핵심!
+                # V64 초기 설계에서 제거했으나, 이 penalty가 frozen diagonal에
+                # -2.70/step을 부과하여 exploit 차단의 핵심이었음.
+                # mirror augmentation은 PPO update-level soft constraint이지
+                # per-step gradient를 제공하지 못해 이 역할을 대체 못함.
+                # 따라서 leg_lr_symmetry(-2.0) + mirror loss 병행이 올바름.
+                pass  # leg_lr_symmetry -2.0 유지 (V63.I 원래 값)
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)
