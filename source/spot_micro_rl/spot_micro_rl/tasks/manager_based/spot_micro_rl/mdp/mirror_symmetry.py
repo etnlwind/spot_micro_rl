@@ -107,23 +107,33 @@ def mirror_action_tensor(action: torch.Tensor) -> torch.Tensor:
 def spot_micro_mirror_augmentation(env, obs=None, actions=None):
     """Isaac Lab RslRlSymmetryCfg.data_augmentation_func compatible function.
 
+    rsl_rl PPO는 augmented batch를 [원본, mirror] 연결 형태로 기대:
+        num_aug = augmented_batch_size / original_batch_size
+    원본만 반환하면 num_aug=1 → 증강 안 됨 (V64 실패 원인)
+    [원본, mirror] 연결 반환 → num_aug=2 → 양쪽 모두 학습
+
     Args:
         env: VecEnv wrapper (unused, required by interface)
         obs: TensorDict with key "policy" → (N, D) tensor, or None
         actions: (N, 12) tensor, or None
 
     Returns:
-        (mirrored_obs_dict, mirrored_actions) tuple
+        (augmented_obs_dict, augmented_actions) tuple
+        각각 batch dim이 2N (원본 N + mirror N)
     """
-    mirrored_obs = None
-    mirrored_actions = None
+    augmented_obs = None
+    augmented_actions = None
 
     if obs is not None:
-        mirrored_obs = obs.clone()
+        mirrored = obs.clone()
         if "policy" in obs.keys():
-            mirrored_obs["policy"] = mirror_obs_tensor(obs["policy"])
+            mirrored["policy"] = mirror_obs_tensor(obs["policy"])
+        # [원본, mirror] 연결 → num_aug = 2
+        augmented_obs = torch.cat([obs, mirrored], dim=0)
 
     if actions is not None:
-        mirrored_actions = mirror_action_tensor(actions)
+        mirrored_act = mirror_action_tensor(actions)
+        # [원본, mirror] 연결
+        augmented_actions = torch.cat([actions, mirrored_act], dim=0)
 
-    return mirrored_obs, mirrored_actions
+    return augmented_obs, augmented_actions
