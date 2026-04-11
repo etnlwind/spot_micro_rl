@@ -6067,20 +6067,22 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     },
                 )
 
-                # 4. per_leg_contact: 기존 선형 → 지수 penalty 교체
-                self.rewards.per_leg_contact_min = None  # 기존 선형 제거
+                # 4. per_leg_contact: 선형(V63.I 검증) + 지수(Phase 2+) 병행
+                # V65 초기 시도: 지수만 사용 → 부팅 실패 (penalty가 alive_bonus 압도)
+                # 수정: V63.I 선형 유지 (부팅 보장) + 지수를 추가 방어로 나중 활성화
+                # per_leg_contact_min: V63.I 그대로 유지 (threshold 0.40, weight -8)
                 self.rewards.per_leg_contact_exp = RewTerm(
                     func=custom_mdp.per_leg_contact_exp_penalty,
-                    weight=-1.0,
+                    weight=-0.5,  # 보조 (선형이 주, 지수가 보조)
                     params={
                         "sensor_cfg": toe_sensor_v63h,
                         "contact_threshold": 1.0,
-                        "min_contact_ratio": 0.30,
-                        "sharpness": 10.0,
-                        "max_penalty": 8.0,
-                        "threshold_ramp_start": 1500,
+                        "min_contact_ratio": 0.15,  # Phase 1: 매우 관대 (부팅 보호)
+                        "sharpness": 8.0,
+                        "max_penalty": 5.0,
+                        "threshold_ramp_start": 1500,  # Phase 2부터 강화
                         "threshold_ramp_end": 3000,
-                        "threshold_final": 0.40,
+                        "threshold_final": 0.35,
                     },
                 )
 
