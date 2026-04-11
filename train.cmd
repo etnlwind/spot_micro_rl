@@ -4,7 +4,7 @@ setlocal
 set "PROJECT_DIR=D:\project\spot_micro_rl"
 set "NUM_ENVS=4096"
 set "MAX_ITER=5000"
-set "RUN_NAME=V67"
+set "RUN_NAME=V67.1"
 set "MODE=--headless"
 
 if /i "%~1"=="gui" set "MODE=" & shift

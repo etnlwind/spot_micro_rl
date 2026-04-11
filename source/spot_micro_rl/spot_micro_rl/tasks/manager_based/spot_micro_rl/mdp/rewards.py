@@ -4580,6 +4580,30 @@ def stance_slip_penalty(
     return slip_per_leg.mean(dim=-1)
 
 
+def body_lateral_velocity_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """V67.1: Body frame 횡방향(y축) 속도 직접 penalty.
+
+    V67 GUI 관찰: FL/FR이 동시에 오른쪽으로 미끄러짐.
+    lateral_balance(roll 각속도)는 회전만 봄, 평행이동은 못 잡음.
+    이 penalty는 body frame y축 직선속도를 직접 잡음.
+
+    수식: penalty = |root_lin_vel_b[:, 1]|
+    """
+    robot = env.scene[asset_cfg.name]
+    lateral_vel = robot.data.root_lin_vel_b[:, 1]  # body frame y축
+    penalty = torch.abs(lateral_vel)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_lateral_vel"] = lateral_vel.mean().item()
+            env.extras["log_lateral_vel_abs"] = penalty.mean().item()
+
+    return penalty
+
+
 def rear_left_right_balance_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),

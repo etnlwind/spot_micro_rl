@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V67"
+TRAIN_VERSION = "V67.1"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -6190,6 +6190,53 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # leg_lr_symmetry: -2.0
                 # per_leg_contact_min: -8.0 (threshold 0.40)
                 # stance_ratio_balance: +5.0
+
+                # ── V67.1: 보행 품질 보강 ──
+                # V67 성과: 대칭 2.7%p (역대 최고)
+                # V67 문제: stride 2.23 (V63.I의 51%), lateral drift, RL slip
+                # 원인: balance gate 과세(49%) + slip 미제어 + lateral 불안정
+                #
+                # 수정 (코덱스 보수안 반영):
+                # 1. sigma 0.30→0.40 (gate 완화, stride gradient 회복)
+                # 2. stance_slip 복원 (push 품질 + slip 방지)
+                # 3. lateral_vel 추가 (drift 직접 차단)
+                # 4. anti_pace -3→-4 (보수적 1단계)
+                # 5. ang_vel_xy 유지 (과강화 위험 — 코덱스)
+                if TRAIN_VERSION.startswith("V67."):
+                    # P0: balance gate 완화
+                    self.rewards.true_trot_pattern = RewTerm(
+                        func=custom_mdp.balanced_true_trot_pattern_reward,
+                        weight=7.0,
+                        params={
+                            "sensor_cfg": toe_sensor_v63h,
+                            "contact_threshold": 1.0,
+                            "ema_decay": 0.95,
+                            "balance_sigma": 0.40,  # V67 0.30 → V67.1 0.40
+                        },
+                    )
+
+                    # P1: stance_slip 복원
+                    self.rewards.stance_slip = RewTerm(
+                        func=custom_mdp.stance_slip_penalty,
+                        weight=-0.3,  # 약~중간 시작 (V63.B도 -0.05였음, 더 강하게)
+                        params={
+                            "sensor_cfg": toe_sensor_v63h,
+                            "foot_cfg": foot_cfg_v63h,
+                            "contact_threshold": 1.0,
+                        },
+                    )
+
+                    # P2: lateral velocity penalty 신규
+                    self.rewards.lateral_vel = RewTerm(
+                        func=custom_mdp.body_lateral_velocity_penalty,
+                        weight=-2.0,
+                        params={
+                            "asset_cfg": SceneEntityCfg("robot"),
+                        },
+                    )
+
+                    # P3: anti_pace 강화
+                    self.rewards.anti_pace.weight = -4.0  # V67 -3 → V67.1 -4
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)
