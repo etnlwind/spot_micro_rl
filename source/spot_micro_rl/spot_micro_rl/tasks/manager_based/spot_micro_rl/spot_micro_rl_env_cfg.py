@@ -6052,8 +6052,10 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     if hasattr(self.rewards, attr_name):
                         setattr(self.rewards, attr_name, None)
 
-                # 2. true_trot_pattern 초기 weight (curriculum이 동적 조절)
-                self.rewards.true_trot_pattern.weight = 4.0
+                # 2. true_trot_pattern: V63.I 동일 (부팅 보장)
+                # V65/V65.1 실패 교훈: 4.0은 부트스트랩에 부족
+                # curriculum이 gate 통과 후 7→3→0.5로 ramp-down
+                self.rewards.true_trot_pattern.weight = 7.0
 
                 # 3. alternation_trot 등록 (초기 weight 0, curriculum이 ramp-up)
                 self.rewards.alternation_trot = RewTerm(
@@ -6067,37 +6069,34 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     },
                 )
 
-                # 4. per_leg_contact: 선형(V63.I 검증) + 지수(Phase 2+) 병행
-                # V65 초기 시도: 지수만 사용 → 부팅 실패 (penalty가 alive_bonus 압도)
-                # 수정: V63.I 선형 유지 (부팅 보장) + 지수를 추가 방어로 나중 활성화
+                # 4. per_leg_contact: 선형(V63.I) 유지 + 지수는 초기 비활성 (curriculum이 gate 후 활성화)
+                # V65 교훈: 지수 penalty가 부팅 단계에서 alive_bonus 압도 → 서기 실패
+                # V65.2: Phase 1은 V63.I 동일 (per_leg_contact_min만), 지수는 weight 0으로 시작
                 # per_leg_contact_min: V63.I 그대로 유지 (threshold 0.40, weight -8)
                 self.rewards.per_leg_contact_exp = RewTerm(
                     func=custom_mdp.per_leg_contact_exp_penalty,
-                    weight=-0.5,  # 보조 (선형이 주, 지수가 보조)
+                    weight=0.0,  # Phase 1: 비활성! curriculum이 gate 후 -0.5 → -1.0 ramp
                     params={
                         "sensor_cfg": toe_sensor_v63h,
                         "contact_threshold": 1.0,
-                        "min_contact_ratio": 0.15,  # Phase 1: 매우 관대 (부팅 보호)
+                        "min_contact_ratio": 0.20,
                         "sharpness": 8.0,
                         "max_penalty": 5.0,
-                        "threshold_ramp_start": 1500,  # Phase 2부터 강화
+                        "threshold_ramp_start": 1500,
                         "threshold_ramp_end": 3000,
                         "threshold_final": 0.35,
                     },
                 )
 
-                # 5. Curriculum term 활성화
+                # 5. Curriculum term (조건부 gate + ramp)
+                # V65.2: Phase 1은 V63.I 동일, gate(ep_len>900, timeout>80%) 통과 후 전환
                 self.curriculum.reward_weights = CurrTerm(
                     func=custom_mdp.v65_trot_curriculum,
                     params={
-                        "trot_start": 4.0,
+                        "trot_start": 7.0,   # V63.I 동일
                         "trot_end": 0.5,
-                        "trot_ramp_start": 800,
-                        "trot_ramp_end": 2500,
                         "alt_start": 0.0,
                         "alt_end": 5.0,
-                        "alt_ramp_start": 800,
-                        "alt_ramp_end": 3000,
                         "update_interval": 10,
                     },
                 )

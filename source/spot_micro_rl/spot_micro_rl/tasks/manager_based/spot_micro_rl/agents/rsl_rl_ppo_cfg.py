@@ -41,7 +41,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
             use_data_augmentation=False,   # phase_clock과 충돌 방지
             use_mirror_loss=True,          # policy 함수 대칭성 soft constraint
             data_augmentation_func=spot_micro_mirror_augmentation,
-            mirror_loss_coeff=1.0,
+            mirror_loss_coeff=0.5,  # V65.2: 초기 학습 방해 최소화 (1.0→0.5)
         )
 
     algorithm = RslRlPpoAlgorithmCfg(

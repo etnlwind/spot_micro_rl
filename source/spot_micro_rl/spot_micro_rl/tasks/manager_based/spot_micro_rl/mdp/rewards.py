@@ -6925,19 +6925,18 @@ def v65_trot_curriculum(
     # update interval
     update_interval: int = 10,
 ) -> torch.Tensor:
-    """V65: true_trot → alternation curriculum.
+    """V65.2: 조건부 gate + true_trot → alternation curriculum.
 
-    Phase 1 (0~800): true_trot=4.0 (gait 부트스트랩), alternation=0
-    Phase 2 (800~3000): true_trot 4→0.5 ramp-down, alternation 0→5 ramp-up
-    Phase 3 (3000+): true_trot=0.5 (보조), alternation=5.0 (주연)
+    V65/V65.1 실패 교훈:
+    - 부팅 완료 전에 true_trot 약화 → 서기 실패
+    - 고정 iter 기반 ramp → 로봇 상태와 무관하게 전환 → 시기상조
 
-    V63.J 교훈: 대각 편향은 iter 2000~2500에서 trot 형성과 동시 발생.
-    → alternation이 iter 2000에 2.73 weight 확보 필요.
-    → true_trot을 빨리 낮춰 exploit 보상 창 축소.
-
-    코덱스 리뷰:
-    - true_trot 3.0 → 4.0 (부트스트랩 안전 마진)
-    - ramp 시작 1500 → 800 (편향 형성 전 방어)
+    V65.2 설계 (코덱스 권장):
+    - Phase 1: V63.I 부팅 조건 완전 복원 (true_trot=7, contact_exp=0)
+    - Gate: ep_len>900 & timeout>80% & contact_min>15% 달성 후에만 Phase 2 진입
+    - Phase 2 (gate 후 ~1200 iter): true_trot 7→3, alternation 0→3, contact_exp 0→0.5
+    - Phase 3 (gate 후 ~2800 iter): true_trot 3→0.5, alternation 3→5, contact_exp 0.5→1
+    - Phase 4: alternation 주연, true_trot 보조
     """
     step_count = getattr(env, "common_step_counter", 0)
     iter_approx = float(step_count) / 24.0
@@ -6945,7 +6944,33 @@ def v65_trot_curriculum(
     # Update interval check
     iter_int = int(iter_approx)
     if iter_int % update_interval != 0:
-        return iter_approx  # CurrTerm must return scalar
+        return iter_approx
+
+    # ── Condition-based gate ──
+    # Phase 1 → Phase 2 전환 조건: 로봇이 안정적으로 서 있어야 함
+    if not hasattr(env, "_v65_gate_passed"):
+        env._v65_gate_passed = False
+        env._v65_gate_iter = 0  # gate 통과 시점 iter
+
+    if not env._v65_gate_passed:
+        ep_len = env.episode_length_buf.float().mean().item()
+        max_ep = float(env.max_episode_length) if hasattr(env, "max_episode_length") else 1000.0
+        timeout_ratio = (env.episode_length_buf >= max_ep - 1).float().mean().item()
+
+        gate_ok = (ep_len > 900 and timeout_ratio > 0.80)
+
+        if gate_ok and iter_approx > 500:  # 최소 500 iter 이후
+            env._v65_gate_passed = True
+            env._v65_gate_iter = iter_approx
+            if hasattr(env, "extras"):
+                env.extras["log_v65_gate_passed"] = 1.0
+                env.extras["log_v65_gate_iter"] = iter_approx
+
+        # Phase 1: V63.I 부팅 조건 유지 (변경 없음)
+        return iter_approx
+
+    # ── Phase 2+ (gate 통과 후) ──
+    iters_since_gate = iter_approx - env._v65_gate_iter
 
     # Linear ramp helper
     def _ramp(val_start, val_end, ramp_s, ramp_e, it):
@@ -6957,35 +6982,42 @@ def v65_trot_curriculum(
         else:
             return val_end
 
-    trot_w = _ramp(trot_start, trot_end, trot_ramp_start, trot_ramp_end, iter_approx)
-    alt_w = _ramp(alt_start, alt_end, alt_ramp_start, alt_ramp_end, iter_approx)
+    # Phase 2: gate~gate+1200 (true_trot 7→3, alt 0→3)
+    # Phase 3: gate+1200~gate+2800 (true_trot 3→0.5, alt 3→5)
+    trot_w = _ramp(trot_start, 3.0, 0, 1200, iters_since_gate)
+    if iters_since_gate > 1200:
+        trot_w = _ramp(3.0, trot_end, 1200, 2800, iters_since_gate)
+
+    alt_w = _ramp(alt_start, 3.0, 0, 1200, iters_since_gate)
+    if iters_since_gate > 1200:
+        alt_w = _ramp(3.0, alt_end, 1200, 2800, iters_since_gate)
+
+    # contact_exp weight ramp (0 → target)
+    exp_w = _ramp(0.0, -0.5, 0, 1200, iters_since_gate)
+    if iters_since_gate > 1200:
+        exp_w = _ramp(-0.5, -1.0, 1200, 2800, iters_since_gate)
 
     # Apply to reward manager
     changed = False
-    try:
-        trot_cfg = env.reward_manager.get_term_cfg("true_trot_pattern")
-        if abs(trot_cfg.weight - trot_w) > 0.01:
-            trot_cfg.weight = trot_w
-            env.reward_manager.set_term_cfg("true_trot_pattern", trot_cfg)
-            changed = True
-    except Exception:
-        pass
+    for name, target_w in [("true_trot_pattern", trot_w),
+                            ("alternation_trot", alt_w),
+                            ("per_leg_contact_exp", exp_w)]:
+        try:
+            cfg = env.reward_manager.get_term_cfg(name)
+            if abs(cfg.weight - target_w) > 0.01:
+                cfg.weight = target_w
+                env.reward_manager.set_term_cfg(name, cfg)
+                changed = True
+        except Exception:
+            pass
 
-    try:
-        alt_cfg = env.reward_manager.get_term_cfg("alternation_trot")
-        if abs(alt_cfg.weight - alt_w) > 0.01:
-            alt_cfg.weight = alt_w
-            env.reward_manager.set_term_cfg("alternation_trot", alt_cfg)
-            changed = True
-    except Exception:
-        pass
-
-    if changed and hasattr(env, "extras"):
+    if hasattr(env, "extras"):
         env.extras["log_v65_trot_weight"] = trot_w
         env.extras["log_v65_alt_weight"] = alt_w
-        env.extras["log_v65_iter"] = iter_approx
+        env.extras["log_v65_exp_weight"] = exp_w
+        env.extras["log_v65_phase"] = 2.0 if iters_since_gate < 1200 else (3.0 if iters_since_gate < 2800 else 4.0)
+        env.extras["log_v65_iters_since_gate"] = iters_since_gate
 
-    # CurrTerm must return scalar (curriculum_manager calls .item())
     return iter_approx
 
 
