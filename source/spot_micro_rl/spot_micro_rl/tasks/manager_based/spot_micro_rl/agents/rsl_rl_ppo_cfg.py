@@ -36,7 +36,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     # V64 초기 시도: use_data_augmentation=True → phase_clock과 충돌 (phantom 데이터)
     # V64.1: use_mirror_loss=True → policy 대칭성 soft constraint (데이터 모순 없음)
     _symmetry = None
-    if TRAIN_VERSION.startswith("V64"):
+    if TRAIN_VERSION.startswith("V64") or TRAIN_VERSION.startswith("V65"):
         _symmetry = RslRlSymmetryCfg(
             use_data_augmentation=False,   # phase_clock과 충돌 방지
             use_mirror_loss=True,          # policy 함수 대칭성 soft constraint

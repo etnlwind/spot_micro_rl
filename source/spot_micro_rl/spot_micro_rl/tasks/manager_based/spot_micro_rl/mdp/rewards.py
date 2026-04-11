@@ -2712,6 +2712,62 @@ def per_leg_contact_min_penalty(
     return gap
 
 
+def per_leg_contact_exp_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    min_contact_ratio: float = 0.30,
+    sharpness: float = 10.0,
+    max_penalty: float = 8.0,
+    threshold_ramp_start: int = 1500,
+    threshold_ramp_end: int = 3000,
+    threshold_final: float = 0.40,
+) -> torch.Tensor:
+    """V65: 지수 per-leg contact penalty (threshold 이하에서 급격히 증가).
+
+    V63.I~V64 교훈: 선형 penalty(gap × -8)는 frozen diagonal이 감당 가능.
+    지수 penalty는 gap이 커질수록 기하급수적 비용 → frozen diagonal 자멸.
+
+    수식:
+        gap = clamp(threshold - min_contact_ratio, 0)
+        penalty = clamp(exp(gap × sharpness) - 1, max=max_penalty)
+
+    Curriculum: threshold가 iter에 따라 0.30 → 0.40으로 ramp
+        → 초기 부팅 시 과도 penalty 방지 (코덱스 리뷰 반영)
+
+    수치 (sharpness=10, max=8.0):
+        gap=0.05: min(exp(0.5)-1, 8) = min(0.65, 8) = 0.65
+        gap=0.10: min(1.72, 8) = 1.72
+        gap=0.20: min(6.39, 8) = 6.39
+        gap=0.30: min(19.1, 8) = 8.0 (clamped)
+    """
+    # Curriculum: threshold ramp
+    step_count = getattr(env, "common_step_counter", 0)
+    iter_approx = float(step_count) / 24.0
+    if iter_approx < threshold_ramp_start:
+        current_threshold = min_contact_ratio
+    elif iter_approx < threshold_ramp_end:
+        frac = (iter_approx - threshold_ramp_start) / (threshold_ramp_end - threshold_ramp_start)
+        current_threshold = min_contact_ratio + (threshold_final - min_contact_ratio) * frac
+    else:
+        current_threshold = threshold_final
+
+    contact_ratio = _contact_ratio(
+        env.scene.sensors[sensor_cfg.name], sensor_cfg.body_ids, contact_threshold
+    )
+    min_ratio = contact_ratio.min(dim=1).values
+    gap = torch.clamp(current_threshold - min_ratio, min=0.0)
+    penalty = torch.clamp(torch.exp(gap * sharpness) - 1.0, max=max_penalty)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_contact_exp_penalty"] = penalty.mean().item()
+            env.extras["log_contact_exp_threshold"] = current_threshold
+            env.extras["log_contact_min_ratio"] = min_ratio.mean().item()
+
+    return penalty
+
+
 def per_leg_excess_swing_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
@@ -6851,6 +6907,86 @@ def _curriculum_log_snapshot(env: ManagerBasedRLEnv, iteration: int,
     if quality_parts:
         print(f"  raw quality: {', '.join(quality_parts)}")
     print(f"{'─' * 60}")
+
+
+def v65_trot_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    # true_trot ramp-down
+    trot_start: float = 4.0,
+    trot_end: float = 0.5,
+    trot_ramp_start: int = 800,
+    trot_ramp_end: int = 2500,
+    # alternation ramp-up
+    alt_start: float = 0.0,
+    alt_end: float = 5.0,
+    alt_ramp_start: int = 800,
+    alt_ramp_end: int = 3000,
+    # update interval
+    update_interval: int = 10,
+) -> torch.Tensor:
+    """V65: true_trot → alternation curriculum.
+
+    Phase 1 (0~800): true_trot=4.0 (gait 부트스트랩), alternation=0
+    Phase 2 (800~3000): true_trot 4→0.5 ramp-down, alternation 0→5 ramp-up
+    Phase 3 (3000+): true_trot=0.5 (보조), alternation=5.0 (주연)
+
+    V63.J 교훈: 대각 편향은 iter 2000~2500에서 trot 형성과 동시 발생.
+    → alternation이 iter 2000에 2.73 weight 확보 필요.
+    → true_trot을 빨리 낮춰 exploit 보상 창 축소.
+
+    코덱스 리뷰:
+    - true_trot 3.0 → 4.0 (부트스트랩 안전 마진)
+    - ramp 시작 1500 → 800 (편향 형성 전 방어)
+    """
+    step_count = getattr(env, "common_step_counter", 0)
+    iter_approx = float(step_count) / 24.0
+
+    # Update interval check
+    iter_int = int(iter_approx)
+    if iter_int % update_interval != 0:
+        return iter_approx  # CurrTerm must return scalar
+
+    # Linear ramp helper
+    def _ramp(val_start, val_end, ramp_s, ramp_e, it):
+        if it < ramp_s:
+            return val_start
+        elif it < ramp_e:
+            frac = (it - ramp_s) / (ramp_e - ramp_s)
+            return val_start + (val_end - val_start) * frac
+        else:
+            return val_end
+
+    trot_w = _ramp(trot_start, trot_end, trot_ramp_start, trot_ramp_end, iter_approx)
+    alt_w = _ramp(alt_start, alt_end, alt_ramp_start, alt_ramp_end, iter_approx)
+
+    # Apply to reward manager
+    changed = False
+    try:
+        trot_cfg = env.reward_manager.get_term_cfg("true_trot_pattern")
+        if abs(trot_cfg.weight - trot_w) > 0.01:
+            trot_cfg.weight = trot_w
+            env.reward_manager.set_term_cfg("true_trot_pattern", trot_cfg)
+            changed = True
+    except Exception:
+        pass
+
+    try:
+        alt_cfg = env.reward_manager.get_term_cfg("alternation_trot")
+        if abs(alt_cfg.weight - alt_w) > 0.01:
+            alt_cfg.weight = alt_w
+            env.reward_manager.set_term_cfg("alternation_trot", alt_cfg)
+            changed = True
+    except Exception:
+        pass
+
+    if changed and hasattr(env, "extras"):
+        env.extras["log_v65_trot_weight"] = trot_w
+        env.extras["log_v65_alt_weight"] = alt_w
+        env.extras["log_v65_iter"] = iter_approx
+
+    # CurrTerm must return scalar (curriculum_manager calls .item())
+    return iter_approx
 
 
 def reward_weight_curriculum(

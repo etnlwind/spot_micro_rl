@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V64"
+TRAIN_VERSION = "V65"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -41,8 +41,9 @@ _IS_V63H = TRAIN_VERSION.startswith("V63.H")
 _IS_V63I = TRAIN_VERSION.startswith("V63.I")
 _IS_V63J = TRAIN_VERSION.startswith("V63.J")
 _IS_V64 = TRAIN_VERSION.startswith("V64")
-# V64는 V63.I 구조 위에 mirror symmetry augmentation 추가
-if _IS_V64:
+_IS_V65 = TRAIN_VERSION.startswith("V65")
+# V64/V65는 V63.I 구조 위에 구축
+if _IS_V64 or _IS_V65:
     _IS_V63I = True
 # V63.J는 V63.I 구조를 물려받음 (per_leg_contact_min 0.40, stance_ratio_balance)
 if _IS_V63J:
@@ -51,7 +52,7 @@ if _IS_V63J:
 if _IS_V63I or _IS_V63J:
     _IS_V63H = True
 # V63.B/C/D/E/F/G/H/I/J + V64 모두 V62 reward 구조를 베이스로 사용.
-if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J or _IS_V64:
+if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J or _IS_V64 or _IS_V65:
     _IS_V62 = True
 _V59_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V59 and "." in TRAIN_VERSION else ("A" if _IS_V59 else "")
 _V60_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V60 and "." in TRAIN_VERSION else ("A" if _IS_V60 else "")
@@ -6025,6 +6026,82 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # per-step gradient를 제공하지 못해 이 역할을 대체 못함.
                 # 따라서 leg_lr_symmetry(-2.0) + mirror loss 병행이 올바름.
                 pass  # leg_lr_symmetry -2.0 유지 (V63.I 원래 값)
+
+            # ══════════════════════════════════════════════════════════
+            # V65: Curriculum Trot — true_trot → alternation 전환
+            # ══════════════════════════════════════════════════════════
+            # 근본 원인: true_trot_pattern이 frozen diagonal 보상 (시간축 교대 미요구)
+            # V63.I~V64 모든 penalty가 이 exploit 보상을 이기지 못함 (데이터 확정)
+            #
+            # 해결: Curriculum으로 닭-달걀 분리
+            #   Phase 1 (0~800): true_trot=4.0 → gait 부트스트랩
+            #   Phase 2 (800~3000): true_trot 4→0.5 + alternation 0→5
+            #   Phase 3 (3000+): alternation=5.0 주연, true_trot=0.5 보조
+            #
+            # per_leg_contact: 지수 penalty (threshold ramp 0.30→0.40, clamp 8.0)
+            # leg_lr_symmetry: -2.0 유지 (보조 안전장치)
+            # mirror_loss: 유지 (보조 regularizer)
+            # ══════════════════════════════════════════════════════════
+            if _IS_V65:
+                # 1. V63.J/V64 잔여물 정리 (V63.I base로 복귀)
+                for attr_name in [
+                    "alternation_trot",
+                    "per_leg_role_variance",
+                    "diagonal_pair_balance",
+                ]:
+                    if hasattr(self.rewards, attr_name):
+                        setattr(self.rewards, attr_name, None)
+
+                # 2. true_trot_pattern 초기 weight (curriculum이 동적 조절)
+                self.rewards.true_trot_pattern.weight = 4.0
+
+                # 3. alternation_trot 등록 (초기 weight 0, curriculum이 ramp-up)
+                self.rewards.alternation_trot = RewTerm(
+                    func=custom_mdp.alternation_trot_reward,
+                    weight=0.0,  # curriculum이 800→3000에서 0→5.0으로 ramp
+                    params={
+                        "sensor_cfg": toe_sensor_v63h,
+                        "contact_threshold": 1.0,
+                        "frequency": 2.0,
+                        "window": 3,
+                    },
+                )
+
+                # 4. per_leg_contact: 기존 선형 → 지수 penalty 교체
+                self.rewards.per_leg_contact_min = None  # 기존 선형 제거
+                self.rewards.per_leg_contact_exp = RewTerm(
+                    func=custom_mdp.per_leg_contact_exp_penalty,
+                    weight=-1.0,
+                    params={
+                        "sensor_cfg": toe_sensor_v63h,
+                        "contact_threshold": 1.0,
+                        "min_contact_ratio": 0.30,
+                        "sharpness": 10.0,
+                        "max_penalty": 8.0,
+                        "threshold_ramp_start": 1500,
+                        "threshold_ramp_end": 3000,
+                        "threshold_final": 0.40,
+                    },
+                )
+
+                # 5. Curriculum term 활성화
+                self.curriculum.reward_weights = CurrTerm(
+                    func=custom_mdp.v65_trot_curriculum,
+                    params={
+                        "trot_start": 4.0,
+                        "trot_end": 0.5,
+                        "trot_ramp_start": 800,
+                        "trot_ramp_end": 2500,
+                        "alt_start": 0.0,
+                        "alt_end": 5.0,
+                        "alt_ramp_start": 800,
+                        "alt_ramp_end": 3000,
+                        "update_interval": 10,
+                    },
+                )
+
+                # 6. leg_lr_symmetry -2.0 유지 (V63.I 원래 값, 보조 안전장치)
+                # (상속됨, 변경 없음)
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)
