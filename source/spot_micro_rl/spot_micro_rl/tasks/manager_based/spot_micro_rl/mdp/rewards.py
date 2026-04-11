@@ -4314,6 +4314,80 @@ def true_trot_pattern_reward(
     return true_trot
 
 
+def balanced_true_trot_pattern_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    contact_threshold: float = 1.0,
+    ema_decay: float = 0.95,
+    balance_sigma: float = 0.30,
+) -> torch.Tensor:
+    """V67: Balance-gated true trot = intra × inter × balance_factor.
+
+    true_trot_pattern의 근본 결함:
+        frozen diagonal(FL+RR 고정 stance)도 intra×inter 만점 → exploit 보상.
+        V63.I~V66 모든 penalty가 이 보상을 이길 수 없음 (데이터 확정).
+
+    해결: balance_factor를 곱해 4발 균등 사용만 높은 reward.
+        - EMA decay 0.95 (20-step, ~0.8 trot cycle) — 패턴 포착 + 빠른 gradient
+        - err = 4발 EMA의 평균 대비 절대편차 합
+        - balance = exp(-err / sigma)
+
+    수치 (sigma=0.30):
+        Balanced (EMA [0.50, 0.40, 0.40, 0.50]):
+            err=0.20, balance=0.51, trot=0.84 → reward=0.43
+        Frozen (EMA [0.85, 0.10, 0.05, 0.80]):
+            err=1.50, balance=0.007, trot=0.93 → reward=0.006
+        → Balanced 72배 유리! (현재 true_trot은 frozen이 더 높음)
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact = _contact_state(
+        contact_sensor, sensor_cfg.body_ids, contact_threshold
+    ).float()  # (N, 4): FL, FR, RL, RR
+
+    # ── Instant trot (기존 true_trot_pattern과 동일) ──
+    sync_a = 1.0 - torch.abs(contact[:, 0] - contact[:, 3])  # FL-RR
+    sync_b = 1.0 - torch.abs(contact[:, 1] - contact[:, 2])  # FR-RL
+    intra = (sync_a + sync_b) * 0.5
+
+    pair_a_avg = (contact[:, 0] + contact[:, 3]) * 0.5
+    pair_b_avg = (contact[:, 1] + contact[:, 2]) * 0.5
+    inter_diff = torch.abs(pair_a_avg - pair_b_avg)
+
+    instant_trot = intra * inter_diff
+
+    # ── Balance factor (V67 신규) ──
+    if not hasattr(env, "_v67_balance_ema"):
+        env._v67_balance_ema = torch.full_like(contact, 0.5)
+
+    reset_mask = (env.episode_length_buf <= 1)
+    if reset_mask.any():
+        env._v67_balance_ema[reset_mask] = 0.5
+
+    env._v67_balance_ema = (
+        ema_decay * env._v67_balance_ema + (1.0 - ema_decay) * contact
+    )
+
+    ema_mean = env._v67_balance_ema.mean(dim=-1, keepdim=True)
+    err = (env._v67_balance_ema - ema_mean).abs().sum(dim=-1)
+    balance = torch.exp(-err / balance_sigma)
+
+    # ── Combined reward ──
+    reward = instant_trot * balance
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_balanced_trot"] = reward.mean().item()
+            env.extras["log_instant_trot"] = instant_trot.mean().item()
+            env.extras["log_balance_factor"] = balance.mean().item()
+            env.extras["log_balance_err"] = err.mean().item()
+            env.extras["log_balance_ema_fl"] = env._v67_balance_ema[:, 0].mean().item()
+            env.extras["log_balance_ema_fr"] = env._v67_balance_ema[:, 1].mean().item()
+            env.extras["log_balance_ema_rl"] = env._v67_balance_ema[:, 2].mean().item()
+            env.extras["log_balance_ema_rr"] = env._v67_balance_ema[:, 3].mean().item()
+
+    return reward
+
+
 def intra_pair_sync_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),

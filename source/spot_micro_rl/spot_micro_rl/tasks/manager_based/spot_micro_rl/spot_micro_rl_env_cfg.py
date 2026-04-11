@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V66"
+TRAIN_VERSION = "V67"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -43,8 +43,9 @@ _IS_V63J = TRAIN_VERSION.startswith("V63.J")
 _IS_V64 = TRAIN_VERSION.startswith("V64")
 _IS_V65 = TRAIN_VERSION.startswith("V65")
 _IS_V66 = TRAIN_VERSION.startswith("V66")
-# V64/V65/V66는 V63.I 구조 위에 구축
-if _IS_V64 or _IS_V65 or _IS_V66:
+_IS_V67 = TRAIN_VERSION.startswith("V67")
+# V64/V65/V66/V67는 V63.I 구조 위에 구축
+if _IS_V64 or _IS_V65 or _IS_V66 or _IS_V67:
     _IS_V63I = True
 # V63.J는 V63.I 구조를 물려받음 (per_leg_contact_min 0.40, stance_ratio_balance)
 if _IS_V63J:
@@ -53,7 +54,7 @@ if _IS_V63J:
 if _IS_V63I or _IS_V63J:
     _IS_V63H = True
 # V63.B/C/D/E/F/G/H/I/J + V64 모두 V62 reward 구조를 베이스로 사용.
-if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J or _IS_V64 or _IS_V65 or _IS_V66:
+if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J or _IS_V64 or _IS_V65 or _IS_V66 or _IS_V67:
     _IS_V62 = True
 _V59_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V59 and "." in TRAIN_VERSION else ("A" if _IS_V59 else "")
 _V60_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V60 and "." in TRAIN_VERSION else ("A" if _IS_V60 else "")
@@ -6143,6 +6144,52 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 # leg_lr_symmetry: -2.0 유지
                 # per_leg_contact_min: -8.0, threshold 0.40 유지
                 # stance_ratio_balance: +5.0 유지
+
+            # ══════════════════════════════════════════════════════════
+            # V67: Balance-Gated True Trot + Phase Randomization
+            # ══════════════════════════════════════════════════════════
+            # V66.1 교훈: phase randomization은 2000 iter 대칭 유지하지만
+            # 후반에 true_trot이 frozen diagonal exploit 재발견 (reward 상승과 동시)
+            # 근본 원인: true_trot = intra × inter가 frozen에 높은 점수 부여
+            #
+            # 해결: balance_factor 곱셈 → frozen에서 reward ≈ 0
+            #   balanced: 0.84 × 0.51 = 0.43
+            #   frozen:   0.93 × 0.007 = 0.006 (72배 차이)
+            #
+            # Phase randomization: V66.1 continuous (0~2π) 유지
+            # Reward: V63.I 동일 + true_trot → balanced_true_trot 교체
+            # Curriculum/mirror/alternation: 불필요
+            # ══════════════════════════════════════════════════════════
+            if _IS_V67:
+                # V64~V66 잔여물 정리
+                for attr_name in [
+                    "alternation_trot",
+                    "per_leg_role_variance",
+                    "diagonal_pair_balance",
+                    "per_leg_contact_exp",
+                ]:
+                    if hasattr(self.rewards, attr_name):
+                        setattr(self.rewards, attr_name, None)
+
+                # V65 curriculum 제거
+                self.curriculum.reward_weights = None
+
+                # 핵심: true_trot_pattern → balanced_true_trot 교체
+                self.rewards.true_trot_pattern = RewTerm(
+                    func=custom_mdp.balanced_true_trot_pattern_reward,
+                    weight=7.0,
+                    params={
+                        "sensor_cfg": toe_sensor_v63h,
+                        "contact_threshold": 1.0,
+                        "ema_decay": 0.95,
+                        "balance_sigma": 0.30,
+                    },
+                )
+
+                # 나머지 V63.I 동일 유지
+                # leg_lr_symmetry: -2.0
+                # per_leg_contact_min: -8.0 (threshold 0.40)
+                # stance_ratio_balance: +5.0
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)

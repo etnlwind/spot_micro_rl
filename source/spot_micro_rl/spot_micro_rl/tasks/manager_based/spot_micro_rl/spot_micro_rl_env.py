@@ -12,7 +12,7 @@ class SpotMicroManagerBasedRLEnv(ManagerBasedRLEnv):
         super().__init__(cfg, render_mode=render_mode, **kwargs)
         # V66: Phase randomization (대각 편향 방지)
         from .spot_micro_rl_env_cfg import TRAIN_VERSION
-        if TRAIN_VERSION.startswith("V66"):
+        if TRAIN_VERSION.startswith("V66") or TRAIN_VERSION.startswith("V67"):
             self._v66_phase_random_enabled = True
 
     def step(self, action: torch.Tensor):
