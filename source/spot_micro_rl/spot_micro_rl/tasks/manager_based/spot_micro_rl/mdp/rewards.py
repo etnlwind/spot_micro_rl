@@ -6953,13 +6953,10 @@ def v65_trot_curriculum(
         env._v65_gate_iter = 0  # gate 통과 시점 iter
 
     if not env._v65_gate_passed:
-        ep_len = env.episode_length_buf.float().mean().item()
-        max_ep = float(env.max_episode_length) if hasattr(env, "max_episode_length") else 1000.0
-        timeout_ratio = (env.episode_length_buf >= max_ep - 1).float().mean().item()
-
-        gate_ok = (ep_len > 900 and timeout_ratio > 0.80)
-
-        if gate_ok and iter_approx > 500:  # 최소 500 iter 이후
+        # Gate: iter 기반 (V63.I가 iter 762에 timeout 97% 달성 → 1000이면 안전)
+        # episode_length_buf는 reset 시점에서 불안정하여 조건부 gate로 부적합
+        gate_iter = 1000
+        if iter_approx >= gate_iter:
             env._v65_gate_passed = True
             env._v65_gate_iter = iter_approx
             if hasattr(env, "extras"):
