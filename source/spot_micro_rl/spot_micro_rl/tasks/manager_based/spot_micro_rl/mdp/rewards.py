@@ -43,10 +43,12 @@ def _get_phase_offset(env):
     # Reset on episode start
     reset_mask = (env.episode_length_buf <= 1)
     if reset_mask.any():
-        # Random offset: 0 or π (두 대각 페어 중 하나를 랜덤 선택)
-        # 0: FL+RR first stance,  π: FR+RL first stance
-        random_pair = torch.randint(0, 2, (reset_mask.sum().item(),), device=env.device).float()
-        env._v66_phase_offset[reset_mask] = random_pair * math.pi
+        # Continuous offset: 0~2π 균등분포
+        # Binary(0/π)는 두 모드 절충 → double-step 부자연스러움
+        # Continuous는 모든 시작 phase에 대해 부드럽게 일반화 → 자연스러운 궤적
+        env._v66_phase_offset[reset_mask] = torch.rand(
+            reset_mask.sum().item(), device=env.device
+        ) * 2.0 * math.pi
     return env._v66_phase_offset
 
 
