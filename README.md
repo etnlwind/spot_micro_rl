@@ -119,6 +119,12 @@ V63~V67까지 **10개 이상의 reward 구조를 반복 실험**하며 밝혀낸
 4. **이미 작동하는 policy에서 reference를 추출**하면 동역학적으로 유효한 궤적을 얻을 수 있다
 5. **시뮬레이터를 적극 활용**하면 설계→검증→수정 사이클을 빠르게 돌릴 수 있다
 
+### Best Checkpoint
+```
+checkpoints/V68_model_2500_best.pt (4.5 MB)
+```
+재생: `play.cmd 2026-04-12_12-26-08_V68 model_2500.pt`
+
 ### 핵심 설정
 - **URDF**: 실물 기준 질량, merge_fixed_joints=False
 - **ImplicitActuator**: stiffness=20, damping=0.5
@@ -129,10 +135,10 @@ V63~V67까지 **10개 이상의 reward 구조를 반복 실험**하며 밝혀낸
 ### 추천 읽기 순서
 
 1. **이 README**
-2. **`plan/V63_PLAN.md`** (V63 시리즈 + V64~V67 교훈 포함)
-3. **`plan/V65_PLAN.md`** (curriculum 설계)
+2. **`plan/V68_PLAN.md`** (최종 성공 버전 — reference tracking)
+3. **`plan/V63_PLAN.md`** (V63 시리즈 + V64~V67 교훈 포함)
 4. `plan/V59_PLAN.md` (서기 학습)
-5. `plan/README.md` (V1~V59 전체 히스토리)
+5. `plan/README.md` (V1~V68 전체 히스토리)
 
 ---
 

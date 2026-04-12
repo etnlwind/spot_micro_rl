@@ -1,11 +1,12 @@
-# SpotMicro RL 실험 흐름 요약 (V1 ~ V59)
+# SpotMicro RL 실험 흐름 요약 (V1 ~ V68)
 
-이 문서는 `plan` 폴더의 V1~V59 흐름을 바탕으로,
+이 문서는 `plan` 폴더의 V1~V68 흐름을 바탕으로,
 각 버전이 **무엇을 해결하려던 실험이었는지**를 짧고 쉽게 정리하면서도,
 전체 맥락이 보이도록 해설을 덧붙인 요약 문서이다.
 
-> 최신 active family는 `V60`.
-> **서기 성공(V59) → from-scratch 보행(V60) → RR 비대칭 exploit 교정 중(V60.C)**.
+> 최신: **V68 (Reference Trajectory Tracking)** — 대칭 trot 달성.
+> Best checkpoint: `checkpoints/V68_model_2500_best.pt`
+> 대칭 1.5%p + stride 4.40 + timeout 100% + GUI "보행 좋아 보인다".
 
 ---
 
@@ -484,8 +485,49 @@ V60은 아래 세 덩어리로 이해하는 것이 가장 쉽다.
 
 ---
 
+# 9기 — 대칭 trot 달성 (V62 ~ V68)
+
+## V62: Phase-gated propulsion
+- drag/shuffle exploit 차단
+- from-scratch 보행의 기반 확립
+
+## V63 시리즈 (B~J): Trot 유도 10+ 반복 실험
+- V63.I: 보행 품질 최고 (stride 4.35, propulsion 균등), 대각 편향 12.6%p
+- 핵심 발견: `true_trot_pattern`이 frozen diagonal을 보상 (시간축 교대 미요구)
+- reward penalty(leg_lr_symmetry, diagonal_pair_balance, alternation_trot) 모두 exploit 보상을 못 이김
+- 상세: [V63_PLAN.md](V63_PLAN.md)
+
+## V64: Mirror Symmetry Augmentation (실패)
+- Isaac Lab 내장 `RslRlSymmetryCfg` 활용
+- Phase clock과 data augmentation 충돌 → phantom 데이터 → 학습 붕괴
+- 상세: [V64_PLAN.md](V64_PLAN.md)
+
+## V65: Curriculum Trot (실패)
+- true_trot→alternation ramp 전환
+- 부팅 전 curriculum 개입 → 서기 실패
+- 상세: [V65_PLAN.md](V65_PLAN.md)
+
+## V66: Phase Randomization (부분 성공)
+- per-env random phase offset → 초기 2000 iter 대칭 2~6%p
+- iter 2500+ true_trot exploit 재발견 → 편향 재발
+- 상세: [V66_PLAN.md](V66_PLAN.md)
+
+## V67: Balance-Gated True Trot (부분 성공)
+- `balanced_true_trot = intra × inter × balance_factor` → 대칭 2.7%p
+- 하지만 stride 2.23 (V63.I의 51%), GUI: drift/slip
+- 교훈: contact 대칭 ≠ 보행 품질 대칭
+- 상세: [V67_PLAN.md](V67_PLAN.md)
+
+## V68: Reference Trajectory Tracking (성공!)
+- V63.I 실제 보행 궤적 녹화 → 대칭화 (89.9% 비대칭 감소) → reference tracking reward
+- **대칭 1.5%p + stride 4.40 + timeout 100% + GUI "보행 좋아 보인다"**
+- Best checkpoint: `checkpoints/V68_model_2500_best.pt`
+- 상세: [V68_PLAN.md](V68_PLAN.md)
+
+---
+
 # 최종 한 문장
 
 이 프로젝트의 흐름은,
 
-> **"걷게 만들기"에서 시작해, 꼼수를 막고, reward를 줄이고, 표준으로 전환하고, URDF 질량과 contact 센서의 근본 문제를 해결한 뒤, 서기를 배우고, from-scratch 보행으로 전환해 비대칭 exploit를 교정하고, 4발 균형 swing을 달성한 후 대각선 교대(trot) 패턴 형성을 시도하는 단계에 와 있다.**
+> **"걷게 만들기"에서 시작해, exploit을 막고, reward를 줄이고, URDF와 contact 센서 문제를 해결하고, 서기를 배우고, from-scratch 보행을 확립하고, 10+ 버전의 reward engineering 실패를 거쳐, "RL이 발견하게"가 아닌 "검증된 궤적을 따라가게" 접근으로 전환하여 대칭 trot을 달성한 여정이다.**
