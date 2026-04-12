@@ -1,0 +1,43 @@
+cff-version: 1.2.0
+title: "spot_micro_rl: Reinforcement Learning for SpotMicro Quadruped Locomotion"
+message: "If you use this software or its trained checkpoints, please cite it as below."
+type: software
+version: "V68"
+date-released: "2026-04-12"
+license: Apache-2.0
+repository-code: "https://github.com/etnlwind/spot_micro_rl"
+authors:
+  - family-names: "RYU"
+    given-names: "Sangjin"
+    email: "etnlwind@gmail.com"
+    alias: "etnlwind"
+abstract: >
+  spot_micro_rl is a research repository for training a deployable
+  quadruped locomotion policy for the SpotMicro open-hardware robot,
+  built on NVIDIA Isaac Lab. Over 68 iterated experiments (V1~V68),
+  the project progressed from basic standing to a symmetric trot
+  capable of 0.308 m/s forward walking. V68 introduces a Reference
+  Trajectory Tracking approach that mines and symmetrizes a rollout
+  from a previous high-quality policy (V63.I) and lets RL track it,
+  resolving the symmetry/quality tradeoff that reward engineering
+  alone could not. The best checkpoint is preserved at
+  `checkpoints/V68_model_2500_best.pt`.
+keywords:
+  - reinforcement-learning
+  - quadruped
+  - locomotion
+  - SpotMicro
+  - Isaac Lab
+  - rsl_rl
+  - reference-tracking
+  - imitation-learning
+  - sim-to-real
+preferred-citation:
+  type: software
+  title: "spot_micro_rl V68: Reference Trajectory Tracking for Symmetric Trot"
+  authors:
+    - family-names: "RYU"
+      given-names: "Sangjin"
+  year: 2026
+  url: "https://github.com/etnlwind/spot_micro_rl"
+  version: "V68"

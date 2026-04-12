@@ -1,7 +1,12 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers
+# (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
+# Original template: SPDX-License-Identifier: BSD-3-Clause
 #
-# SPDX-License-Identifier: BSD-3-Clause
+# Modifications Copyright 2026 Sangjin RYU <etnlwind@gmail.com>
+# Modifications licensed under the Apache License, Version 2.0
+# (see project-root LICENSE and NOTICE for full terms).
+# SPDX-License-Identifier: Apache-2.0
 
 """Installation script for the 'spot_micro_rl' python package."""
 
