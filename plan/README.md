@@ -365,7 +365,12 @@ V55까지의 77개 heuristic 체계를 폐기하고, Isaac Lab 표준 locomotion
 - **V55**: baseline을 다시 살린 뒤 phase를 probe로 얹는 전략으로 재설계
 - **V56~V58**: 77개 heuristic 폐기, Isaac Lab 표준 locomotion 구조로 전환. 표준 11개 reward + ImplicitActuator로 locomotion bootstrap 성공, drag propulsion 해결 진행 중
 - **V59**: URDF 질량 실물 기준 수정(5.3→1.41kg), merge_fixed_joints=False(contact 정상화), STS3215 서보 스펙 반영, **서기 학습 성공** (timeout 100%, 4발 접지 99.9%, 수평 유지 99.8%)
-- **V60**: 서기→보행 전환 실패 → from-scratch 보행 학습 → RR 비대칭 exploit 교정 성공(V60.C) → 정적 접지 해 타파 중(V60.D, 앞다리 swing 시작)
+- **V60**: 서기→보행 전환 실패 → from-scratch 보행 학습. RR 비대칭 exploit 교정(V60.C) → 정적 접지 해 타파 시도 → exploit patch의 구조적 한계 확인
+- **V61**: phase clock observation + propulsion reward로 drag 차단. phase 타이밍 학습은 성공했으나 trot 품질까지는 미도달
+- **V62**: phase-gated propulsion으로 drag/shuffle exploit 완전 차단, from-scratch 보행 기반 확립
+- **V63 (B~J)**: trot 유도 10+ 반복 실험. V63.I가 **보행 품질 최고**(stride 4.35)이지만 대각 편향 12.6%p 잔존
+- **V64~V67**: mirror augmentation / curriculum / phase randomization / balance-gated true_trot — 모두 대칭 또는 품질 한쪽에서 실패. **reward engineering의 구조적 한계 확인**
+- **V68**: **Reference Trajectory Tracking.** V63.I 실제 rollout을 녹화·대칭화해 reference trajectory로 사용, tracking reward(w=10) + phase randomization. **대칭 1.5%p + stride 4.40 + timeout 100% + GUI 긍정 판정** 동시 달성. 최적 체크포인트는 iter 2500 (`checkpoints/V68_model_2500_best.pt`)
 
 ---
 
@@ -485,44 +490,46 @@ V60은 아래 세 덩어리로 이해하는 것이 가장 쉽다.
 
 ---
 
-# 9기 — 대칭 trot 달성 (V62 ~ V68)
+# 13기 — Reference Trajectory Tracking으로 대칭 trot 달성 (V61 ~ V68)
 
-## V62: Phase-gated propulsion
-- drag/shuffle exploit 차단
-- from-scratch 보행의 기반 확립
+## 이 시기의 핵심
 
-## V63 시리즈 (B~J): Trot 유도 10+ 반복 실험
-- V63.I: 보행 품질 최고 (stride 4.35, propulsion 균등), 대각 편향 12.6%p
-- 핵심 발견: `true_trot_pattern`이 frozen diagonal을 보상 (시간축 교대 미요구)
-- reward penalty(leg_lr_symmetry, diagonal_pair_balance, alternation_trot) 모두 exploit 보상을 못 이김
-- 상세: [V63_PLAN.md](V63_PLAN.md)
+V60까지 "exploit을 하나씩 막는" 접근이 한계에 부딪쳤다.
+V61~V67에서는 phase clock, curriculum, mirror augmentation, balance gate 등
+**reward 쪽 수단을 거의 다 시도**했지만 대칭과 보행 품질이 양립하지 않았다.
 
-## V64: Mirror Symmetry Augmentation (실패)
-- Isaac Lab 내장 `RslRlSymmetryCfg` 활용
-- Phase clock과 data augmentation 충돌 → phantom 데이터 → 학습 붕괴
-- 상세: [V64_PLAN.md](V64_PLAN.md)
+> **"RL이 좋은 gait를 발견하게 하자"는 접근이 근본 한계에 부딪쳤다.**
+> **그래서 접근을 뒤집었다 — "검증된 궤적을 먼저 정의하고, RL이 따라가게 하자."**
 
-## V65: Curriculum Trot (실패)
-- true_trot→alternation ramp 전환
-- 부팅 전 curriculum 개입 → 서기 실패
-- 상세: [V65_PLAN.md](V65_PLAN.md)
+V68에서 이 전환이 결실을 맺어, **대칭 1.5%p + stride 4.40 + timeout 100% + GUI "보행 좋아 보인다"**를 동시에 달성했다.
 
-## V66: Phase Randomization (부분 성공)
-- per-env random phase offset → 초기 2000 iter 대칭 2~6%p
-- iter 2500+ true_trot exploit 재발견 → 편향 재발
-- 상세: [V66_PLAN.md](V66_PLAN.md)
+## 버전별 한 줄 요약
 
-## V67: Balance-Gated True Trot (부분 성공)
-- `balanced_true_trot = intra × inter × balance_factor` → 대칭 2.7%p
-- 하지만 stride 2.23 (V63.I의 51%), GUI: drift/slip
-- 교훈: contact 대칭 ≠ 보행 품질 대칭
-- 상세: [V67_PLAN.md](V67_PLAN.md)
+- **V61** — from-scratch + phase clock observation(8차원) + stance propulsion reward. phase 타이밍 학습은 빠르게 성공했지만 "phase-matched 정적 해" exploit 발견. swing penalty→정적 해 파괴 시도 후, 결국 "밀면 상"(propulsion +5) 구조로 전환하며 drag 차단. trot 품질까지는 도달 못 하고 종료. 상세: [V61_PLAN.md](V61_PLAN.md)
 
-## V68: Reference Trajectory Tracking (성공!)
-- V63.I 실제 보행 궤적 녹화 → 대칭화 (89.9% 비대칭 감소) → reference tracking reward
-- **대칭 1.5%p + stride 4.40 + timeout 100% + GUI "보행 좋아 보인다"**
-- Best checkpoint: `checkpoints/V68_model_2500_best.pt`
-- 상세: [V68_PLAN.md](V68_PLAN.md)
+- **V62** — Phase-gated propulsion 도입. propulsion reward를 phase gating과 결합해 drag/shuffle exploit를 차단하고 from-scratch 보행의 기반을 확립. 상세: [V62_PLAN.md](V62_PLAN.md)
+
+- **V63 (B~J)** — Trot 유도 10+ 반복 실험. V63.I에서 **보행 품질 최고** 달성 (stride 4.35, propulsion 균등)하지만 대각 편향 12.6%p 잔존. 핵심 발견: `true_trot_pattern`이 frozen diagonal을 보상 (시간축 교대 미요구). leg_lr_symmetry, diagonal_pair_balance, alternation_trot penalty 모두 exploit 보상을 못 이김. 상세: [V63_PLAN.md](V63_PLAN.md)
+
+- **V64** — Mirror Symmetry Augmentation. Isaac Lab 내장 `RslRlSymmetryCfg`를 phase clock과 함께 사용했으나, phase clock과 data augmentation이 충돌해 phantom 데이터 생성, 학습 붕괴. 상세: [V64_PLAN.md](V64_PLAN.md)
+
+- **V65** — Curriculum Trot. `true_trot → alternation` ramp 전환 설계. 부팅 전 curriculum이 개입하여 서기 학습 자체 실패. "curriculum은 baseline 이후" 교훈 재확인. 상세: [V65_PLAN.md](V65_PLAN.md)
+
+- **V66** — Phase Randomization. per-env random phase offset으로 초기 2000 iter 구간 대칭 2~6%p 달성(부분 성공). 그러나 iter 2500+ 에서 `true_trot_pattern` exploit이 재발견되어 편향 재발. 상세: [V66_PLAN.md](V66_PLAN.md)
+
+- **V67** — Balance-Gated True Trot. `balanced_true_trot = intra × inter × balance_factor`로 대칭 2.7%p 역대 최고 달성. 하지만 stride 2.23 (V63.I 대비 51%), GUI 관찰 결과 drift/slip 심함. **교훈: contact 대칭 ≠ 보행 품질 대칭.** 상세: [V67_PLAN.md](V67_PLAN.md)
+
+- **V68** — **Reference Trajectory Tracking (성공).** V63.I 실제 rollout 녹화 → 궤적 분석 → 좌우 대칭화(비대칭 89.9% 감소) → 대칭화 joint trajectory를 reference로 삼는 tracking reward(w=10) + phase randomization. **iter 2500에서 대칭 1.5%p + stride 4.40 + timeout 100% + GUI "보행 좋아 보인다"**를 동시에 달성. 다만 iter 3500+ 후반에는 편향이 재발하여 **최적 체크포인트는 중간(model_2500)**. Best checkpoint: `checkpoints/V68_model_2500_best.pt`. 상세: [V68_PLAN.md](V68_PLAN.md)
+
+## 핵심 교훈
+
+- **Reward engineering에는 한계가 있다** — exploit은 항상 새 loophole을 찾는다 (V63~V67)
+- **`true_trot_pattern`은 frozen diagonal을 보상한다** — 순간 대각 접지만 측정, 시간축 교대를 측정하지 않음 (V63~V66)
+- **data augmentation은 phase clock과 충돌할 수 있다** — observation에 시계열 상태가 있으면 mirror가 phantom 데이터를 만든다 (V64)
+- **Curriculum은 baseline 이후** — 부팅 전에 reward 구조를 바꾸면 서기 자체가 무너진다 (V65)
+- **contact 대칭은 보행 품질 대칭이 아니다** — contact ratio만으로 성공 판정하면 stride/GUI에서 배신당한다 (V67)
+- **검증된 policy의 궤적은 동역학적으로 유효하다** — open-loop IK sweep은 실패, V63.I rollout에서 추출한 궤적은 성공 (V68)
+- **"최적 = 완주"가 아니다** — V68은 iter 2500이 model_4999보다 나음. 중간 체크포인트 보존 필수 (V68)
 
 ---
 
@@ -530,4 +537,4 @@ V60은 아래 세 덩어리로 이해하는 것이 가장 쉽다.
 
 이 프로젝트의 흐름은,
 
-> **"걷게 만들기"에서 시작해, exploit을 막고, reward를 줄이고, URDF와 contact 센서 문제를 해결하고, 서기를 배우고, from-scratch 보행을 확립하고, 10+ 버전의 reward engineering 실패를 거쳐, "RL이 발견하게"가 아닌 "검증된 궤적을 따라가게" 접근으로 전환하여 대칭 trot을 달성한 여정이다.**
+> **"걷게 만들기"에서 시작해, exploit을 막고, reward를 줄이고, URDF와 contact 센서 문제를 해결하고, 서기를 배우고, from-scratch 보행을 확립하고, V63~V67의 10+ 버전 reward engineering 실패를 거쳐, V68에서 "RL이 발견하게"가 아닌 "검증된 궤적(V63.I rollout)을 대칭화해 따라가게" 접근으로 전환함으로써 마침내 대칭 1.5%p + stride 4.40 + GUI 긍정의 trot을 달성하고, `checkpoints/V68_model_2500_best.pt`로 보존한 여정이다.**

@@ -179,14 +179,25 @@ checkpoints/V68_model_2500_best.pt (4.5 MB)
 - 목표 높이 유지 (205mm 근처)
 - 발을 떼지 않고 관절 미세 조정으로 균형 유지
 
-### 보행 (다음 목표)
-- 서기에서 자연스럽게 보행 전환
-- front/rear 사용이 한쪽으로 심하게 무너지지 않음
-- 실기체 적용 관점에서 과도한 front-overload / torsion / nose-down이 없음
-- STS3215 서보 (3Nm) 한계 내에서 동작
+### 대칭 Trot 보행 (V68 달성, iter 2500)
+- 대각 대칭 diff **1.5%p** (V63.I 12.6%p → 8배 개선)
+- stride **4.40** (V63.I 4.35 동등+)
+- timeout **100%** (2000 steps 완주)
+- gait frequency **2.00 Hz** 설계값 일치
+- forward speed 0.308 m/s, lateral drift 0.003 m/s (1%)
+- body height 0.240m ±0.005 안정, GUI "보행 좋아 보인다" 판정
+- front/rear 사용 균형, nose-down/torsion 억제
+- STS3215 서보 (3Nm) 한계 내 동작
+
+### 다음 목표 (V68 이후)
+- **Domain randomization** — push recovery, mass/friction 변동 적응
+- **Rough terrain** — 경사/계단/요철 지형 일반화
+- **Height scanner** — 장애물 인식 observation 추가
+- **Sim-to-real** — 실기체 배치 검증
 
 즉,
-**”움직인다”보다 “실제로 쓸 수 있는 gait인가”를 더 중요하게 봅니다.**
+**"움직인다"보다 "실제로 쓸 수 있는 gait인가"를 더 중요하게 봅니다.**
+V68에서 시뮬레이션 기준으로 이 조건들을 처음으로 동시에 만족했고, 이후 단계는 randomization/terrain/실기체로 확장하는 것입니다.
 
 ---
 
