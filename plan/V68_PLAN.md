@@ -2,7 +2,7 @@
 
 ## 1. 배경
 
-70+ 버전 실험의 종합 결론:
+V1~V67까지의 실험 종합 결론:
 - **"RL이 좋은 gait를 발견하게 하자"** → exploit whack-a-mole (V63~V67 반복 실패)
 - **"이상적 trot을 정의하고 따라가게 하자"** → 새 접근
 
@@ -76,6 +76,11 @@ iter 4014: 대칭 12.7%p, stride 1.55 (후반 하락)
 - 대칭 1~2%p + stride 4.4 + timeout 100%
 - 후반(iter 3500+) 편향 재발 → 중간 체크포인트가 최고
 
+### GUI 확인
+- model_2500: **사용자 "보행 좋아 보인다"** — V63~V68 전체 시리즈 첫 긍정 GUI 판정
+- V63.I model_2000 비교: V63.I는 "FR/RR 이상, 몸 세우기" 관찰됨
+- V68 model_2500: 대칭 + stride + 자연스러움 동시 달성
+
 ## 5. 왜 V68이 성공했는가
 
 ### Open-loop IK sweep 실패 → Policy trajectory mining
@@ -107,5 +112,5 @@ iter 4014: 대칭 12.7%p, stride 1.55 (후반 하락)
 
 > **"RL이 발견하게"가 아니라 "검증된 궤적을 따라가게"가 정답이었다.**
 
-70개 버전에 걸친 reward engineering의 한계를 **policy trajectory mining + 대칭화**로 돌파.
+V1~V67까지의 reward engineering 한계를 **policy trajectory mining + 대칭화**로 돌파.
 V63.I의 동역학적 추진력 + V67의 대칭 목표를 **reference tracking**으로 결합.

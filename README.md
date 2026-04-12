@@ -111,7 +111,7 @@ V63~V67까지 **10개 이상의 reward 구조를 반복 실험**하며 밝혀낸
 | V67 | balance-gated true_trot | 대칭 ✅ stride ❌ |
 | **V68** | **reference trajectory tracking** | **대칭 ✅ stride ✅ GUI ✅** |
 
-### 핵심 교훈 (70+ 버전)
+### 핵심 교훈 (V1~V68)
 
 1. **Reward를 더 추가하는 것은 한계가 있다** — exploit은 항상 새 길을 찾는다
 2. **true_trot_pattern은 frozen diagonal을 보상한다** — 시간축 교대를 측정하지 않음
