@@ -96,7 +96,24 @@ iter 4014: 대칭 12.7%p, stride 1.55 (후반 하락)
 - 초기 gradient 편향 제거 (V66.1 검증)
 - Reference tracking이 후반 편향도 억제
 
-## 6. 한계와 후속 과제
+## 6. model_2500 정량 리포트 (Best Checkpoint)
+
+40초 rollout (2000 steps, 77 gait cycles) 기반.
+
+| 항목 | 값 | 판정 |
+|------|------|------|
+| Forward speed | 0.308 m/s | ✅ |
+| Lateral drift | 0.003 m/s (1%) | ✅ 직진 |
+| Body height | 0.240 m ±0.005 | ✅ 안정 |
+| Roll rate std | 0.155 rad/s | ✅ |
+| Pitch rate std | 0.264 rad/s | ✅ |
+| Yaw rate std | 0.092 rad/s | ✅ |
+| Cost of Transport | 6.97 | 기준 |
+| L/R joint asymmetry | 0.338 | ✅ |
+| Gait frequency | 2.00 Hz | ✅ 설계 일치 |
+| GUI 판정 | "보행 좋아 보인다" | ✅ |
+
+## 7. 한계와 후속 과제
 
 ### 한계
 - iter 3500+ 후반에 편향 재발 (12.7%p) + stride 하락
