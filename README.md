@@ -69,104 +69,96 @@ SpotMicro 기반 4족보행 로봇의 **강화학습(RL) 보행 정책 연구 �
 
 ---
 
-## 4. 현재 상태 (V60)
+## 4. 현재 상태 (V68)
 
-**서기 성공 → From-Scratch 보행 학습 → 비대칭 Exploit 교정 중** (2026-04-06)
+**Reference Trajectory Tracking — 대칭 trot 달성** (2026-04-12)
 
-### V59: 서기 학습 성공
+### 핵심 성과: V68
 
-| 지표 | 결과 |
-|------|------|
-| 생존율 (timeout) | 100% |
-| 4발 접지율 | 99.9% |
-| 수평 유지율 | 99.8% |
-| 목표 높이 달성 | 96% |
+V63~V67까지 **10개 이상의 reward 구조를 반복 실험**하며 밝혀낸 결론:
+- "RL이 좋은 gait를 발견하게 하자" 접근은 **exploit whack-a-mole**로 수렴
+- **이상적 trot을 먼저 정의하고, RL이 따라가게 하는** 것이 정답
 
-### V59.D: 서기→보행 전환 시도 (실패)
-- 서기 정책이 너무 강해 보행으로 전환 불가
-- curriculum 복원 버그 발견 (저장된 reward weight가 env_cfg를 덮어씀)
+### V68 접근
 
-### V60: From-Scratch 보행 학습
+1. **V63.I**(역대 최고 보행 품질)의 실제 policy rollout 녹화
+2. 궤적 분석 → **좌우 대칭화** (비대칭 89.9% 감소)
+3. 대칭화된 reference joint trajectory 생성 (`ideal_trot_reference.json`)
+4. **Reference tracking reward**(주연 w=10) + phase randomization
+5. RL이 대칭화된 V63.I 궤적을 추적하며 학습
 
-V60은 "서기 정책 위에 보행을 얹는 실험"이 아니다.
-V59.D에서 확인했듯이, 서기에서 필요한 정적 균형과 보행에서 필요한 동적 균형은 거의 다른 기술이었다.
-그래서 V60은 **보행을 처음부터 다시 배우는 트랙**으로 시작했다.
+### V68 결과 (iter 2500 기준, 최적 체크포인트)
 
-중요한 점은, V60이 단순히 "발을 들게 하는 실험"이 아니라는 것이다.
-실제로는 아래 문제들을 순서대로 하나씩 만나고 풀어 왔다.
+| 지표 | V63.I (이전 최고) | **V68** | 개선 |
+|------|------|------|------|
+| 대각 대칭 diff | 12.6%p | **1.5%p** | **8배** |
+| stride | 4.35 | **4.40** | 동등+ |
+| timeout | 99.95% | **100%** | ✅ |
+| reward | 386 | **475** | +23% |
+| GUI 품질 | FR/RR 이상 | **"보행 좋아 보인다"** | ✅ |
 
-1. 한 다리만 거의 안 쓰는 비대칭 exploit
-2. exploit를 막자 네 발 다 붙이고 버티는 정적 접지 해
-3. 정적 해를 깨려 하자 앞다리만 흔드는 패턴
-4. rear를 직접 밀자 이번엔 뒷다리만 흔드는 패턴
-5. 앞뒤 균형은 만들었지만 diagonal 교대는 안 나오는 상태
+### 버전 히스토리 요약 (V59~V68)
 
-즉 V60은 **좋은 gait를 한 번에 찾는 과정**이 아니라,
-로봇이 찾아내는 잘못된 local optimum을 하나씩 없애 가면서
-점점 더 "보행 구조"에 가까운 쪽으로 가는 과정이라고 보는 게 맞다.
-
-| 버전 | 결과 | 문제 |
+| 버전 | 핵심 시도 | 결과 |
 |------|------|------|
-| V60.A | 생존 100%, tracking 96%, 약간 전진 | RR(오른뒤) 비대칭 exploit — 1발만 98% 공중 |
-| V60.B | penalty -3.0 추가 | 효과 부족 (cr_RR 2%→3.3%) |
-| V60.C | penalty -10.0 + rear balance -5.0 | **RR 교정 성공** (cr_RR 0.03→0.997) |
-| V60.D | gait incentive 강화 + static bias 약화 | no-go: 앞다리만 swing, 뒷다리 고착 |
-| V60.E | rear 전용 clearance + static bias 제거 | no-go: rear swing 미달 (0.007/0.013) |
-| V60.F | 정적 해 구조 전환 + rear air_time 직접 보상 | rear swing 폭발, front 고착 (앞뒤 역전) |
-| V60.G | front/rear pair balance + diagonal coupling | 4발 균형 개선, diagonal_coupling=0 |
-| V60.H | diagonal coupling 8x 강화 + balance 완화 | 4발 swing 분산 개선 |
-| V60.I | velocity-adaptive phase diagonal event | **Go** — pde 0.86, 4발 clearance 균등, pair 역전 |
-| V60.J~M | quality recovery + pair-lock 차단 | exploit 패치 한계 도달 |
-| **V61** | **from-scratch + phase clock obs + stance propulsion reward** | **진행 중** (수정 3차: "밀면 상" > "안 들면 벌") |
+| V59 | 서기 학습 | 성공 (100% 생존, 99.9% 접지) |
+| V60~V61 | from-scratch 보행 | exploit 패치 한계 |
+| V62 | phase-gated propulsion | drag 차단 성공 |
+| V63 (B~J) | trot 유도 reward 반복 실험 | V63.I = 보행 품질 최고 (대칭 부족) |
+| V64 | mirror symmetry augmentation | phase 충돌 실패 |
+| V65 | curriculum (true_trot→alternation) | 부팅 문제 |
+| V66 | phase randomization | 대칭 개선, 후반 재발 |
+| V67 | balance-gated true_trot | 대칭 ✅ stride ❌ |
+| **V68** | **reference trajectory tracking** | **대칭 ✅ stride ✅ GUI ✅** |
 
-현재 해석:
-- `V60.A~C`는 **비대칭 exploit 제거 단계**
-- `V60.D~F`는 **정적 접지 해를 깨는 단계**
-- `V60.G~H`는 **균형 있는 swing을 diagonal 교대로 구조화하려는 단계**
+### 핵심 교훈 (70+ 버전)
 
-추천:
-- V60 흐름을 제대로 이해하려면
-  [V60_PLAN.md](/mnt/d/project/spot_micro_rl/plan/V60_PLAN.md)를 먼저 보는 것이 좋다.
-  이 문서에는 각 버전의 목표, 기대, 실제 결과, 다음 버전으로 넘어간 이유가 상세히 정리돼 있다.
+1. **Reward를 더 추가하는 것은 한계가 있다** — exploit은 항상 새 길을 찾는다
+2. **true_trot_pattern은 frozen diagonal을 보상한다** — 시간축 교대를 측정하지 않음
+3. **대칭은 reward가 아닌 구조로 해결해야 한다** — phase randomization + reference tracking
+4. **이미 작동하는 policy에서 reference를 추출**하면 동역학적으로 유효한 궤적을 얻을 수 있다
+5. **시뮬레이터를 적극 활용**하면 설계→검증→수정 사이클을 빠르게 돌릴 수 있다
 
-핵심 설정:
-- **URDF 질량**: 1.41kg (원본 5.3kg에서 실물 기준 수정)
-- **merge_fixed_joints=False** (True면 toe contact reporting 불가)
-- **ImplicitActuator** stiffness=20, damping=0.5
+### 핵심 설정
+- **URDF**: 실물 기준 질량, merge_fixed_joints=False
+- **ImplicitActuator**: stiffness=20, damping=0.5
+- **Phase randomization**: 연속 0~2π offset per env
+- **Reference**: V63.I 대칭화 궤적 (25 steps/cycle, 2Hz)
 - **서보 기준**: STS3215 (30kg·cm, 12V)
 
 ### 추천 읽기 순서
 
 1. **이 README**
-2. **`plan/V60_PLAN.md`** (현재 active 버전)
-3. `plan/V59_PLAN.md` (서기 학습 상세)
-4. `plan/README.md` (V1~V59 전체 히스토리)
+2. **`plan/V63_PLAN.md`** (V63 시리즈 + V64~V67 교훈 포함)
+3. **`plan/V65_PLAN.md`** (curriculum 설계)
+4. `plan/V59_PLAN.md` (서기 학습)
+5. `plan/README.md` (V1~V59 전체 히스토리)
 
 ---
 
 ## 5. 현재 유효한 접근 / 폐기된 접근
 
 ### 현재 유효한 접근
+- **Reference trajectory tracking**: 검증된 policy에서 궤적 추출 → 대칭화 → RL 학습 목표 (V68)
+- **Phase randomization**: per-env random phase offset으로 대각 편향 초기 차단 (V66+)
 - **from-scratch 보행**: 서기 선행 없이 처음부터 동적 균형+보행을 동시에 학습
-- **실물 기준 URDF**: 질량 1.41kg, STS3215 서보 스펙
+- **실물 기준 URDF**: 실물 기반 질량, STS3215 서보 스펙
 - **merge_fixed_joints=False**: toe contact reporting 보장
-- **per-leg exploit 교정**: 비대칭 사용을 직접 penalty (contact_min, excess_swing, rear_balance)
-- **curriculum 복원 자동 skip**: 버전 변경 resume 시 env_cfg 우선
-- standard locomotion reward 구조 우선
-- success criteria에 deployability 포함
+- success criteria에 대칭성 + GUI 품질 포함
 
 ### 현재 주의 깊게 다루는 접근
-- ImplicitActuator → DCMotor 전환 (Sim2Real)
-- penalty weight는 reward budget 대비 수치 검증 필수
-- 서기→보행 전환 vs from-scratch (from-scratch가 더 효과적으로 확인됨)
+- **true_trot_pattern**: frozen diagonal exploit 보상 위험 → 주연으로 쓰면 안 됨 (V63~V67 교훈)
+- reward 추가 전 반드시 **수치 검증** (reward budget 계산)
+- **contact ratio만으로 대칭 판정 금지** — propulsion, foot placement, GUI도 동시 확인 (V67 교훈)
 
 ### 현재 폐기 또는 경계하는 접근
+- **Reward patch 무한 누적** — exploit whack-a-mole로 수렴 (V63~V67에서 확인)
+- **Mirror data augmentation** — phase clock과 충돌 (V64 실패)
+- **Curriculum reward ramp** — 부팅 전 개입하면 서기 실패 (V65 실패)
+- **Balance gate (balance_factor × true_trot)** — 대칭은 잡지만 stride 파괴 (V67 실패)
 - merge_fixed_joints=True (contact reporting 불가)
-- URDF 원본 질량 그대로 사용 (5.3kg, 실물의 3.2배)
-- action_scale과 zero-action stability 미검증 상태로 학습 시작
-- reward patch 무한 누적
 - stride/timeout만으로 성공 판정
-- **서기→보행 resume 전환** (정적 균형이 동적 균형으로 전이 안 됨)
+- 서기→보행 resume 전환 (정적→동적 전이 안 됨)
 
 ---
 

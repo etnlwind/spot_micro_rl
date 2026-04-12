@@ -4299,3 +4299,46 @@ POSITIVE TOTAL: ~46  |  NEGATIVE TOTAL: ~-26  |  NET: ~+20
 3. **시간축 교대(alternation)가 trot의 본질** — 순간 상관이 아닌 반 사이클 역할 전환
 4. **Penalty 미세조정은 한계** — 같은 basin에서 weight 조정만으론 구조적 편향 못 깸
 5. **진단 먼저, 수정 나중** — URDF 대칭 검증 + Tensorboard per-leg 분석이 근본 원인 발견의 핵심
+
+---
+
+# Appendix J: V64~V68 (Mirror → Curriculum → Phase Random → Balance Gate → Reference Tracking)
+
+## V64: Mirror Symmetry Augmentation (실패)
+- Isaac Lab 내장 `RslRlSymmetryCfg` 활용
+- 구현 버그 2개: augmented data 반환 형식 + leg_lr_symmetry 제거
+- **근본 원인**: mirror data augmentation이 phase_clock과 충돌 (phantom 데이터)
+- 교훈: PPO update-level soft constraint로는 per-step reward gradient를 대체 못 함
+
+## V65: Curriculum Trot (실패)
+- true_trot → alternation 전환 curriculum
+- **실패 원인**: 부팅 전에 curriculum 개입 → 서기 실패
+- V65.2: 조건부 gate + V63.I 부팅 조건 복원 → 부분 성공 (대각 130→84%p 축소)
+- **한계**: 이미 형성된 frozen diagonal basin을 curriculum ramp-down으로 탈출 불가
+
+## V66: Phase Randomization (부분 성공)
+- per-env random phase offset (continuous 0~2π)
+- iter 0~2000: 대칭 2~6%p (역대 최고)
+- **iter 2500+**: true_trot이 exploit 재발견 → 15%p 급증
+- V66 binary(0/π): double-step 부자연스러움
+- V66.1 continuous(0~2π): 자연스러움 개선, 하지만 후반 편향 재발 동일
+- 교훈: phase randomization은 "출발점 편향" 해결, "목적지 편향"(reward landscape) 미해결
+
+## V67: Balance-Gated True Trot (부분 성공)
+- `balanced_true_trot = intra × inter × balance_factor`
+- balance_factor: EMA decay 0.95, 4발 균등도 → frozen diagonal reward ≈ 0
+- **대칭 1~2%p** 달성 (역대 최고)
+- **stride 2.23** (V63.I의 51%) — balance gate가 보행 품질도 억제
+- GUI: 앞다리 오른쪽 drift, RL 후방 slip
+- 교훈: contact 대칭 ≠ 보행 품질 대칭
+
+## V68: Reference Trajectory Tracking (성공!)
+- V63.I 실제 policy rollout 녹화 → 대칭화 (89.9% 비대칭 감소)
+- `reference_trot_tracking_reward` (주연 w=10): 대칭화된 궤적 추적
+- Phase randomization 병행
+- **iter 2500**: 대칭 1.5%p + stride 4.40 + timeout 100% + GUI "보행 좋아 보인다"
+- V63.I의 추진력 + 대칭 동시 달성
+
+### 최종 교훈
+> "RL이 발견하게 하자" → exploit whack-a-mole
+> "이상적 trot을 정의하고 따라가게 하자" → **성공**
