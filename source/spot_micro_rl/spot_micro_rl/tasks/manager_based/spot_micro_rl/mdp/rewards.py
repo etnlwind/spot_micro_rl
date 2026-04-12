@@ -4388,6 +4388,83 @@ def balanced_true_trot_pattern_reward(
     return reward
 
 
+def reference_trot_tracking_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    frequency: float = 2.0,
+    sigma: float = 1.5,
+    ref_path: str = "logs/ideal_trot_reference.json",
+) -> torch.Tensor:
+    """V68: Reference trajectory tracking reward.
+
+    V63.I 실제 보행 궤적에서 추출 + 대칭화된 reference joint trajectory를 추적.
+    Open-loop IK와 달리 RL이 학습한 실제 추진 궤적을 기반으로 함.
+
+    수식:
+        phase = (t * frequency) % 1.0  (+ per-env offset if V66+)
+        ref_joints = interpolate(reference, phase)
+        err = sum(|actual_joint - ref_joint|)
+        reward = exp(-err / sigma)
+
+    Reference: logs/ideal_trot_reference.json (대칭화된 25-step cycle)
+    """
+    robot = env.scene[asset_cfg.name]
+
+    # Lazy load reference
+    if not hasattr(env, "_v68_ref_loaded"):
+        import json
+        import os
+        ref_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))),
+            ref_path)
+        if not os.path.exists(ref_file):
+            # Try project root
+            ref_file = os.path.join(os.getcwd(), ref_path)
+        with open(ref_file) as f:
+            ref_data = json.load(f)
+        # (cycle_steps, 12) tensor
+        ref_jp = torch.tensor(ref_data['phase_normalized_joint_pos'],
+                              device=robot.data.joint_pos.device, dtype=torch.float32)
+        env._v68_ref_jp = ref_jp
+        env._v68_ref_cycle = ref_jp.shape[0]
+        env._v68_ref_loaded = True
+
+    # Current phase (with V66+ offset if available)
+    t = env.episode_length_buf.float() * env.step_dt
+    base_phase = frequency * t  # cycles
+    if getattr(env, "_v66_phase_random_enabled", False):
+        from . import rewards as _self_mod
+        offset = _self_mod._get_phase_offset(env)
+        base_phase = base_phase + offset / (2.0 * math.pi)  # convert rad offset to cycle offset
+
+    phase_frac = base_phase % 1.0  # 0~1 within cycle
+    phase_idx = phase_frac * env._v68_ref_cycle  # continuous index
+
+    # Interpolate reference (linear between two nearest samples)
+    idx_low = phase_idx.long() % env._v68_ref_cycle
+    idx_high = (idx_low + 1) % env._v68_ref_cycle
+    frac = (phase_idx % 1.0).unsqueeze(-1)  # (N, 1)
+
+    ref_low = env._v68_ref_jp[idx_low]   # (N, 12)
+    ref_high = env._v68_ref_jp[idx_high]  # (N, 12)
+    ref_target = ref_low + frac * (ref_high - ref_low)  # (N, 12)
+
+    # Actual joints
+    actual = robot.data.joint_pos  # (N, 12)
+
+    # L1 error
+    err = (actual - ref_target).abs().sum(dim=-1)  # (N,)
+    reward = torch.exp(-err / sigma)
+
+    if hasattr(env, "extras"):
+        with torch.no_grad():
+            env.extras["log_ref_tracking"] = reward.mean().item()
+            env.extras["log_ref_err"] = err.mean().item()
+            env.extras["log_ref_err_per_joint"] = (actual - ref_target).abs().mean(dim=0).mean().item()
+
+    return reward
+
+
 def intra_pair_sync_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),

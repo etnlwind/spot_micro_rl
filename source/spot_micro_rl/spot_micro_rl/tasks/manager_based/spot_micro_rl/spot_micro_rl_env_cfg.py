@@ -4,7 +4,7 @@
 """SpotMicro Environment Configuration (Flat + Rough)"""
 
 # ── 훈련 버전 (Telegram/로그에 자동 표시, 코드 변경 시 여기만 수정) ──
-TRAIN_VERSION = "V67.1"
+TRAIN_VERSION = "V68"
 
 # ── 기능 플래그 ──
 # 새 버전: TRAIN_VERSION만 변경. 구조가 완전히 바뀔 때만 플래그 False.
@@ -44,8 +44,9 @@ _IS_V64 = TRAIN_VERSION.startswith("V64")
 _IS_V65 = TRAIN_VERSION.startswith("V65")
 _IS_V66 = TRAIN_VERSION.startswith("V66")
 _IS_V67 = TRAIN_VERSION.startswith("V67")
-# V64/V65/V66/V67는 V63.I 구조 위에 구축
-if _IS_V64 or _IS_V65 or _IS_V66 or _IS_V67:
+_IS_V68 = TRAIN_VERSION.startswith("V68")
+# V64~V68는 V63.I 구조 위에 구축
+if _IS_V64 or _IS_V65 or _IS_V66 or _IS_V67 or _IS_V68:
     _IS_V63I = True
 # V63.J는 V63.I 구조를 물려받음 (per_leg_contact_min 0.40, stance_ratio_balance)
 if _IS_V63J:
@@ -54,7 +55,7 @@ if _IS_V63J:
 if _IS_V63I or _IS_V63J:
     _IS_V63H = True
 # V63.B/C/D/E/F/G/H/I/J + V64 모두 V62 reward 구조를 베이스로 사용.
-if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J or _IS_V64 or _IS_V65 or _IS_V66 or _IS_V67:
+if _IS_V63B or _IS_V63C or _IS_V63D or _IS_V63E or _IS_V63F or _IS_V63G or _IS_V63H or _IS_V63I or _IS_V63J or _IS_V64 or _IS_V65 or _IS_V66 or _IS_V67 or _IS_V68:
     _IS_V62 = True
 _V59_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V59 and "." in TRAIN_VERSION else ("A" if _IS_V59 else "")
 _V60_TRACK = TRAIN_VERSION.split(".", 1)[1] if _IS_V60 and "." in TRAIN_VERSION else ("A" if _IS_V60 else "")
@@ -6237,6 +6238,65 @@ class SpotMicroFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
                     # P3: anti_pace 강화
                     self.rewards.anti_pace.weight = -4.0  # V67 -3 → V67.1 -4
+
+            # ══════════════════════════════════════════════════════════
+            # V68: Reference Trajectory Tracking
+            # ══════════════════════════════════════════════════════════
+            # V63~V67 교훈:
+            #   - "RL이 발견하게 하자" → exploit whack-a-mole (실패)
+            #   - "이상적 trot을 정의하고 따라가게 하자" (새 방향)
+            #
+            # V63.I의 실제 보행 궤적에서 추출 + 대칭화:
+            #   - logs/ideal_trot_reference.json (25 steps/cycle, 2Hz)
+            #   - L/R 비대칭 89.9% 감소
+            #
+            # Reward 구조:
+            #   - 주연: reference_trot_tracking (대칭화된 실제 궤적 추적)
+            #   - 보조: velocity_tracking, alive, orientation
+            #   - Phase randomization: V66.1 유지 (초기 대칭)
+            #   - 기존 exploit-방지 reward: 제거 또는 최소화
+            # ══════════════════════════════════════════════════════════
+            if _IS_V68:
+                # 이전 버전 잔여물 정리
+                for attr_name in [
+                    "alternation_trot",
+                    "per_leg_role_variance",
+                    "diagonal_pair_balance",
+                    "per_leg_contact_exp",
+                    "stance_slip",
+                    "lateral_vel",
+                ]:
+                    if hasattr(self.rewards, attr_name):
+                        setattr(self.rewards, attr_name, None)
+
+                # V65 curriculum 제거
+                self.curriculum.reward_weights = None
+
+                # 주연: reference trajectory tracking
+                self.rewards.ref_tracking = RewTerm(
+                    func=custom_mdp.reference_trot_tracking_reward,
+                    weight=10.0,  # 가장 강한 주연 reward
+                    params={
+                        "asset_cfg": SceneEntityCfg("robot"),
+                        "frequency": 2.0,
+                        "sigma": 1.5,
+                        "ref_path": "logs/ideal_trot_reference.json",
+                    },
+                )
+
+                # true_trot_pattern: 약한 보조 (reference가 주연)
+                self.rewards.true_trot_pattern.weight = 2.0
+
+                # 기존 V63.I 보조 reward 유지 (약화)
+                # swing_body_forward, effective_stride, clearance_lift: 유지
+                # per_leg_contact_min: -8.0 유지
+                # shoulder_neutral: -4.0 유지
+                # leg_lr_symmetry: -2.0 유지
+
+                # 안정성 penalty 유지
+                # action_rate_l2: -0.10 유지
+                # anti_pace: -3.0 (V67.1 -4 → 원래)
+                self.rewards.anti_pace.weight = -3.0
 
 
 # SpotMicro Flat Play (계단 지형 포함, height scanner 없음)
